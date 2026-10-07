@@ -17,3 +17,4 @@ __pycache__/
 tools/test/build/
 tools/test/build-asan/
 tools/test/build-stackcheck/
+push.py

@@ -12,7 +12,7 @@
 #define DISPLAY_DRIVER   DISPLAY_ST7789       // ST7789T3
 #define DISPLAY_WIDTH    240                  // Ширина в портретной ориентации
 #define DISPLAY_HEIGHT   320                  // Высота в портретной ориентации
-#define DISPLAY_ROTATION 0                    // 0 = портрет (240x320)
+#define DISPLAY_ROTATION 1                    // 0 = портрет (240x320)
 #define DISPLAY_IPS      1                    // Панель IPS
 #define DISPLAY_SPI_HZ   40000000UL           // 40 МГц (подтверждено рабочими проектами)
 
