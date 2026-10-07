@@ -185,7 +185,7 @@ Ranges:
 | :--- | :--- | :--- |
 | F00B | `LV_SYMBOL_LIST` | main menu "Кошельки" |
 | F00C | `LV_SYMBOL_OK` | keyboard accept cap |
-| F00D | `LV_SYMBOL_CLOSE` | keyboard `[✕]` |
+| F00D | `LV_SYMBOL_CLOSE` | (unused by the keyboard) |
 | F011 | `LV_SYMBOL_POWER` | autolock row, "no battery gauge" |
 | F013 | `LV_SYMBOL_SETTINGS` | main menu |
 | F019 | `LV_SYMBOL_DOWNLOAD` | "Импортировать кошелёк" |
@@ -673,7 +673,9 @@ Down walk every focusable item in reading order with wrap-around — `[<]`,
 
 In seed-word input every move skips letters that cannot continue a word.
 
-The header of every input is `[<]  caption  [x]  [OK]` with icon buttons and a
+The header of every input is `[ < ]  caption  [ OK ]`: two wide icon buttons
+(2 x 4/3 `bar_h` each, at most a third of the row; there is no Clear key -
+the backspace cap deletes) and a
 lower row (`bar_h`, theme.cpp) than menu rows, which leaves the key grid more
 room.
 

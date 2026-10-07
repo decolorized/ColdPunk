@@ -227,9 +227,6 @@ static void kb_close_cb(lv_event_t* e) {
     if (st->ctx.allow_back) mw_kb_finish(st, MW_KB_R_BACK);
     else                    mw_kb_finish(st, MW_KB_R_CANCEL);
 }
-static void kb_clear_cb(lv_event_t* e) {
-    mw_kb_clear_prefix((mw_kb_state_t*)lv_event_get_user_data(e));
-}
 static void kb_cand_cb(lv_event_t* e) {
     lv_obj_t* btn = MW_EVT_OBJ(e);
     mw_kb_state_t* st = (mw_kb_state_t*)lv_event_get_user_data(e);
@@ -381,7 +378,7 @@ static lv_obj_t* head_button(mw_kb_state_t* st, lv_obj_t* parent, const char* te
     return b;
 }
 
-// Header row [Back] [caption / word counter] [Clear], the typed-text line on
+// Header row [Back] [caption / word counter] [OK], the typed-text line on
 // its own full-width row, then the candidate grid in dictionary modes. There
 // is no footer: Done is the accept / enter key cap.
 void mw_kb_build_frame(mw_kb_state_t* st) {
@@ -402,8 +399,16 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
     // only way to step one level up when the physical Back key is missing or
     // remapped by the host, and it is part of the navigation grid on every
     // layout (Up from the top row focuses it).
-    // Icons, not words: [<] and [OK] stay small on every panel.
-    const lv_coord_t icon_w = (lv_coord_t)(m->bar_h + m->bar_h / 3);
+    // Icons, not words. [<] and [OK] are wide targets (twice the old 4/3
+    // bar_h), but never so wide that the caption between them gets less
+    // than a third of the row.
+    lv_coord_t icon_w = (lv_coord_t)(2 * (m->bar_h + m->bar_h / 3));
+    {
+        const lv_coord_t row_w = (lv_coord_t)(m->w - 2 * m->pad);
+        const lv_coord_t cap   = (lv_coord_t)((row_w - 2 * m->gap) / 3);
+        if (icon_w > cap) icon_w = cap;
+        if (icon_w < m->bar_h) icon_w = m->bar_h;
+    }
     st->btn_back = head_button(st, head, LV_SYMBOL_LEFT, icon_w, kb_close_cb);
 
     st->lbl_word = lv_label_create(head);
@@ -419,8 +424,7 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
     lv_obj_set_style_text_align(st->lbl_word, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_label_set_text(st->lbl_word, "");
 
-    // Clear the typed text (touch panels; button boards hold Back instead).
-    if (m->touch) head_button(st, head, LV_SYMBOL_CLOSE, m->bar_h, kb_clear_cb);
+    // No [Clear] key: the backspace key cap deletes, long Back cancels.
 
     // [OK]: finish the input (free text) or take the first candidate (seed
     // words), same as the accept / enter key cap.
