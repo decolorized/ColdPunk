@@ -314,6 +314,12 @@ void mw_ki_cache_rekey(uint32_t wallet_id, const uint8_t old_key[32],
                 ok = true;
             }
         }
+        if (!ok && file && plain && got == size && size > KI_SEAL_HDR &&
+            mw_secure_user_key_set(new_key) == MW_OK &&
+            mw_unseal(label, file + KI_SEAL_HDR, size - KI_SEAL_HDR, file, file + 16,
+                      plain, size - KI_SEAL_HDR) == MW_OK) {
+            ok = true;                     // already under new_key (resumed re-key)
+        }
         if (!ok) (void)mw_fstore_remove(name);
         ki_free(file, size);
         ki_free(plain, size);

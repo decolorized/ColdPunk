@@ -5,6 +5,7 @@
 
 #include "test_framework.h"
 
+#include "crypto/hash.h"
 #include "crypto/memzero.h"
 #include "crypto/random.h"
 #include "monero/address.h"
@@ -23,8 +24,10 @@ void mw_settings_test_set_display(int has_touch, int width, int height);
 void mw_host_advance_ms(uint32_t ms);
 void mw_host_store_fail_writes(const char* key, int n);
 void mw_host_store_fail_reads(const char* key, int n);
+void mw_host_store_fail_writes_after(const char* key, int skip, int n);
 mw_err_t mw_store_blob_write(const char* key, const void* data, size_t len);
 mw_err_t mw_store_blob_read(const char* key, void* out, size_t cap, size_t* len_out);
+mw_err_t mw_store_blob_erase(const char* key);
 
 #define STORE_DIR "./.mw_test_devauth_store"
 
@@ -36,6 +39,7 @@ static void fresh(void)
     mw_secure_user_key_clear();
     CHECK_EQ_INT(mw_secure_key_provision(), MW_OK);
     CHECK_EQ_INT(mw_device_auth_erase(), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);     // drop the cached directory
     CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
 }
 
@@ -201,9 +205,10 @@ MW_TEST(test_erase_and_reset)
 // The counter byte as storage holds it; -1 when there is no record.
 static int stored_fails(void)
 {
-    uint8_t b[64];
+    uint8_t b[MW_DEVICE_AUTH_REC_LEN];
     size_t  len = 0;
-    if (mw_store_blob_read("devauth", b, sizeof b, &len) != MW_OK || len != 58) return -1;
+    if (mw_store_blob_read("devauth", b, sizeof b, &len) != MW_OK ||
+        len != MW_DEVICE_AUTH_REC_LEN) return -1;
     return b[57];
 }
 
@@ -258,8 +263,9 @@ MW_TEST(test_reset_write_failure_retried)
     CHECK_EQ_INT(mw_device_auth_verify("wrong-1"), MW_ERR_DECRYPT);
     CHECK_EQ_INT(mw_device_auth_verify("wrong-2"), MW_ERR_DECRYPT);
 
-    // The reset write fails: the unlock still succeeds, the write is pending.
-    mw_host_store_fail_writes("devauth", 1);
+    // The attempt write and the reset write fail: the unlock still succeeds,
+    // the write is pending.
+    mw_host_store_fail_writes("devauth", 2);
     CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);
     CHECK(mw_secure_user_key_present());
     CHECK_EQ_INT(mw_device_auth_failed_attempts(), 0);
@@ -286,9 +292,9 @@ MW_TEST(test_stale_storage_healed)
     CHECK_EQ_INT(mw_device_auth_verify("wrong-1"), MW_ERR_DECRYPT);
     CHECK_EQ_INT(mw_device_auth_verify("wrong-2"), MW_ERR_DECRYPT);
 
-    // Three failed writes: the reset, then the retry at the top of the next
-    // verify() and that verify's own reset.
-    mw_host_store_fail_writes("devauth", 3);
+    // Five failed writes: attempt + reset of the first verify(), then the
+    // retry at the top of the next one and its attempt + reset.
+    mw_host_store_fail_writes("devauth", 5);
     CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);
     CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);   // both fail again
     CHECK_EQ_INT(stored_fails(), 2);
@@ -302,7 +308,7 @@ MW_TEST(test_stale_storage_healed)
     // Storage changed behind the RAM copy (RAM 0, storage 2): a success
     // still rewrites it because the guard reads storage.
     {
-        uint8_t b[64];
+        uint8_t b[MW_DEVICE_AUTH_REC_LEN];
         size_t  len = 0;
         CHECK_EQ_INT(mw_store_blob_read("devauth", b, sizeof b, &len), MW_OK);
         b[57] = 2;
@@ -411,7 +417,7 @@ MW_TEST(test_unreadable_storage_does_not_block_unlock)
     CHECK_EQ_INT(mw_device_auth_verify("wrong-1"), MW_ERR_DECRYPT);
     CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);   // RAM 0, stored 0
     {
-        uint8_t b[64];
+        uint8_t b[MW_DEVICE_AUTH_REC_LEN];
         size_t  len = 0;
         CHECK_EQ_INT(mw_store_blob_read("devauth", b, sizeof b, &len), MW_OK);
         b[57] = 2;                                  // storage behind RAM's back
@@ -422,8 +428,239 @@ MW_TEST(test_unreadable_storage_does_not_block_unlock)
     // and the reset is written anyway.
     mw_host_store_fail_reads("devauth", 1);
     CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);
-    CHECK_EQ_INT(stored_fails(), 0);
     mw_host_store_fail_reads("devauth", 0);
+    CHECK_EQ_INT(stored_fails(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Audit round 1: atomic change, verifier bound to the chip, counter before
+// the check, damaged / missing record, upgrade of old records.
+// ---------------------------------------------------------------------------
+static int read_blob(const char* key, uint8_t* b, size_t cap)
+{
+    size_t len = 0;
+    if (mw_store_blob_read(key, b, cap, &len) != MW_OK) return -1;
+    return (int)len;
+}
+
+// Creates one wallet and returns its spend key (to compare after a reboot).
+static uint32_t make_wallet(mw_seckey_t* spend_out)
+{
+    uint8_t seed[32];
+    uint32_t id = 0;
+    mw_account_keys_t k;
+    memset(seed, 0x77, sizeof seed);
+    CHECK_EQ_INT(mw_wallet_create("W", MW_SEED_MONERO_LEGACY, seed, 32, 0, &id), MW_OK);
+    memset(&k, 0, sizeof k);
+    CHECK_EQ_INT(mw_wallet_load_keys(id, "", &k), MW_OK);
+    *spend_out = k.sec.spend;
+    mw_memzero(&k, sizeof k);
+    return id;
+}
+
+// A power cut: RAM is lost, nothing pending gets written (forget() would
+// flush a pending record write, which a cut does not).
+static void reboot(void)
+{
+    mw_secure_user_key_clear();
+    CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
+    (void)mw_device_auth_init();
+}
+
+static void expect_wallet(uint32_t id, const mw_seckey_t* spend)
+{
+    mw_account_keys_t k;
+    memset(&k, 0, sizeof k);
+    CHECK_EQ_INT(mw_wallet_load_keys(id, "", &k), MW_OK);
+    CHECK_EQ_MEM(k.sec.spend.b, spend->b, 32);
+    mw_memzero(&k, sizeof k);
+}
+
+// Power lost after the wallets were re-keyed but before the final record
+// write: either password completes the change.
+MW_TEST(test_change_interrupted_after_rekey)
+{
+    static uint8_t rec[MW_DEVICE_AUTH_REC_LEN];
+    mw_seckey_t spend;
+    for (int which = 0; which < 2; ++which) {
+        fresh();
+        CHECK_EQ_INT(mw_device_auth_set("old-pass"), MW_OK);
+        const uint32_t id = make_wallet(&spend);
+
+        // devauth writes inside change(): attempt, reset (both from the
+        // verify of the old password), pending record, final record. Let
+        // three through and lose the final one.
+        mw_host_store_fail_writes_after("devauth", 3, 1);
+        CHECK_EQ_INT(mw_device_auth_change("old-pass", "new-pass"), MW_OK);
+        CHECK(read_blob("devauth", rec, sizeof rec) == MW_DEVICE_AUTH_REC_LEN);
+        CHECK(rec[58] & 0x02);                         // still "changing" in storage
+
+        reboot();
+        CHECK_EQ_INT(mw_device_auth_state(), MW_AUTH_SET);
+        CHECK_EQ_INT(mw_device_auth_verify(which ? "new-pass" : "old-pass"), MW_OK);
+        expect_wallet(id, &spend);
+        CHECK(read_blob("devauth", rec, sizeof rec) == MW_DEVICE_AUTH_REC_LEN);
+        CHECK(!(rec[58] & 0x02));                      // change completed
+
+        // From now on only the new password works.
+        reboot();
+        CHECK_EQ_INT(mw_device_auth_verify("old-pass"), MW_ERR_DECRYPT);
+        CHECK_EQ_INT(mw_device_auth_verify("new-pass"), MW_OK);
+        expect_wallet(id, &spend);
+    }
+}
+
+// Power lost after the pending record was written but before the wallet
+// directory was re-sealed (it is still under the old key).
+MW_TEST(test_change_interrupted_before_rekey)
+{
+    static uint8_t wallets_old[16384];
+    mw_seckey_t spend;
+    for (int which = 0; which < 2; ++which) {
+        fresh();
+        CHECK_EQ_INT(mw_device_auth_set("old-pass"), MW_OK);
+        const uint32_t id = make_wallet(&spend);
+        const int wl = read_blob("wallets", wallets_old, sizeof wallets_old);
+        CHECK(wl > 0);
+
+        mw_host_store_fail_writes_after("devauth", 3, 1);   // final write lost
+        CHECK_EQ_INT(mw_device_auth_change("old-pass", "new-pass"), MW_OK);
+        // ... and the re-sealed directory never reached storage either.
+        CHECK_EQ_INT(mw_store_blob_write("wallets", wallets_old, (size_t)wl), MW_OK);
+
+        reboot();
+        CHECK_EQ_INT(mw_device_auth_verify(which ? "new-pass" : "old-pass"), MW_OK);
+        expect_wallet(id, &spend);
+        reboot();
+        CHECK_EQ_INT(mw_device_auth_verify("new-pass"), MW_OK);
+        expect_wallet(id, &spend);
+    }
+}
+
+// The verifier and the key depend on the eFuse key: the same record under a
+// different chip key does not accept the right password.
+MW_TEST(test_verifier_bound_to_chip)
+{
+    uint8_t other[32];
+    fresh();
+    CHECK_EQ_INT(mw_device_auth_set("chip-pass"), MW_OK);
+    mw_device_auth_forget();
+    CHECK_EQ_INT(mw_device_auth_verify("chip-pass"), MW_OK);
+    mw_device_auth_forget();
+
+    memset(other, 0x5c, sizeof other);
+    CHECK_EQ_INT(mw_store_blob_write("efuse_hmac_key0.bin", other, sizeof other), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_verify("chip-pass"), MW_ERR_DECRYPT);
+}
+
+// The attempt is in storage before the check finishes: the counter written
+// by verify() already holds the attempt when the derivation runs. Seen from
+// outside: a wrong password whose LAST write fails still left the raised
+// counter in storage (the raise is the first write).
+MW_TEST(test_attempt_counted_before_check)
+{
+    fresh();
+    CHECK_EQ_INT(mw_device_auth_set("right-pw"), MW_OK);
+    mw_device_auth_forget();
+    CHECK_EQ_INT(mw_device_auth_verify("wrong-1"), MW_ERR_DECRYPT);
+    CHECK_EQ_INT(stored_fails(), 1);
+    // A correct password: raised (2) then cleared (0). Fail the clear: the
+    // raised value is what a power cut at that moment leaves behind.
+    mw_host_store_fail_writes_after("devauth", 1, 1);
+    CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);
+    CHECK_EQ_INT(stored_fails(), 2);
+}
+
+MW_TEST(test_damaged_record_not_overwritten)
+{
+    mw_seckey_t spend;
+    fresh();
+    CHECK_EQ_INT(mw_device_auth_set("keep-me"), MW_OK);
+    (void)make_wallet(&spend);
+
+    // Garbage record.
+    const uint8_t junk[20] = { 'M', 'W', 'D', 'X' };
+    CHECK_EQ_INT(mw_store_blob_write("devauth", junk, sizeof junk), MW_OK);
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_state(), MW_AUTH_CORRUPT);
+    CHECK(mw_device_auth_is_set());
+    CHECK(mw_device_auth_set("new-one") != MW_OK);
+
+    // Record gone altogether, wallets still there.
+    CHECK_EQ_INT(mw_store_blob_erase("devauth"), MW_OK);
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_state(), MW_AUTH_CORRUPT);
+    CHECK(mw_device_auth_is_set());
+    CHECK_EQ_INT(mw_device_auth_set("new-one"), MW_ERR_FORMAT);
+    CHECK(read_blob("devauth", (uint8_t[8]){0}, 8) < 0);   // nothing written
+}
+
+// A version-1 record (20000 rounds, no chip binding) still unlocks and is
+// upgraded on the way; the wallets follow.
+MW_TEST(test_v1_record_upgraded)
+{
+    static const char tag[] = "mw.device.pw.v1";
+    static const char vtag[] = "mw.device.verify";
+    uint8_t salt[16 + sizeof tag - 1], out[64], key[32], rec[58], buf[MW_DEVICE_AUTH_REC_LEN];
+    mw_seckey_t spend;
+
+    fresh();
+    memset(salt, 0x11, 16);
+    memcpy(salt + 16, tag, sizeof tag - 1);
+    mw_pbkdf2_sha512((const uint8_t*)"legacy-pw", 9, salt, sizeof salt, 20000, out, 64);
+    memcpy(key, out, 32);
+    memset(rec, 0, sizeof rec);
+    rec[0] = 'M'; rec[1] = 'W'; rec[2] = 'D'; rec[3] = 'A'; rec[4] = 1;
+    rec[5] = 0x20; rec[6] = 0x4E;                         // 20000
+    memset(rec + 9, 0x11, 16);
+    mw_hmac_sha256(out + 32, 32, (const uint8_t*)vtag, sizeof vtag - 1, rec + 25);
+    CHECK_EQ_INT(mw_store_blob_write("devauth", rec, sizeof rec), MW_OK);
+    // A wallet sealed under the version-1 key.
+    CHECK_EQ_INT(mw_secure_user_key_set(key), MW_OK);
+    const uint32_t id = make_wallet(&spend);
+
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_state(), MW_AUTH_SET);
+    CHECK_EQ_INT(mw_device_auth_verify("wrong"), MW_ERR_DECRYPT);
+    CHECK_EQ_INT(mw_device_auth_verify("legacy-pw"), MW_OK);
+    expect_wallet(id, &spend);
+    CHECK_EQ_INT(read_blob("devauth", buf, sizeof buf), MW_DEVICE_AUTH_REC_LEN);
+    CHECK_EQ_INT(buf[4], 2);
+    CHECK_EQ_INT(buf[5] | (buf[6] << 8) | (buf[7] << 16), MW_DEVICE_PW_ROUNDS);
+    CHECK(buf[58] & 0x01);                                   // bound to the chip now
+
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_verify("legacy-pw"), MW_OK);
+    expect_wallet(id, &spend);
+    mw_memzero(key, sizeof key);
+    mw_memzero(out, sizeof out);
+}
+
+// A password set before the eFuse key was provisioned is bound to the chip
+// at the first unlock after provisioning.
+MW_TEST(test_unbound_record_bound_after_provisioning)
+{
+    uint8_t buf[MW_DEVICE_AUTH_REC_LEN];
+    mw_host_store_set_dir(STORE_DIR);
+    mw_host_store_reset();
+    mw_secure_user_key_clear();
+    CHECK_EQ_INT(mw_device_auth_erase(), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
+    CHECK(mw_secure_key_status() != MW_OK);
+
+    CHECK_EQ_INT(mw_device_auth_set("early-pw"), MW_OK);
+    CHECK_EQ_INT(read_blob("devauth", buf, sizeof buf), MW_DEVICE_AUTH_REC_LEN);
+    CHECK(!(buf[58] & 0x01));
+
+    CHECK_EQ_INT(mw_secure_key_provision(), MW_OK);
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_verify("early-pw"), MW_OK);
+    CHECK_EQ_INT(read_blob("devauth", buf, sizeof buf), MW_DEVICE_AUTH_REC_LEN);
+    CHECK(buf[58] & 0x01);
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_verify("early-pw"), MW_OK);
 }
 
 int main(void)
@@ -445,6 +682,13 @@ int main(void)
     RUN_TEST(test_change_rekey_error_not_wrong_password);
     RUN_TEST(test_erase_clears_pending);
     RUN_TEST(test_unreadable_storage_does_not_block_unlock);
+    RUN_TEST(test_change_interrupted_after_rekey);
+    RUN_TEST(test_change_interrupted_before_rekey);
+    RUN_TEST(test_verifier_bound_to_chip);
+    RUN_TEST(test_attempt_counted_before_check);
+    RUN_TEST(test_damaged_record_not_overwritten);
+    RUN_TEST(test_v1_record_upgraded);
+    RUN_TEST(test_unbound_record_bound_after_provisioning);
 
     mw_secure_user_key_clear();
     mw_host_store_reset();

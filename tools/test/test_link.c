@@ -1024,7 +1024,7 @@ MW_TEST(test_hid_rx_continuation_with_full_magic) {
 // After a lost report the receiver resynchronises on the next valid start.
 MW_TEST(test_hid_rx_resync_on_magic) {
     static uint8_t rxbuf[MW_LINK_MAX_MSG];
-    uint8_t a[400], b[100], pl[380];
+    uint8_t a[400 + MW_LINK_OVERHEAD], b[100], pl[380];
     size_t na = 0, nb = 0, used = 0;
     fill_pattern(pl, sizeof pl, 23);
     CHECK_EQ_INT(mw_link_msg_build(MW_LINK_CMD_PUT, 0, pl, sizeof pl, a, sizeof a, &na), MW_OK);

@@ -43,6 +43,16 @@ mw_err_t mw_secure_key_status(void);
 // HMAC_UP and read-protects it. IRREVERSIBLE (TZ 8.1).
 mw_err_t mw_secure_key_provision(void);
 
+// Raw HMAC of `msg` under the eFuse key (device) / the emulated root key
+// (host), for binding the device-password derivation to the chip
+// (device_auth.c): an offline guess then needs the chip for every attempt.
+//   *bound = true   the result really comes from the eFuse key
+//   *bound = false  the key is not provisioned and the build allows the
+//                   bring-up fallback: HMAC-SHA256 under a PUBLIC constant,
+//                   i.e. no binding at all (security.md §4)
+// MW_ERR_NOT_SUPPORTED when neither is available.
+mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t out[32], bool* bound);
+
 // ---------------- user password key (task2 item 1) --------------------------
 // Every sealed blob is encrypted under a key that mixes the eFuse HMAC output
 // with a key derived from the device password (device_auth.h). Without the

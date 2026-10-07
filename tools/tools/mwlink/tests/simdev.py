@@ -20,6 +20,9 @@ import threading
 import time
 import types
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import mwlink  # noqa: E402
+
 SIM = {"exe": None}
 
 
@@ -245,7 +248,7 @@ class HidBridge:
                     self.push_msg(cobs_decode(frame))
 
     def host_write(self, rep63):
-        if rep63[:5] == b"?##MW":
+        if mwlink.hid_is_start(rep63):
             self.rxbuf = bytearray(rep63[3:])
             self.expect = None
             self.in_frame = True
@@ -253,9 +256,12 @@ class HidBridge:
             self.rxbuf += rep63[1:]
         else:
             return
-        if self.expect is None and len(self.rxbuf) >= 8:
-            (plen,) = struct.unpack("<I", self.rxbuf[4:8])
-            self.expect = 12 + plen
+        if self.expect is None and len(self.rxbuf) >= mwlink.HDR_LEN:
+            self.expect = mwlink.msg_total_len(self.rxbuf)
+            if self.expect is None:
+                self.rxbuf = bytearray()
+                self.in_frame = False
+                return
         if self.expect is not None and len(self.rxbuf) >= self.expect:
             msg = bytes(self.rxbuf[:self.expect])
             self.rxbuf = bytearray()

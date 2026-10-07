@@ -435,6 +435,10 @@ static const char* const X_RU[XSTR_COUNT] = {
                                "(операция %u, этап %u). Подробности\n"
                                "в журнале на ПК.",
     // end v5:crash RU
+
+    // v6 RU
+    [XSTR_PW_CORRUPT] = "Запись пароля устройства повреждена\nили утеряна, а кошельки на месте.\nНовый пароль их не откроет.\nНастройки > Сброс к заводским, затем\nвосстановите кошельки из seed.",
+    // end v6 RU
 };
 
 static const char* const X_EN[XSTR_COUNT] = {
@@ -703,6 +707,10 @@ static const char* const X_EN[XSTR_COUNT] = {
                                "(operation %u, stage %u). Details\n"
                                "are in the PC log.",
     // end v5:crash EN
+
+    // v6 EN
+    [XSTR_PW_CORRUPT] = "The device password record is damaged\nor missing while wallets exist.\nA new password would not open them.\nSettings > Factory reset, then restore\nthe wallets from their seeds.",
+    // end v6 EN
 };
 
 /* ------------------------------------------------------------------ */

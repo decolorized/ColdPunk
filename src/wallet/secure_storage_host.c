@@ -66,6 +66,7 @@ static int g_height    = 0;
 // Fault injection: the next n writes (or reads) of `key` fail with MW_ERR_IO.
 static char g_fail_wkey[32];
 static int  g_fail_wn;
+static int  g_fail_wskip;            // writes of g_fail_wkey let through first
 static char g_fail_rkey[32];
 static int  g_fail_rn;
 
@@ -73,6 +74,15 @@ void mw_host_store_fail_writes(const char* key, int n)
 {
     snprintf(g_fail_wkey, sizeof g_fail_wkey, "%s", key ? key : "");
     g_fail_wn = (key && n > 0) ? n : 0;
+    g_fail_wskip = 0;
+}
+
+// Lets `skip` writes of `key` through, then fails the next `n` (a power cut
+// at a chosen point of a multi-write operation).
+void mw_host_store_fail_writes_after(const char* key, int skip, int n)
+{
+    mw_host_store_fail_writes(key, n);
+    g_fail_wskip = (key && skip > 0) ? skip : 0;
 }
 
 void mw_host_store_fail_reads(const char* key, int n)
@@ -141,7 +151,11 @@ mw_err_t mw_store_blob_write(const char* key, const void* data, size_t len)
     char p[640];
     FILE* f;
     if (!key || (!data && len)) return MW_ERR_INVALID_ARG;
-    if (injected_fail(key, g_fail_wkey, &g_fail_wn)) return MW_ERR_IO;
+    if (g_fail_wskip > 0 && g_fail_wn > 0 && strcmp(key, g_fail_wkey) == 0) {
+        g_fail_wskip--;                      // let this one through
+    } else if (injected_fail(key, g_fail_wkey, &g_fail_wn)) {
+        return MW_ERR_IO;
+    }
     if (ensure_dir() != 0) return MW_ERR_IO;
     path_for(key, p, sizeof p);
     f = fopen(p, "wb");
@@ -235,6 +249,27 @@ void mw_secure_user_key_clear(void)
 bool mw_secure_user_key_present(void)
 {
     return g_user_key_set != 0;
+}
+
+// Mirrors secure_storage.cpp: the emulated root key when "provisioned",
+// otherwise the same public-constant fallback the device uses in bring-up.
+mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t out[32], bool* bound)
+{
+    uint8_t root[32];
+    if ((!msg && len) || !out) return MW_ERR_INVALID_ARG;
+    if (bound) *bound = false;
+    if (read_root_key(root) == MW_OK) {
+        mw_hmac_sha256(root, sizeof root, msg, len, out);
+        mw_memzero(root, sizeof root);
+        if (bound) *bound = true;
+        return MW_OK;
+    }
+    mw_memzero(root, sizeof root);
+    {
+        static const char k_fallback[] = "mw.hw.hmac.fallback (eFuse not provisioned)";
+        mw_hmac_sha256((const uint8_t*)k_fallback, sizeof k_fallback - 1, msg, len, out);
+    }
+    return MW_OK;
 }
 
 // Per-label key derivation.  On the device this is esp_hmac_calculate() with

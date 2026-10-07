@@ -4,7 +4,7 @@
     gcc ... -o link_sim   (see link_sim.c for the command line)
     python test_mwlink.py [path/to/link_sim]
 
-Checks the Feather-style result names, COBS, the protocol-2 commands, the
+Checks the Feather-style result names, COBS, the protocol-3 commands, the
 exchange logic (any file sent, results saved and named after the input,
 refusals reported with the device's reason, folder watch) and requests, the
 INFO reset/crash fields, the HID receiver (frame start, timeouts, messages
@@ -100,7 +100,7 @@ def test_protocol(sim, folder):
     w = mwlink.Wallet(open_sim(sim), lambda lvl, text: logs.append(text))
     try:
         info = w.info()
-        check(info["proto"] == 2 and info["state"] == mwlink.STATE_WALLET, "info state")
+        check(info["proto"] == mwlink.PROTO_VERSION == 3 and info["state"] == mwlink.STATE_WALLET, "info state")
         check(info["wallet"] == "sim" and info["network"] == "stagenet", "info wallet")
         st = w.status()
         check(st["accept"] == 0x05, "status accept mask")
@@ -370,12 +370,37 @@ def hid_transport(dev):
 def test_hid_transport():
     # A continuation whose data starts with "##" is not a new frame.
     payload = bytearray(os.urandom(200))
-    payload[52:54] = b"##"                       # first continuation starts here
+    payload[40:42] = b"##"                       # first continuation starts here (20-byte header)
     msg = mwlink.build_msg(mwlink.EVT_LOG, 2, bytes(payload))
     reps = hid_reports(msg)
     check(reps[1][1:4] == b"?##", "test vector has '?##' continuation")
     t = hid_transport(FakeHidDev(reps))
     check(t.recv(1.0) == msg, "continuation starting with ## kept")
+
+    # Protocol 3: even "##" + the whole 8-byte magic in a continuation is not
+    # a frame start - its header CRC does not match.
+    payload = bytearray(os.urandom(200))
+    payload[40:42] = b"##"
+    payload[42:50] = mwlink.MAGIC
+    payload[50] = mwlink.PROTO_VERSION
+    msg = mwlink.build_msg(mwlink.EVT_LOG, 2, bytes(payload))
+    reps = hid_reports(msg)
+    check(reps[1][1:12] == b"?##" + mwlink.MAGIC, "test vector has '?##'+magic continuation")
+    check(not mwlink.hid_is_start(reps[1][1:]), "continuation with magic is not a start")
+    t = hid_transport(FakeHidDev(reps))
+    check(t.recv(1.0) == msg, "continuation starting with ##+magic kept")
+
+    # Header layout and the old-protocol diagnosis.
+    m = mwlink.build_msg(mwlink.CMD_PING, 5, b"abc")
+    check(m[:8] == mwlink.MAGIC and m[8] == 3 and m[9] == mwlink.CMD_PING and m[10] == 5,
+          "protocol-3 header layout")
+    check(mwlink.parse_msg(m) == (mwlink.CMD_PING, 5, b"abc"), "parse round trip")
+    bad = bytearray(m); bad[10] ^= 1
+    try:
+        mwlink.parse_msg(bytes(bad))
+        check(False, "header crc not checked")
+    except mwlink.LinkError as e:
+        check("header crc" in str(e), "header crc error reported")
 
     # A message split across two reads (pump windows) is not lost.
     msg2 = mwlink.build_msg(mwlink.EVT_LOG, 2, b"x" * 150)

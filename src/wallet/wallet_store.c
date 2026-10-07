@@ -870,6 +870,17 @@ const wallet_entry_t* mw_wallet_get(uint32_t id)
 // task2 item 1: device password change. The 64-byte sealed plaintext is moved
 // from one user key to the other without being interpreted; one persist at
 // the end keeps the change atomic with respect to storage.
+mw_err_t mw_wallet_store_count(uint32_t* count)
+{
+    mw_err_t err;
+    if (!count) return MW_ERR_INVALID_ARG;
+    *count = 0;
+    err = ensure_loaded();
+    if (err != MW_OK) return err;
+    *count = g_store.count;
+    return MW_OK;
+}
+
 mw_err_t mw_wallet_store_rekey(const uint8_t old_key[32], const uint8_t new_key[32])
 {
     uint8_t  plain[MW_SEAL_PLAIN_LEN];
@@ -891,6 +902,18 @@ mw_err_t mw_wallet_store_rekey(const uint8_t old_key[32], const uint8_t new_key[
         if (err != MW_OK) break;
         err = mw_unseal(label, w->encrypted_seed, sizeof w->encrypted_seed,
                         w->seed_iv, w->seed_tag, plain, sizeof plain);
+        if (err == MW_ERR_DECRYPT) {
+            // Resumed re-key (device_auth.c, power lost mid-change): a record
+            // that already opens under the new key is left as it is.
+            if (mw_secure_user_key_set(new_key) == MW_OK &&
+                mw_unseal(label, w->encrypted_seed, sizeof w->encrypted_seed,
+                          w->seed_iv, w->seed_tag, plain, sizeof plain) == MW_OK) {
+                mw_memzero(plain, sizeof plain);
+                err = MW_OK;
+                continue;
+            }
+            err = MW_ERR_DECRYPT;
+        }
         if (err != MW_OK) break;
 
         err = mw_secure_user_key_set(new_key);

@@ -20,6 +20,11 @@
 
 #if defined(MW_BOARD_ES3C28P)
 #  include "boards/es3c28p.h"
+
+#elif defined(MW_BOARD_TOUCH_LCD_2_240x320)
+#  include "boards/esp32s3_touch_lcd_2_240x320.h "
+
+
 #elif defined(MW_BOARD_ST7789_240x320)
 #  include "boards/esp32s3_st7789_240x320.h"
 

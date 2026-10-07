@@ -149,6 +149,10 @@ typedef enum {
     XSTR_LAST_CRASH,
     // end v5:crash
 
+    // v6 (ColdPunk audit fixes; keep inside this block)
+    XSTR_PW_CORRUPT,
+    // end v6
+
     XSTR_COUNT
 } mw_xstr_id_t;
 

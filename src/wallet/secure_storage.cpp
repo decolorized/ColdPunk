@@ -241,6 +241,27 @@ extern "C" bool mw_secure_user_key_present(void)
 // Sealing
 // ---------------------------------------------------------------------------
 
+extern "C" mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t out[32],
+                                     bool* bound)
+{
+    if ((!msg && len) || !out) return MW_ERR_INVALID_ARG;
+    if (bound) *bound = false;
+    if (mw_secure_key_status() == MW_OK) {
+        // esp_hmac_calculate() serialises access to the peripheral itself.
+        if (esp_hmac_calculate(MW_HMAC_KEY_ID, (const void*)msg, len, out) != ESP_OK)
+            return MW_ERR_IO;
+        if (bound) *bound = true;
+        return MW_OK;
+    }
+#if MW_SECURE_ALLOW_FALLBACK
+    static const char k_fallback[] = "mw.hw.hmac.fallback (eFuse not provisioned)";
+    mw_hmac_sha256((const uint8_t*)k_fallback, sizeof k_fallback - 1, msg, len, out);
+    return MW_OK;
+#else
+    return MW_ERR_NOT_SUPPORTED;
+#endif
+}
+
 // Per-label AES key.
 //
 // When the eFuse HMAC key is provisioned this is the real thing: SHA-256

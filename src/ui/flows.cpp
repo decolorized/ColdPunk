@@ -216,6 +216,22 @@ static bool device_auth(void) {
     memset(pw, 0, sizeof(pw));
     memset(again, 0, sizeof(again));
 
+    if (mw_device_auth_state() == MW_AUTH_CORRUPT) {
+        // The record is damaged or lost while wallets exist: a new password
+        // would derive a different key and orphan them. The only way out is
+        // a factory reset (and the seeds on paper), offered right here
+        // because Settings are behind the password.
+        MW_LOGE("auth", "password record damaged: offering a factory reset");
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_CORRUPT));
+        if (mw_ui_confirm_code(T(STR_SETTINGS_RESET), T(STR_RESET_CONFIRM))) {
+            MW_LOGE("auth", "factory reset after a damaged password record");
+            (void)mw_device_auth_erase();
+            (void)mw_fstore_wipe_all();
+            mw_factory_reset();                 // never returns
+        }
+        return false;
+    }
+
     if (!mw_device_auth_is_set()) {
         // First start: a password has to be created before anything else.
         MW_LOGI("auth", "no device password yet: asking the user to set one");

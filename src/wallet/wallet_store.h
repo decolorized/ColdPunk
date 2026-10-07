@@ -119,6 +119,13 @@ const wallet_entry_t* mw_wallet_get(uint32_t id);
 // `new_key` installed on success; on failure nothing is persisted and the
 // in-memory directory is reloaded from storage, so the records stay under
 // `old_key`.
+// Number of wallets in the directory. Needs no password (the directory
+// itself is not sealed); MW_ERR_FORMAT when it cannot be interpreted.
+mw_err_t mw_wallet_store_count(uint32_t* count);
+
+// Re-seals every wallet from old_key to new_key. Idempotent: a record that
+// already opens under new_key is skipped, so a change interrupted by a power
+// loss can simply be run again (device_auth.c).
 mw_err_t mw_wallet_store_rekey(const uint8_t old_key[32], const uint8_t new_key[32]);
 
 #ifdef __cplusplus

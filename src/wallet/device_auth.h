@@ -6,19 +6,23 @@
 // re-flash the firmware still has the eFuse key at their disposal, but not
 // the password, so the sealed records stay opaque.
 //
-// Derivation
-//   pw_key || verify_key = PBKDF2-HMAC-SHA512(password,
-//                              salt16 || "mw.device.pw.v1", MW_DEVICE_PW_ROUNDS)
-//   stored:   salt16, verifier = HMAC-SHA256(verify_key, "mw.device.verify")
-//   in RAM:   pw_key -> mw_secure_user_key_set()
+// Derivation (record version 2, see device_auth.c for the layout)
+//   PBKDF2-HMAC-SHA256 over MW_DEVICE_PW_ROUNDS rounds, split into
+//   MW_DEVICE_PW_HW_STEPS chunks; after every chunk the state goes through
+//   the eFuse HMAC peripheral (mw_secure_hw_hmac). The result gives pw_key
+//   (-> mw_secure_user_key_set) and a verifier. Because the verifier depends
+//   on the eFuse key, a copy of NVS cannot be brute-forced off the chip.
+//   Records of version 1 (20000 rounds, no chip binding) are upgraded at the
+//   first successful unlock, and an unbound record once eFuse is provisioned.
 //
-// The verifier lets the boot screen check the password without touching any
-// wallet record and without keeping anything that would help derive pw_key.
+// Failed attempts: the counter is incremented and stored BEFORE the password
+// is checked and cleared on success, so cutting the power at the right
+// moment does not save an attempt. From the third failure on every further
+// attempt is delayed for 2^(n-2) seconds, capped at 10 minutes, re-armed on
+// boot.
 //
-// Brute force (TZ 3.6 "Задержка после N попыток"): the failed-attempt counter
-// is persisted; from the third failure on every further attempt is delayed
-// for 2^(n-2) seconds, capped at 10 minutes, and the delay is re-armed on
-// boot so a power cycle does not reset it.
+// Changing the password is atomic against a power loss (pending record with
+// both keys wrapped under each other; either password completes it).
 //
 // SPDX-License-Identifier: MIT
 // ============================================================================
@@ -33,20 +37,37 @@ extern "C" {
 
 #define MW_DEVICE_PW_MIN      4
 #define MW_DEVICE_PW_MAX      64
-#define MW_DEVICE_PW_ROUNDS   20000u
+#ifndef MW_DEVICE_PW_ROUNDS
+#define MW_DEVICE_PW_ROUNDS   200000u
+#endif
+#define MW_DEVICE_PW_HW_STEPS 8           // eFuse HMAC passes inside the KDF
+#define MW_DEVICE_AUTH_REC_LEN 175        // record size in storage (version 2)
+
+typedef enum {
+    MW_AUTH_NONE = 0,     // no password record (first start)
+    MW_AUTH_SET,          // a valid record
+    MW_AUTH_CORRUPT       // a record exists but cannot be read, or it is
+                          // missing while wallets exist: never offer to
+                          // create a new password over it
+} mw_device_auth_state_t;
 #define MW_DEVICE_PW_FREE_TRIES  3        // failures before the delay kicks in
 #define MW_DEVICE_PW_MAX_DELAY_MS (10u * 60u * 1000u)
 
 // Loads the stored record (if any) and arms the lockout timer.
 mw_err_t mw_device_auth_init(void);
+mw_device_auth_state_t mw_device_auth_state(void);
+// True for MW_AUTH_SET and MW_AUTH_CORRUPT.
 bool     mw_device_auth_is_set(void);
 
 // First-time setup. Refused (MW_ERR_NOT_SUPPORTED) when a password already
-// exists - use mw_device_auth_change() for that. On success the user key is
+// exists - use mw_device_auth_change() for that - and (MW_ERR_FORMAT) when
+// the record is missing but the wallet directory is not empty. On success the user key is
 // installed for this session.
 mw_err_t mw_device_auth_set(const char* password);
 
 // Checks the password.
+//   The attempt is counted before the check (stored), and given back when
+//   the check fails for a reason other than a wrong password.
 //   MW_OK            correct; user key installed, failure counter reset in
 //                    RAM and storage (a failed reset write is retried at the
 //                    next verify() and at forget(), see _save_pending)
