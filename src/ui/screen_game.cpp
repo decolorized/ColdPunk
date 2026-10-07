@@ -227,6 +227,10 @@ static lv_obj_t* small_button(lv_obj_t* parent, const char* text, lv_event_cb_t 
     lv_label_set_text(l, text);
     lv_obj_center(l);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+    // A tap must not park the focus here: the focus fill looks exactly like
+    // "F is on", and it would vanish on the next board tap while flag mode
+    // stays on. Button boards reach these through the group, not by touch.
+    MW_OBJ_CLEAR_FLAG(b, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     return b;
 }
 
@@ -286,6 +290,14 @@ static lv_obj_t* build_controls(game_t* g, lv_obj_t* body, bool side, lv_obj_t**
     lv_label_set_text_fmt(g->lbl_mines, TX(XSTR_GAME_MINES), 99);   // widest, for layout
     g->btn_flag = small_button(btns, "F", flag_cb);
     lv_obj_add_flag(g->btn_flag, LV_OBJ_FLAG_CHECKABLE);
+    // Flag mode gets its own look (the theme has no CHECKED style): filled
+    // with the focus colours, so it reads as "on" whatever has the focus.
+    {
+        const lv_style_selector_t on = (lv_style_selector_t)LV_PART_MAIN | LV_STATE_CHECKED;
+        lv_obj_set_style_bg_color(g->btn_flag, mw_palette()->focus_bg, on);
+        lv_obj_set_style_bg_opa(g->btn_flag, LV_OPA_COVER, on);
+        lv_obj_set_style_text_color(g->btn_flag, mw_palette()->focus_text, on);
+    }
     *bnew = small_button(btns, LV_SYMBOL_REFRESH, new_cb);
     return ctl;
 }
