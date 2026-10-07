@@ -164,6 +164,7 @@ void mw_host_inject_touch(uint16_t x, uint16_t y, bool pressed)
 
 mw_err_t mw_buttons_init(void)                  { return MW_ERR_NOT_SUPPORTED; }
 uint32_t mw_buttons_read(void)                  { return 0; }
+uint32_t mw_buttons_present(void)               { return 0x7Eu; }  /* all six */
 int32_t  mw_encoder_read(void)                  { return 0; }
 void     mw_buttons_poll(void)                  { }
 uint32_t mw_buttons_press_ms(mw_button_t btn)   { (void)btn; return 0; }

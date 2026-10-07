@@ -544,8 +544,10 @@ static void change_password(void) {
     do {
         if (ask_password(TX(XSTR_PW_OLD), old_pw, sizeof(old_pw)) != MW_OK) break;
 
-        mw_ui_progress(TX(XSTR_PW_CHECKING), 0, NULL);
+        mw_ui_progress(TX(XSTR_PW_CHECKING), 0, TX(XSTR_PW_STAGE_CHECK));
+        mw_flow_auth_progress_on(TX(XSTR_PW_CHECKING));
         mw_err_t e = mw_device_auth_verify(old_pw);
+        mw_flow_auth_progress_off();
         mw_ui_progress_close();
         if (e != MW_OK) {
             show_auth_error(e);
@@ -554,8 +556,10 @@ static void change_password(void) {
 
         if (!ask_new_password(new_pw, again, sizeof(new_pw))) break;
 
-        mw_ui_progress(TX(XSTR_PW_CHANGE), 0, NULL);
+        mw_ui_progress(TX(XSTR_PW_CHANGE), 0, TX(XSTR_PW_STAGE_CHECK));
+        mw_flow_auth_progress_on(TX(XSTR_PW_CHANGE));
         e = mw_device_auth_change(old_pw, new_pw);
+        mw_flow_auth_progress_off();
         mw_ui_progress_close();
 
         if (e == MW_OK) {

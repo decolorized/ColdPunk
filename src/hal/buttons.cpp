@@ -100,6 +100,17 @@ uint32_t mw_buttons_read(void)
     return mask;
 }
 
+uint32_t mw_buttons_present(void)
+{
+    uint32_t mask = 0;
+    for (int i = 1; i < MW_BTN_COUNT; ++i)
+        if (s_pins[i] >= 0) mask |= 1u << i;
+#if (BUTTON_ENCODER_A >= 0) && (BUTTON_ENCODER_B >= 0)
+    mask |= (1u << MW_BTN_LEFT) | (1u << MW_BTN_RIGHT);   // the encoder steps left/right
+#endif
+    return mask;
+}
+
 // ===========================================================================
 // Encoder (optional; replaces Left/Right per TZ 2.5)
 // ===========================================================================

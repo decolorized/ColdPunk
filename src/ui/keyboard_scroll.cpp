@@ -4,15 +4,9 @@
 //  The model, the candidate logic and the cell semantics live in
 //  keyboard_full.cpp and are shared verbatim.
 //
-//  Button semantics (TZ 5.6):
-//    * Back, hold       - backspace with auto-repeat;
-//    * arrows, hold     - one step now, repeat after the delay;
-//    * SELECT, short    - act on the focused cell on RELEASE (letter,
-//                         candidate, special, or [Back] in the header);
-//    * SELECT, hold     - the moment hold_ms reaches MW_BACK_LONG_MS, finish
-//                         the input (MW_KB_R_OK) right away. Nothing is typed
-//                         on the press edge, so a long press cannot emit a
-//                         spurious character before finishing.
+//  Button semantics: keyboard_nav.h. In the letter strip LEFT / RIGHT (and,
+//  on 4-button boards, UP / DOWN) step through the live letters; the strip
+//  already skips letters that cannot continue a seed word.
 //
 //  On startup the LVGL focus is moved onto the first letter, not on the
 //  header [Back] button: LVGL auto-focuses the first object added to the
@@ -143,9 +137,11 @@ void mw_kb_scroll_build(mw_kb_state_t* st) {
 // ---------------------------------------------------------------------------
 static void scroll_focus_current(mw_kb_state_t* st) {
     switch (st->area) {
-    case MW_KB_AREA_HEADER:
-        if (st->btn_back) mw_kb_focus(st, st->btn_back);
+    case MW_KB_AREA_HEADER: {
+        lv_obj_t* h = (st->head_col == 1 && st->btn_ok) ? st->btn_ok : st->btn_back;
+        if (h) mw_kb_focus(st, h);
         break;
+    }
     case MW_KB_AREA_CAND:
         if (st->cur_row >= 0 && st->cur_row < st->cand_slots) {
             mw_kb_focus(st, st->cand_btn[st->cur_row]);
@@ -211,81 +207,110 @@ void mw_kb_scroll_update(mw_kb_state_t* st) {
 }
 
 // ---------------------------------------------------------------------------
-// Arrow / Back auto-repeat, same shape as in keyboard_full.cpp.
+// Buttons (keyboard_nav.h). The handler below works in terms of the old
+// direction switch; the nav model decides when a button acts at all.
 // ---------------------------------------------------------------------------
-static bool repeat_should_fire(mw_kb_state_t* st, mw_button_t b,
-                               uint32_t hold_ms, bool released) {
-    if (released) {
-        if (st->repeat_btn == b) st->repeat_btn = (mw_button_t)0;
-        return false;
+// Four-button boards: [Back] - candidates - letters - specials, as one list.
+static int scroll_head_n(const mw_kb_state_t* st) {
+    return (st->btn_back ? 1 : 0) + (st->btn_ok ? 1 : 0);
+}
+
+static int scroll_lin_count(const mw_kb_state_t* st) {
+    return scroll_head_n(st) + st->cand_n + MW_KB_LETTERS +
+           (MW_KB_GRID_CELLS - SCROLL_SPECIAL_FIRST);
+}
+
+static int scroll_lin_index(const mw_kb_state_t* st) {
+    const int head = scroll_head_n(st);
+    switch (st->area) {
+    case MW_KB_AREA_HEADER: return (st->head_col == 1 && st->btn_ok && st->btn_back) ? 1 : 0;
+    case MW_KB_AREA_CAND:   return head + st->cur_row;
+    case MW_KB_AREA_FOOTER: return head + st->cand_n + MW_KB_LETTERS + st->cur_row;
+    default:                return head + st->cand_n + st->cur_col;
     }
-    if (hold_ms == 0) {
-        st->repeat_btn     = b;
-        st->repeat_next_ms = mw_millis() + MW_ARROW_REPEAT_DELAY_MS;
-        return true;
-    }
-    if (st->repeat_btn != b) return false;
-    const uint32_t now = mw_millis();
-    if ((int32_t)(now - st->repeat_next_ms) < 0) return false;
-    st->repeat_next_ms = now + MW_ARROW_REPEAT_INTERVAL_MS;
+}
+
+static bool scroll_lin_live(int i, void* ctx) {
+    const mw_kb_state_t* st = (const mw_kb_state_t*)ctx;
+    const int head = scroll_head_n(st);
+    if (i < head) return true;
+    i -= head;
+    if (i < st->cand_n) return true;
+    i -= st->cand_n;
+    if (i < MW_KB_LETTERS) return mw_kb_letter_live(st, st->key_ch[i]);
     return true;
+}
+
+static void scroll_lin_set(mw_kb_state_t* st, int i) {
+    const int head = scroll_head_n(st);
+    if (i < head) {
+        st->area = MW_KB_AREA_HEADER;
+        st->head_col = (st->btn_back && i == 0) ? 0 : 1;
+        return;
+    }
+    i -= head;
+    if (i < st->cand_n) { st->area = MW_KB_AREA_CAND; st->cur_row = i; return; }
+    i -= st->cand_n;
+    if (i < MW_KB_LETTERS) { st->area = MW_KB_AREA_KEYS; st->cur_col = i; return; }
+    st->area = MW_KB_AREA_FOOTER;
+    st->cur_row = i - MW_KB_LETTERS;
 }
 
 bool mw_kb_scroll_button(mw_kb_state_t* st, mw_button_t b, uint32_t hold_ms,
                          bool released) {
-    if (b == MW_BTN_BACK) {
-        if (repeat_should_fire(st, b, hold_ms, released)) {
-            mw_kb_backspace(st);
+    const mw_kn_out_t o = mw_kn_event(&st->nav, b, hold_ms, released, mw_millis());
+    switch (o.act) {
+    case MW_KN_NONE:
+        return true;
+    case MW_KN_FINISH:
+        mw_kb_touch_activity(st);
+        mw_kb_finish(st, MW_KB_R_OK);
+        return true;
+    case MW_KN_BACKSPACE:
+        mw_kb_touch_activity(st);
+        mw_kb_backspace(st);
+        return true;
+    case MW_KN_CANCEL:
+        mw_kb_finish(st, st->ctx.allow_back ? MW_KB_R_BACK : MW_KB_R_CANCEL);
+        return true;
+    case MW_KN_LAYOUT: {
+        mw_kb_touch_activity(st);
+        if (o.undo_move) {
+            st->area = st->prev_area; st->cur_row = st->prev_row; st->cur_col = st->prev_col;
         }
+        const int lc = mw_kb_layer_cell(st);
+        if (lc >= 0) mw_kb_cell_activate(st, lc);
+        scroll_focus_current(st);
         return true;
     }
-
-    const bool is_arrow = (b == MW_BTN_LEFT || b == MW_BTN_RIGHT ||
-                           b == MW_BTN_UP   || b == MW_BTN_DOWN);
-
-    if (is_arrow) {
-        if (!repeat_should_fire(st, b, hold_ms, released)) return true;
-    } else if (b == MW_BTN_SELECT) {
-        // SELECT semantics:
-        //   * press edge:  latch the button, do NOT act yet;
-        //   * hold:        the moment hold_ms >= MW_BACK_LONG_MS, finish the
-        //                  input right away and mark the hold as consumed;
-        //   * release:     if the hold already fired, do nothing; otherwise
-        //                  the short action runs in the switch below.
-        //
-        // Nothing is typed on the press edge, so a long press cannot emit a
-        // spurious character before finishing.
-        if (released) {
-            const bool was_select = (st->repeat_btn == MW_BTN_SELECT);
-            st->repeat_btn = (mw_button_t)0;
-            if (!was_select) return true;
-            if (st->select_hold_fired) {
-                st->select_hold_fired = false;
-                return true;                 // long press already handled
-            }
-            // short SELECT: fall through to the switch below
-        } else {
-            if (hold_ms == 0) {
-                st->repeat_btn        = MW_BTN_SELECT;
-                st->select_hold_fired = false;
-                return true;                 // do not type yet
-            }
-            if (st->repeat_btn != MW_BTN_SELECT) return true;
-            if (!st->select_hold_fired && hold_ms >= MW_BACK_LONG_MS) {
-                st->select_hold_fired = true;
-                mw_kb_finish(st, MW_KB_R_OK);
-            }
+    case MW_KN_MOVE:
+        st->prev_area = st->area; st->prev_row = st->cur_row; st->prev_col = st->cur_col;
+        if (st->linear) {
+            mw_kb_touch_activity(st);
+            const int d = (o.dir == MW_BTN_UP || o.dir == MW_BTN_LEFT) ? -1 : 1;
+            scroll_lin_set(st, mw_kn_linear_step(scroll_lin_count(st), scroll_lin_index(st),
+                                                 d, scroll_lin_live, st));
+            scroll_focus_current(st);
             return true;
         }
-    } else {
-        if (released || hold_ms != 0) return true;
+        b = o.dir;
+        break;
+    case MW_KN_ACTIVATE:
+        b = MW_BTN_SELECT;
+        break;
+    default:
+        return true;
     }
 
     mw_kb_touch_activity(st);
 
     switch (b) {
     case MW_BTN_LEFT:
-        if (st->area == MW_KB_AREA_HEADER) break;
+        if (st->area == MW_KB_AREA_HEADER) {
+            if (st->btn_back) st->head_col = 0;
+            scroll_focus_current(st);
+            break;
+        }
         if (st->area == MW_KB_AREA_FOOTER) {
             if (st->cur_row > 0) st->cur_row--;
             scroll_focus_current(st);
@@ -295,7 +320,11 @@ bool mw_kb_scroll_button(mw_kb_state_t* st, mw_button_t b, uint32_t hold_ms,
         break;
 
     case MW_BTN_RIGHT:
-        if (st->area == MW_KB_AREA_HEADER) break;
+        if (st->area == MW_KB_AREA_HEADER) {
+            if (st->btn_ok) st->head_col = 1;
+            scroll_focus_current(st);
+            break;
+        }
         if (st->area == MW_KB_AREA_FOOTER) {
             if (st->cur_row < MW_KB_GRID_CELLS - SCROLL_SPECIAL_FIRST - 1) st->cur_row++;
             scroll_focus_current(st);
@@ -314,11 +343,13 @@ bool mw_kb_scroll_button(mw_kb_state_t* st, mw_button_t b, uint32_t hold_ms,
                 st->cur_row = st->cand_n - 1;
             } else if (st->btn_back) {
                 st->area = MW_KB_AREA_HEADER;
+                st->head_col = 0;
             }
         } else if (st->cur_row > 0) {
             st->cur_row--;
         } else if (st->btn_back) {
             st->area = MW_KB_AREA_HEADER;
+            st->head_col = 0;
         }
         scroll_focus_current(st);
         break;
@@ -342,7 +373,8 @@ bool mw_kb_scroll_button(mw_kb_state_t* st, mw_button_t b, uint32_t hold_ms,
 
     case MW_BTN_SELECT:
         if (st->area == MW_KB_AREA_HEADER) {
-            mw_kb_finish(st, st->ctx.allow_back ? MW_KB_R_BACK : MW_KB_R_CANCEL);
+            if (st->head_col == 1 && st->btn_ok) mw_kb_ok(st);
+            else mw_kb_finish(st, st->ctx.allow_back ? MW_KB_R_BACK : MW_KB_R_CANCEL);
             return true;
         }
         if (st->area == MW_KB_AREA_CAND) {

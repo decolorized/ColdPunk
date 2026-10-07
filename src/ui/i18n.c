@@ -438,6 +438,15 @@ static const char* const X_RU[XSTR_COUNT] = {
 
     // v6 RU
     [XSTR_PW_CORRUPT] = "Запись пароля устройства повреждена\nили утеряна, а кошельки на месте.\nНовый пароль их не откроет.\nНастройки > Сброс к заводским, затем\nвосстановите кошельки из seed.",
+    [XSTR_DICE_MIXED] = "Броски кубика объединены с аппаратным\nГСЧ: seed не слабее лучшего из двух\nисточников. По одним броскам его\nповторить нельзя - запишите слова.",
+    [XSTR_BIRTH_MONTH] = "Год и месяц сейчас (2026-10)",
+    [XSTR_BIRTH_MONTH_BAD] = "Введите год и месяц, например 2026-10.\nПусто - пропустить (сканирование с 2021).",
+    [XSTR_KI_CACHE_FULL] = "Кэш key images кошелька заполнен\n(%u выходов): %u не записаны.\nТранзакции с этими выходами\nустройство отклонит.",
+    [XSTR_KI_ROLLBACK] = "Кэш key images этого кошелька заменён\nстарой копией и не загружен. Отметки\nо потраченных выходах могли пропасть.\nВыгрузите outputs из Feather заново.",
+    [XSTR_PW_STAGE_CHECK] = "Проверка пароля",
+    [XSTR_PW_STAGE_UPGRADE] = "Усиление защиты пароля (один раз)",
+    [XSTR_PW_STAGE_NEW] = "Вычисление ключа нового пароля",
+    [XSTR_PW_STAGE_REKEY] = "Перешифровка кошельков",
     // end v6 RU
 };
 
@@ -710,6 +719,15 @@ static const char* const X_EN[XSTR_COUNT] = {
 
     // v6 EN
     [XSTR_PW_CORRUPT] = "The device password record is damaged\nor missing while wallets exist.\nA new password would not open them.\nSettings > Factory reset, then restore\nthe wallets from their seeds.",
+    [XSTR_DICE_MIXED] = "The dice rolls were combined with the\nhardware TRNG: the seed is at least as\nstrong as the better source. It cannot\nbe recreated from the rolls alone -\nwrite the words down.",
+    [XSTR_BIRTH_MONTH] = "Current year and month (2026-10)",
+    [XSTR_BIRTH_MONTH_BAD] = "Type the year and month, e.g. 2026-10.\nEmpty - skip (scan from 2021).",
+    [XSTR_KI_CACHE_FULL] = "The key image cache of this wallet is\nfull (%u outputs): %u not recorded.\nTransactions spending those outputs\nwill be refused.",
+    [XSTR_KI_ROLLBACK] = "The key image cache of this wallet was\nreplaced by an older copy and was not\nloaded. Spent marks may be missing.\nExport the outputs from Feather again.",
+    [XSTR_PW_STAGE_CHECK] = "Checking the password",
+    [XSTR_PW_STAGE_UPGRADE] = "Strengthening the password (once)",
+    [XSTR_PW_STAGE_NEW] = "Deriving the new password key",
+    [XSTR_PW_STAGE_REKEY] = "Re-sealing the wallets",
     // end v6 EN
 };
 

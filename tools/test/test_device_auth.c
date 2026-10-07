@@ -663,6 +663,45 @@ MW_TEST(test_unbound_record_bound_after_provisioning)
     CHECK_EQ_INT(mw_device_auth_verify("early-pw"), MW_OK);
 }
 
+// The slow parts report progress: monotonic within a stage, reaching the
+// end, with the stages the operation goes through.
+static int g_pstage[16], g_pmax[16], g_pbad;
+static void prog_cb(int stage, int pm, void* ctx)
+{
+    (void)ctx;
+    if (stage < 0 || stage >= 16 || pm < 0 || pm > 1000) { g_pbad++; return; }
+    if (g_pstage[stage] && pm < g_pmax[stage]) g_pbad++;   // went backwards
+    g_pstage[stage] = 1;
+    if (pm > g_pmax[stage]) g_pmax[stage] = pm;
+}
+
+MW_TEST(test_progress_reported)
+{
+    mw_seckey_t spend;
+    fresh();
+    memset(g_pstage, 0, sizeof g_pstage); memset(g_pmax, 0, sizeof g_pmax); g_pbad = 0;
+    mw_device_auth_set_progress(prog_cb, NULL);
+    CHECK_EQ_INT(mw_device_auth_set("progress-pw"), MW_OK);
+    CHECK(g_pstage[MW_AUTH_STAGE_NEW]);
+    CHECK_EQ_INT(g_pmax[MW_AUTH_STAGE_NEW], 1000);
+    (void)make_wallet(&spend);
+
+    reboot();
+    memset(g_pstage, 0, sizeof g_pstage); memset(g_pmax, 0, sizeof g_pmax);
+    CHECK_EQ_INT(mw_device_auth_verify("progress-pw"), MW_OK);
+    CHECK(g_pstage[MW_AUTH_STAGE_CHECK]);
+    CHECK(g_pmax[MW_AUTH_STAGE_CHECK] >= 990);            // 1024-iteration ticks
+    CHECK(!g_pstage[MW_AUTH_STAGE_UPGRADE]);               // already current
+
+    memset(g_pstage, 0, sizeof g_pstage); memset(g_pmax, 0, sizeof g_pmax);
+    CHECK_EQ_INT(mw_device_auth_change("progress-pw", "progress-2"), MW_OK);
+    CHECK(g_pstage[MW_AUTH_STAGE_CHECK] && g_pstage[MW_AUTH_STAGE_NEW] &&
+          g_pstage[MW_AUTH_STAGE_REKEY]);
+    CHECK_EQ_INT(g_pmax[MW_AUTH_STAGE_REKEY], 1000);
+    CHECK_EQ_INT(g_pbad, 0);
+    mw_device_auth_set_progress(NULL, NULL);
+}
+
 int main(void)
 {
     mw_random_init();
@@ -689,6 +728,7 @@ int main(void)
     RUN_TEST(test_damaged_record_not_overwritten);
     RUN_TEST(test_v1_record_upgraded);
     RUN_TEST(test_unbound_record_bound_after_provisioning);
+    RUN_TEST(test_progress_reported);
 
     mw_secure_user_key_clear();
     mw_host_store_reset();

@@ -948,6 +948,75 @@ MW_TEST(test_wallet_export)
     CHECK(mw_ops_wallet_export(&g_base, MW_NET_MAINNET, "b", 0, true, json, 64, &len) != MW_OK);
 }
 
+// Audit round 1: an older copy of the cache file put back is refused, and a
+// full cache says so instead of dropping entries silently.
+static uint8_t g_snap[256 * 1024];
+MW_TEST(test_ki_cache_rollback_and_full)
+{
+    char name[40];
+    size_t size = 0, got = 0;
+    mw_ki_entry_t e;
+    snprintf(name, sizeof name, "ki_%08lx_0.bin", (unsigned long)g_id);
+
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK(!mw_ki_cache_rolled_back());
+    const uint32_t n0 = mw_ki_cache_count();
+    CHECK(n0 > 0);
+    // Snapshot the current file, then mark something spent and save.
+    memset(&e, 0, sizeof e);
+    memset(e.out_pub.b, 0xA1, 32);
+    memset(e.image.b, 0xB2, 32);
+    e.flags = MW_KI_F_SPENT;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    CHECK_EQ_INT(mw_fstore_size(name, &size), MW_OK);
+    CHECK(size <= sizeof g_snap);
+    CHECK_EQ_INT(mw_fstore_read(name, g_snap, size, &got), MW_OK);
+    const size_t snap_len = got;
+    memset(e.out_pub.b, 0xA2, 32);
+    memset(e.image.b, 0xB3, 32);
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+
+    // The newer file opens normally.
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK(!mw_ki_cache_rolled_back());
+    CHECK_EQ_INT(mw_ki_cache_count(), n0 + 2);
+    mw_ki_cache_close();
+
+    // The old copy put back: refused, cache empty, flagged.
+    CHECK_EQ_INT(mw_fstore_write(name, g_snap, snap_len), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK(mw_ki_cache_rolled_back());
+    CHECK_EQ_INT(mw_ki_cache_count(), 0);
+    // Saving afterwards moves past both generations.
+    memset(e.out_pub.b, 0xA3, 32);
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    CHECK(!mw_ki_cache_rolled_back());
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK(!mw_ki_cache_rolled_back());
+    CHECK_EQ_INT(mw_ki_cache_count(), 1);
+
+    // Fill it up: the insert that does not fit is reported, nothing evicted.
+    for (uint32_t i = mw_ki_cache_count(); i < MW_KI_CACHE_MAX; ++i) {
+        memset(&e, 0, sizeof e);
+        e.out_pub.b[0] = (uint8_t)i; e.out_pub.b[1] = (uint8_t)(i >> 8); e.out_pub.b[2] = 0xEE;
+        e.image.b[0] = (uint8_t)i;   e.image.b[1] = (uint8_t)(i >> 8);   e.image.b[2] = 0xEE;
+        CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    }
+    CHECK_EQ_INT(mw_ki_cache_count(), MW_KI_CACHE_MAX);
+    memset(e.out_pub.b, 0xCC, 32);
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_ERR_TOO_MANY);
+    CHECK_EQ_INT(mw_ki_cache_count(), MW_KI_CACHE_MAX);
+    mw_ki_cache_close();                    // not saved
+    // Leave the cache open with the saved file, as the next test expects.
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_count(), 1);
+}
+
 MW_TEST(test_delete_wipes_cache)
 {
     CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
@@ -991,6 +1060,7 @@ int main(void)
     RUN_TEST(test_unsigned_flag_and_account_lies);
     RUN_TEST(test_unsigned_log_hygiene);
     RUN_TEST(test_wallet_export);
+    RUN_TEST(test_ki_cache_rollback_and_full);
     RUN_TEST(test_delete_wipes_cache);
 
     mw_bpp_free();

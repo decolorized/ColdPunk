@@ -137,6 +137,15 @@ void mw_host_store_reset(void)
         path_for(keys[i], p, sizeof p);
         (void)remove(p);
     }
+    // Key image cache generations ("kig<id><variant>", ki_cache.c).
+    for (unsigned long id = 0; id < 64; id++) {
+        for (unsigned v = 0; v < 2; v++) {
+            char k[16];
+            snprintf(k, sizeof k, "kig%08lx%u", id, v);
+            path_for(k, p, sizeof p);
+            (void)remove(p);
+        }
+    }
     (void)mw_fstore_wipe_all();
     // Leave no litter in the source tree when the suites finish.
     (void)rmdir(g_dir);

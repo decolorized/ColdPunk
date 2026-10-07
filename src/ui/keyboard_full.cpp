@@ -1,16 +1,10 @@
 // ---------------------------------------------------------------------------
 //  On-screen keyboard: shared model + type 1 "full keyboard" (TZ 5.4).
 //
-//  Button semantics (TZ 5.6):
-//    * Back, hold       - backspace with auto-repeat;
-//    * arrows, hold     - one step now, repeat after the delay;
-//    * SELECT, short    - act on the focused cell on RELEASE (letter,
-//                         candidate, ⌫ / Space / ↵, or [Back] in the header);
-//    * SELECT, hold     - the moment hold_ms reaches MW_BACK_LONG_MS, finish
-//                         the input (MW_KB_R_OK) right away. Nothing is typed
-//                         on the press edge, so a long press cannot emit a
-//                         spurious character before finishing;
-//    * [Back] in header - always present; Up from the top row focuses it.
+//  Button semantics: keyboard_nav.h (short / long SELECT and BACK, arrow
+//  auto-repeat, two arrows = layout, 4-button linear walk, dead seed letters
+//  skipped). [Back] in the header is always present; Up from the top row
+//  (through the candidates) focuses it.
 //
 //  LVGL rule: everything in this file runs on the LVGL task.
 // ---------------------------------------------------------------------------
@@ -21,6 +15,8 @@
 
 #include <stdio.h>
 #include <string.h>
+
+static bool full_live_cb(int i, void* ctx);
 
 // ---------------------------------------------------------------------------
 // Character layers. Dictionary modes only ever use the lowercase layer; the
@@ -218,8 +214,7 @@ void mw_kb_finish(mw_kb_state_t* st, int result) {
     mw_memzero(st->prefix, sizeof(st->prefix));
     st->text_len         = 0;
     st->prefix_len       = 0;
-    st->repeat_btn       = (mw_button_t)0;
-    st->select_hold_fired = false;
+    mw_kn_reset(&st->nav);
 
     mw_ui_modal_done(result);
 }
@@ -357,6 +352,22 @@ void mw_kb_update_candidates(mw_kb_state_t* st) {
     }
 }
 
+void mw_kb_ok(mw_kb_state_t* st) {
+    if (!st) return;
+    if (mw_kb_is_dict(st)) {
+        if (st->cand_n > 0) mw_kb_accept_candidate(st, 0);
+    } else {
+        mw_kb_finish(st, MW_KB_R_OK);
+    }
+}
+
+static void kb_ok_cb(lv_event_t* e) {
+    mw_kb_state_t* st = (mw_kb_state_t*)lv_event_get_user_data(e);
+    if (!st) return;
+    mw_kb_touch_activity(st);
+    mw_kb_ok(st);
+}
+
 static lv_obj_t* head_button(mw_kb_state_t* st, lv_obj_t* parent, const char* text,
                              lv_coord_t w, lv_event_cb_t cb) {
     lv_obj_t* b = MW_BTN_CREATE(parent);
@@ -391,9 +402,9 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
     // only way to step one level up when the physical Back key is missing or
     // remapped by the host, and it is part of the navigation grid on every
     // layout (Up from the top row focuses it).
-    st->btn_back = head_button(st, head, T(STR_BACK),
-                               (lv_coord_t)(m->bar_h * (m->compact ? 3 : 2)),
-                               kb_close_cb);
+    // Icons, not words: [<] and [OK] stay small on every panel.
+    const lv_coord_t icon_w = (lv_coord_t)(m->bar_h + m->bar_h / 3);
+    st->btn_back = head_button(st, head, LV_SYMBOL_LEFT, icon_w, kb_close_cb);
 
     st->lbl_word = lv_label_create(head);
     lv_obj_add_style(st->lbl_word, mw_style_dim(), LV_PART_MAIN);
@@ -410,6 +421,10 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
 
     // Clear the typed text (touch panels; button boards hold Back instead).
     if (m->touch) head_button(st, head, LV_SYMBOL_CLOSE, m->bar_h, kb_clear_cb);
+
+    // [OK]: finish the input (free text) or take the first candidate (seed
+    // words), same as the accept / enter key cap.
+    st->btn_ok = head_button(st, head, LV_SYMBOL_OK, icon_w, kb_ok_cb);
 
     st->lbl_prefix = lv_label_create(root);
     lv_obj_add_style(st->lbl_prefix, mw_style_mono(), LV_PART_MAIN);
@@ -660,12 +675,23 @@ void mw_kb_full_build(mw_kb_state_t* st) {
 
 void mw_kb_full_update(mw_kb_state_t* st) {
     mw_kb_paint_cells(st);
+    // The letter under the button cursor may have just gone dead (the
+    // prefix grew): move on to the next live cell.
+    if (st->area == MW_KB_AREA_KEYS && st->key_n > 0) {
+        const int cur = st->cur_row * st->cols + st->cur_col;
+        if (!mw_kb_cell_live(st, cur)) {
+            const int t = mw_kn_linear_step(st->key_n, cur, 1, full_live_cb, st);
+            st->cur_row = t / st->cols;
+            st->cur_col = t % st->cols;
+        }
+    }
 }
 
 static void full_focus_current(mw_kb_state_t* st) {
     const mw_metrics_t* m = mw_metrics();
     if (st->area == MW_KB_AREA_HEADER) {
-        if (st->btn_back) mw_kb_focus(st, st->btn_back);
+        lv_obj_t* h = (st->head_col == 1 && st->btn_ok) ? st->btn_ok : st->btn_back;
+        if (h) mw_kb_focus(st, h);
         return;
     }
     if (st->area == MW_KB_AREA_CAND) {
@@ -682,125 +708,167 @@ static void full_focus_current(mw_kb_state_t* st) {
     }
 }
 
-static bool repeat_should_fire(mw_kb_state_t* st, mw_button_t b,
-                               uint32_t hold_ms, bool released) {
-    if (released) {
-        if (st->repeat_btn == b) st->repeat_btn = (mw_button_t)0;
-        return false;
+bool mw_kb_cell_live(const mw_kb_state_t* st, int cell) {
+    if (!st || cell < 0 || cell >= st->key_n) return false;
+    if (st->key_cmd[cell] != MW_KC_NONE) return true;
+    return st->key_ch[cell] != 0 && mw_kb_letter_live(st, st->key_ch[cell]);
+}
+
+int mw_kb_layer_cell(const mw_kb_state_t* st) {
+    for (int i = 0; st && i < st->key_n; i++)
+        if (st->key_cmd[i] == MW_KC_LAYER) return i;
+    return -1;
+}
+
+static bool full_live_cb(int i, void* ctx) {
+    return mw_kb_cell_live((const mw_kb_state_t*)ctx, i);
+}
+
+// ---- four-button boards: one list of every focusable item ----------------
+// [Back] (if any) - the candidates on this page - the key cells.
+static int full_head_n(const mw_kb_state_t* st) {
+    return (st->btn_back ? 1 : 0) + (st->btn_ok ? 1 : 0);
+}
+
+static int full_lin_count(const mw_kb_state_t* st) {
+    return full_head_n(st) + st->cand_n + st->key_n;
+}
+
+static int full_lin_index(const mw_kb_state_t* st) {
+    const mw_metrics_t* m = mw_metrics();
+    const int head = full_head_n(st);
+    switch (st->area) {
+    case MW_KB_AREA_HEADER: return (st->head_col == 1 && st->btn_ok && st->btn_back) ? 1 : 0;
+    case MW_KB_AREA_CAND:   return head + st->cur_row * m->cand_cols + st->cur_col;
+    default:                return head + st->cand_n + st->cur_row * st->cols + st->cur_col;
     }
-    if (hold_ms == 0) {
-        st->repeat_btn     = b;
-        st->repeat_next_ms = mw_millis() + MW_ARROW_REPEAT_DELAY_MS;
-        return true;
+}
+
+static bool full_lin_live(int i, void* ctx) {
+    const mw_kb_state_t* st = (const mw_kb_state_t*)ctx;
+    const int head = full_head_n(st);
+    if (i < head) return true;
+    i -= head;
+    if (i < st->cand_n) return true;
+    return mw_kb_cell_live(st, i - st->cand_n);
+}
+
+static void full_lin_set(mw_kb_state_t* st, int i) {
+    const mw_metrics_t* m = mw_metrics();
+    const int head = full_head_n(st);
+    if (i < head) {
+        st->area = MW_KB_AREA_HEADER;
+        st->head_col = (st->btn_back && i == 0) ? 0 : 1;
+        return;
     }
-    if (st->repeat_btn != b) return false;
-    const uint32_t now = mw_millis();
-    if ((int32_t)(now - st->repeat_next_ms) < 0) return false;
-    st->repeat_next_ms = now + MW_ARROW_REPEAT_INTERVAL_MS;
-    return true;
+    i -= head;
+    if (i < st->cand_n) {
+        st->area    = MW_KB_AREA_CAND;
+        st->cur_row = i / m->cand_cols;
+        st->cur_col = i % m->cand_cols;
+        return;
+    }
+    i -= st->cand_n;
+    st->area    = MW_KB_AREA_KEYS;
+    st->cur_row = i / st->cols;
+    st->cur_col = i % st->cols;
+}
+
+// One step of the cursor in the 2-D layout (six buttons / encoder).
+static void full_move_2d(mw_kb_state_t* st, mw_button_t b) {
+    const mw_metrics_t* m = mw_metrics();
+    if (st->area == MW_KB_AREA_HEADER) {
+        if (b == MW_BTN_LEFT && st->btn_back)  st->head_col = 0;
+        if (b == MW_BTN_RIGHT && st->btn_ok)   st->head_col = 1;
+        if (b == MW_BTN_DOWN) {
+            st->area = MW_KB_AREA_KEYS;
+            const int first = mw_kn_linear_step(st->key_n, st->key_n - 1, 1, full_live_cb, st);
+            st->cur_row = first / st->cols;
+            st->cur_col = first % st->cols;
+        }
+        return;
+    }
+    if (st->area == MW_KB_AREA_CAND) {
+        const int cols = m->cand_cols;
+        int idx = st->cur_row * cols + st->cur_col;
+        switch (b) {
+        case MW_BTN_LEFT:  if (idx > 0) idx--; break;
+        case MW_BTN_RIGHT: if (idx < st->cand_n - 1) idx++; break;
+        case MW_BTN_UP:
+            if (idx >= cols) idx -= cols;
+            else if (st->btn_back) { st->area = MW_KB_AREA_HEADER; st->head_col = 0; return; }
+            break;
+        case MW_BTN_DOWN:
+            if (idx + cols < st->cand_n) idx += cols;
+            else { st->area = MW_KB_AREA_KEYS; st->cur_row = 0;
+                   if (!mw_kb_cell_live(st, st->cur_col)) {
+                       const int t = mw_kn_grid_step(st->key_n, st->cols, st->cur_col,
+                                                     MW_BTN_RIGHT, full_live_cb, st);
+                       st->cur_col = t % st->cols; st->cur_row = t / st->cols;
+                   }
+                   return; }
+            break;
+        default: break;
+        }
+        st->cur_row = idx / cols;
+        st->cur_col = idx % cols;
+        return;
+    }
+    // Keys.
+    const int cur = st->cur_row * st->cols + st->cur_col;
+    const int t = mw_kn_grid_step(st->key_n, st->cols, cur, b, full_live_cb, st);
+    if (t >= 0) {
+        st->cur_row = t / st->cols;
+        st->cur_col = t % st->cols;
+    } else if (st->cand_n > 0) {                       // up out of the top row
+        st->area    = MW_KB_AREA_CAND;
+        st->cur_row = (st->cand_n - 1) / m->cand_cols;
+        if (st->cur_col >= m->cand_cols) st->cur_col = m->cand_cols - 1;
+        if (st->cur_row * m->cand_cols + st->cur_col >= st->cand_n)
+            st->cur_col = (st->cand_n - 1) % m->cand_cols;
+    } else if (st->btn_back) {
+        st->area = MW_KB_AREA_HEADER;
+        st->head_col = 0;
+    }
 }
 
 bool mw_kb_full_button(mw_kb_state_t* st, mw_button_t b, uint32_t hold_ms,
                        bool released) {
     const mw_metrics_t* m = mw_metrics();
-
-    if (b == MW_BTN_BACK) {
-        if (repeat_should_fire(st, b, hold_ms, released)) {
-            mw_kb_backspace(st);
-        }
-        return true;
-    }
-
-    const bool is_arrow = (b == MW_BTN_LEFT || b == MW_BTN_RIGHT ||
-                           b == MW_BTN_UP   || b == MW_BTN_DOWN);
-
-    if (is_arrow) {
-        if (!repeat_should_fire(st, b, hold_ms, released)) return true;
-    } else if (b == MW_BTN_SELECT) {
-        // SELECT semantics:
-        //   * press edge:  latch the button, do NOT act yet;
-        //   * hold:        the moment hold_ms >= MW_BACK_LONG_MS, finish the
-        //                  input right away and mark the hold as consumed;
-        //   * release:     if the hold already fired, do nothing; otherwise
-        //                  the short action runs in the switch below.
-        //
-        // Nothing is typed on the press edge, so a long press cannot emit a
-        // spurious character before finishing.
-        if (released) {
-            const bool was_select = (st->repeat_btn == MW_BTN_SELECT);
-            st->repeat_btn = (mw_button_t)0;
-            if (!was_select) return true;
-            if (st->select_hold_fired) {
-                st->select_hold_fired = false;
-                return true;                 // long press already handled
-            }
-            // short SELECT: fall through to the switch below
-        } else {
-            if (hold_ms == 0) {
-                st->repeat_btn        = MW_BTN_SELECT;
-                st->select_hold_fired = false;
-                return true;                 // do not type yet
-            }
-            if (st->repeat_btn != MW_BTN_SELECT) return true;
-            if (!st->select_hold_fired && hold_ms >= MW_BACK_LONG_MS) {
-                st->select_hold_fired = true;
-                mw_kb_finish(st, MW_KB_R_OK);
-            }
-            return true;
-        }
-    } else {
-        if (released || hold_ms != 0) return true;
-    }
-
+    const mw_kn_out_t o = mw_kn_event(&st->nav, b, hold_ms, released, mw_millis());
+    if (o.act == MW_KN_NONE) return true;
     mw_kb_touch_activity(st);
 
-    switch (b) {
-    case MW_BTN_LEFT:
-        if (st->area == MW_KB_AREA_HEADER) break;
-        if (st->cur_col > 0) st->cur_col--;
-        else if (st->cur_row > 0) {
-            st->cur_row--;
-            st->cur_col = (st->area == MW_KB_AREA_CAND ? m->cand_cols : st->cols) - 1;
+    switch (o.act) {
+    case MW_KN_MOVE:
+        st->prev_area = st->area;
+        st->prev_row  = st->cur_row;
+        st->prev_col  = st->cur_col;
+        if (st->linear) {
+            if (o.dir == MW_BTN_UP || o.dir == MW_BTN_DOWN ||
+                o.dir == MW_BTN_LEFT || o.dir == MW_BTN_RIGHT) {
+                const int d = (o.dir == MW_BTN_UP || o.dir == MW_BTN_LEFT) ? -1 : 1;
+                full_lin_set(st, mw_kn_linear_step(full_lin_count(st), full_lin_index(st), d,
+                                                   full_lin_live, st));
+            }
+        } else {
+            full_move_2d(st, o.dir);
         }
         break;
-    case MW_BTN_RIGHT: {
-        if (st->area == MW_KB_AREA_HEADER) break;
-        const int cols = (st->area == MW_KB_AREA_CAND) ? m->cand_cols : st->cols;
-        const int rows = (st->area == MW_KB_AREA_CAND) ? m->cand_rows : st->rows;
-        if (st->cur_col < cols - 1) st->cur_col++;
-        else if (st->cur_row < rows - 1) { st->cur_row++; st->cur_col = 0; }
+    case MW_KN_LAYOUT: {
+        if (o.undo_move) {
+            st->area    = st->prev_area;
+            st->cur_row = st->prev_row;
+            st->cur_col = st->prev_col;
+        }
+        const int lc = mw_kb_layer_cell(st);
+        if (lc >= 0) mw_kb_cell_activate(st, lc);
         break;
     }
-    case MW_BTN_UP:
-        if (st->area == MW_KB_AREA_HEADER) break;      // already there
-        if (st->cur_row > 0) st->cur_row--;
-        else if (st->area == MW_KB_AREA_KEYS && st->cand_slots > 0) {
-            st->area    = MW_KB_AREA_CAND;
-            st->cur_row = m->cand_rows - 1;
-            if (st->cur_col >= m->cand_cols) st->cur_col = m->cand_cols - 1;
-        } else if (st->btn_back) {
-            st->area = MW_KB_AREA_HEADER;
-        }
-        break;
-    case MW_BTN_DOWN:
+    case MW_KN_ACTIVATE:
         if (st->area == MW_KB_AREA_HEADER) {
-            st->area    = MW_KB_AREA_KEYS;
-            st->cur_row = 0;
-            st->cur_col = 0;
-            break;
-        }
-        {
-            const int rows = (st->area == MW_KB_AREA_CAND) ? m->cand_rows : st->rows;
-            if (st->cur_row < rows - 1) st->cur_row++;
-            else if (st->area == MW_KB_AREA_CAND) {
-                st->area    = MW_KB_AREA_KEYS;
-                st->cur_row = 0;
-            }
-        }
-        break;
-    case MW_BTN_SELECT:
-        if (st->area == MW_KB_AREA_HEADER) {
-            mw_kb_finish(st, st->ctx.allow_back ? MW_KB_R_BACK : MW_KB_R_CANCEL);
+            if (st->head_col == 1 && st->btn_ok) mw_kb_ok(st);
+            else mw_kb_finish(st, st->ctx.allow_back ? MW_KB_R_BACK : MW_KB_R_CANCEL);
             return true;
         }
         if (st->area == MW_KB_AREA_CAND) {
@@ -808,6 +876,15 @@ bool mw_kb_full_button(mw_kb_state_t* st, mw_button_t b, uint32_t hold_ms,
         } else {
             mw_kb_cell_activate(st, st->cur_row * st->cols + st->cur_col);
         }
+        return true;
+    case MW_KN_FINISH:
+        mw_kb_finish(st, MW_KB_R_OK);
+        return true;
+    case MW_KN_BACKSPACE:
+        mw_kb_backspace(st);
+        return true;
+    case MW_KN_CANCEL:
+        mw_kb_finish(st, st->ctx.allow_back ? MW_KB_R_BACK : MW_KB_R_CANCEL);
         return true;
     default:
         return true;
@@ -837,9 +914,15 @@ static bool kb_btn_hook(mw_button_t b, uint32_t hold_ms, bool released,
 static void kb_build_job(void* arg) {
     mw_kb_state_t* st = (mw_kb_state_t*)arg;
 
-    st->repeat_btn        = (mw_button_t)0;
-    st->select_hold_fired = false;
+    mw_kn_reset(&st->nav);
     st->btn_back          = NULL;
+    st->btn_ok            = NULL;
+    st->head_col          = 0;
+    // Four-button boards (no LEFT/RIGHT): UP / DOWN walk everything.
+    {
+        const uint32_t lr = (1u << MW_BTN_LEFT) | (1u << MW_BTN_RIGHT);
+        st->linear = (mw_buttons_present() & lr) != lr;
+    }
 
     mw_ui_page_create(&st->page, NULL, false);
     mw_ui_page_set_escape(&st->page, kb_escape, st);

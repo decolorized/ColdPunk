@@ -3,16 +3,26 @@
 // File layout (sealed as a whole with mw_seal, label "mw.ki.v1.<id>.<variant>"):
 //
 //     file      := iv(16) || tag(16) || AES-GCM(plain)
-//     plain     := "MWKI" || version(1) || reserved(3) ||
+//     plain     := "MWKI" || version(1) || generation(u24 LE) ||
 //                  account(32)  keccak256("mw.ki.account" || spend_pub || view_pub)
 //                  count(u32 LE) || count * entry
 //     entry     := out_pub(32) || image(32) || major(u32) || minor(u32) || flags(1)
+//
+// Rollback (audit round 1): every save bumps `generation` and records it in
+// NVS ("kig<id><variant>"), a different store from the FAT file. A file whose
+// generation is BELOW the recorded one is an old copy put back - it would
+// hide SPENT flags - and is refused: the cache starts empty (the next key
+// image export rebuilds it) and mw_ki_cache_rolled_back() reports it. Files
+// written before this check (generation 0, nothing in NVS) are accepted.
+// Both stores are on the same flash, so this stops a file swap, not an
+// attacker who rewrites the whole flash image.
 #include "ki_cache.h"
 #include "file_store.h"
 #include "secure_storage.h"
 
 #include "../crypto/hash.h"
 #include "../crypto/memzero.h"
+#include "../hal/log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,8 +41,17 @@
 #define KI_ENTRY      (32 + 32 + 4 + 4 + 1)
 #define KI_SEAL_HDR   32
 
+// Platform blob API (secure_storage.cpp / secure_storage_host.c).
+mw_err_t mw_store_blob_write(const char* key, const void* data, size_t len);
+mw_err_t mw_store_blob_read(const char* key, void* out, size_t cap, size_t* len_out);
+mw_err_t mw_store_blob_erase(const char* key);
+
+#define KI_GEN_MAX 0xFFFFFFu
+
 static struct {
     bool           open;
+    bool           rolled_back;  // the file on flash was older than NVS says
+    uint32_t       generation;   // of the file loaded / last saved
     uint32_t       wallet_id;
     uint8_t        variant;
     uint8_t        account[32];
@@ -65,6 +84,32 @@ static void file_name(uint32_t id, uint8_t variant, char* out, size_t cap)
 static void seal_label(uint32_t id, uint8_t variant, char* out, size_t cap)
 {
     snprintf(out, cap, "mw.ki.v1.%08lx.%u", (unsigned long)id, (unsigned)variant);
+}
+
+static void gen_key(uint32_t id, uint8_t variant, char* out, size_t cap)
+{
+    snprintf(out, cap, "kig%08lx%u", (unsigned long)id, (unsigned)variant);
+}
+
+// Generation recorded in NVS; 0 when none.
+static uint32_t gen_stored(uint32_t id, uint8_t variant)
+{
+    char key[16];
+    uint8_t b[4];
+    size_t len = 0;
+    gen_key(id, variant, key, sizeof key);
+    if (mw_store_blob_read(key, b, sizeof b, &len) != MW_OK || len != 4) return 0;
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) |
+           ((uint32_t)b[3] << 24);
+}
+
+static mw_err_t gen_store(uint32_t id, uint8_t variant, uint32_t gen)
+{
+    char key[16];
+    uint8_t b[4] = { (uint8_t)gen, (uint8_t)(gen >> 8), (uint8_t)(gen >> 16),
+                     (uint8_t)(gen >> 24) };
+    gen_key(id, variant, key, sizeof key);
+    return mw_store_blob_write(key, b, sizeof b);
 }
 
 static void account_hash(const mw_account_keys_t* keys, uint8_t out[32])
@@ -112,7 +157,16 @@ static void load_file(void)
         memcmp(plain, KI_MAGIC, 4) == 0 && plain[4] == KI_VERSION &&
         memcmp(plain + 8, g.account, 32) == 0) {
         const uint32_t n = get_u32(plain + 40);
-        if (n <= MW_KI_CACHE_MAX && KI_HDR + (size_t)n * KI_ENTRY == ct_len) {
+        const uint32_t gen = (uint32_t)plain[5] | ((uint32_t)plain[6] << 8) |
+                             ((uint32_t)plain[7] << 16);
+        const uint32_t want = gen_stored(g.wallet_id, g.variant);
+        if (gen < want) {
+            g.rolled_back = true;
+            MW_LOGE("kicache", "key image cache of wallet %lu is an OLD copy "
+                    "(generation %lu, expected %lu): ignored, re-export the outputs",
+                    (unsigned long)g.wallet_id, (unsigned long)gen, (unsigned long)want);
+        } else if (n <= MW_KI_CACHE_MAX && KI_HDR + (size_t)n * KI_ENTRY == ct_len) {
+            g.generation = gen;
             const uint8_t* p = plain + KI_HDR;
             for (uint32_t i = 0; i < n; i++, p += KI_ENTRY) {
                 mw_ki_entry_t* e = &g.e[i];
@@ -155,6 +209,7 @@ void mw_ki_cache_close(void)
 
 bool     mw_ki_cache_is_open(void) { return g.open; }
 uint32_t mw_ki_cache_count(void)   { return g.open ? g.count : 0; }
+bool     mw_ki_cache_rolled_back(void) { return g.open && g.rolled_back; }
 
 const mw_ki_entry_t* mw_ki_cache_find_pub(const mw_pubkey_t* out_pub)
 {
@@ -261,9 +316,14 @@ mw_err_t mw_ki_cache_save(void)
         ki_free(file, total);
         return MW_ERR_MEMORY;
     }
+    // Never below what NVS already holds (a refused old file restarts here).
+    uint32_t gen = gen_stored(g.wallet_id, g.variant);
+    if (g.generation > gen) gen = g.generation;
+    if (gen < KI_GEN_MAX) gen++;
     memset(plain, 0, KI_HDR);
     memcpy(plain, KI_MAGIC, 4);
     plain[4] = KI_VERSION;
+    plain[5] = (uint8_t)gen; plain[6] = (uint8_t)(gen >> 8); plain[7] = (uint8_t)(gen >> 16);
     memcpy(plain + 8, g.account, 32);
     put_u32(plain + 40, g.count);
     uint8_t* p = plain + KI_HDR;
@@ -282,7 +342,10 @@ mw_err_t mw_ki_cache_save(void)
         file_name(g.wallet_id, g.variant, name, sizeof name);
         err = mw_fstore_write(name, file, total);
     }
-    if (err == MW_OK) g.dirty = false;
+    // File first, then NVS: a power cut in between leaves a file one
+    // generation ahead, which loads fine.
+    if (err == MW_OK) err = gen_store(g.wallet_id, g.variant, gen);
+    if (err == MW_OK) { g.dirty = false; g.generation = gen; g.rolled_back = false; }
     ki_free(plain, pt_len);
     ki_free(file, total);
     return err;
@@ -333,6 +396,9 @@ mw_err_t mw_ki_cache_erase_wallet(uint32_t wallet_id)
     mw_err_t err = MW_OK;
     if (g.open && g.wallet_id == wallet_id) mw_ki_cache_close();
     for (uint8_t v = 0; v < 2; v++) {
+        char gk[16];
+        gen_key(wallet_id, v, gk, sizeof gk);
+        (void)mw_store_blob_erase(gk);
         file_name(wallet_id, v, name, sizeof name);
         const mw_err_t e = mw_fstore_remove(name);
         if (e != MW_OK) err = e;

@@ -75,6 +75,10 @@ mw_err_t mw_kb_run(const mw_kb_ctx_t* ctx, char* out, size_t out_cap);
 void mw_shell_run(void);
 // Installs the USB link hooks (file classifier, wake on PC events).
 void mw_shell_link_install(void);
+// Shows the progress of the device-password KDF on the open progress page
+// (flows.cpp); turn it off again after the call.
+void mw_flow_auth_progress_on(const char* title);
+void mw_flow_auth_progress_off(void);
 // The open wallet, for the link's INFO answer. Empty name when none.
 void mw_shell_info(char* name, size_t cap, uint8_t* variant, uint8_t* network);
 

@@ -843,6 +843,11 @@ int mw_cn_slow_hash(const void* data, size_t len, uint8_t hash[32]) {
     mw_memzero(c2, sizeof(c2)); mw_memzero(d, sizeof(d));
     if (allocated_here) {
         mw_cn_slow_hash_free();
+    } else {
+        // The scratchpad stays allocated for the next call, but its 2 MiB are
+        // derived from the input (passphrase, view key): never leave them in
+        // PSRAM, which sits on an unencrypted bus (security.md 6.1).
+        mw_memzero(sp, CN_MEMORY);
     }
     return 0;
 }

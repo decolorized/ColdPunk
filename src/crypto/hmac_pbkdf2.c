@@ -5,6 +5,29 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ARDUINO) && !defined(MW_HOST_BUILD)
+#include "esp_system.h"
+#endif
+
+// Progress of long derivations (device password: 200 000 rounds). The hook,
+// when set, is told about every MW_PBKDF2_TICK iterations done.
+#define MW_PBKDF2_TICK 1024u
+static mw_pbkdf2_progress_fn g_prog;
+static void*                 g_prog_ctx;
+
+void mw_pbkdf2_set_progress(mw_pbkdf2_progress_fn fn, void* ctx) {
+    g_prog     = fn;
+    g_prog_ctx = ctx;
+}
+
+static void pbkdf2_fatal(void) {
+#if defined(ARDUINO) && !defined(MW_HOST_BUILD)
+    esp_system_abort("pbkdf2: out of memory");
+#else
+    abort();
+#endif
+}
+
 // Salts longer than this fall back to the heap; wallet salts are far shorter.
 #define MW_PBKDF2_SALT_STACK 128
 
@@ -110,7 +133,10 @@ void mw_pbkdf2_sha256(const uint8_t* pw, size_t pw_len,
         } else {
             heap_buf = (uint8_t*)malloc(block_len);
             if (heap_buf == NULL) {
+                // Fail closed: an all-zero "derived key" would seal data
+                // under a public key. There is no safe value to return.
                 memset(out, 0, out_len);
+                pbkdf2_fatal();
                 return;
             }
             block = heap_buf;
@@ -133,6 +159,7 @@ void mw_pbkdf2_sha256(const uint8_t* pw, size_t pw_len,
                 for (size_t j = 0; j < MW_SHA256_DIGEST; ++j) {
                     t[j] ^= u[j];
                 }
+                if (g_prog && (i % MW_PBKDF2_TICK) == 0) g_prog(MW_PBKDF2_TICK, g_prog_ctx);
             }
 
             size_t take = (out_len < MW_SHA256_DIGEST) ? out_len
@@ -177,7 +204,10 @@ void mw_pbkdf2_sha512(const uint8_t* pw, size_t pw_len,
         } else {
             heap_buf = (uint8_t*)malloc(block_len);
             if (heap_buf == NULL) {
+                // Fail closed: an all-zero "derived key" would seal data
+                // under a public key. There is no safe value to return.
                 memset(out, 0, out_len);
+                pbkdf2_fatal();
                 return;
             }
             block = heap_buf;
@@ -200,6 +230,7 @@ void mw_pbkdf2_sha512(const uint8_t* pw, size_t pw_len,
                 for (size_t j = 0; j < MW_SHA512_DIGEST; ++j) {
                     t[j] ^= u[j];
                 }
+                if (g_prog && (i % MW_PBKDF2_TICK) == 0) g_prog(MW_PBKDF2_TICK, g_prog_ctx);
             }
 
             size_t take = (out_len < MW_SHA512_DIGEST) ? out_len

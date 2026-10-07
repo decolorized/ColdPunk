@@ -140,6 +140,32 @@ static mw_err_t ask_text(const char* title, char* out, size_t cap) {
 
 static bool lock_requested(void) { return mw_ui_lock_requested(); }
 
+// The device has no clock. A polyseed carries its birthday, which sets where
+// a restore starts scanning: ask for the current year and month once
+// ("2026-10" or "2026 10"); an empty answer keeps the epoch (scan from 2021).
+// Returns the unix time of the first day of that month, 0 when unknown.
+static uint64_t ask_birth_month(void) {
+    char in[16];
+    for (;;) {
+        memset(in, 0, sizeof(in));
+        if (ask_text(TX(XSTR_BIRTH_MONTH), in, sizeof(in)) != MW_OK || !in[0]) return 0;
+        unsigned y = 0, m = 0;
+        if (sscanf(in, "%u%*[-./ ]%u", &y, &m) == 2 && y >= 2021 && y <= 2200 &&
+            m >= 1 && m <= 12) {
+            // days_from_civil (H. Hinnant), month start.
+            const int yy = (int)y - (m <= 2 ? 1 : 0);
+            const int era = yy / 400;
+            const unsigned yoe = (unsigned)(yy - era * 400);
+            const unsigned mp = (m + 9) % 12;
+            const unsigned doy = (153 * mp + 2) / 5;
+            const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            const long days = (long)era * 146097 + (long)doe - 719468;
+            return (uint64_t)days * 86400ull;
+        }
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_BIRTH_MONTH_BAD));
+    }
+}
+
 // ===========================================================================
 //  TZ 5.2 passphrase at wallet creation - the double-entry screen
 // ===========================================================================
@@ -207,6 +233,34 @@ static void auth_report(mw_err_t e) {
     }
 }
 
+// Live progress of the password check / upgrade / re-key (several seconds on
+// the device). Runs on the crypto task; mw_ui_progress() posts to the UI
+// task. Redrawn at most once per percent.
+static void auth_progress_cb(int stage, int permille, void* ctx) {
+    static int s_last_stage = -1, s_last_pct = -1;
+    const int pct = permille / 10;
+    if (stage == s_last_stage && pct == s_last_pct) return;
+    s_last_stage = stage;
+    s_last_pct   = pct;
+    const char* what;
+    switch (stage) {
+    case MW_AUTH_STAGE_UPGRADE: what = TX(XSTR_PW_STAGE_UPGRADE); break;
+    case MW_AUTH_STAGE_NEW:     what = TX(XSTR_PW_STAGE_NEW);     break;
+    case MW_AUTH_STAGE_REKEY:   what = TX(XSTR_PW_STAGE_REKEY);   break;
+    case MW_AUTH_STAGE_CHECK:
+    default:                    what = TX(XSTR_PW_STAGE_CHECK);   break;
+    }
+    mw_ui_progress((const char*)ctx, permille, what);
+}
+
+void mw_flow_auth_progress_on(const char* title) {
+    mw_device_auth_set_progress(auth_progress_cb, (void*)title);
+}
+
+void mw_flow_auth_progress_off(void) {
+    mw_device_auth_set_progress(NULL, NULL);
+}
+
 // Returns true once the user key is installed; false when the user backed
 // out (the shell returns to the game).
 static bool device_auth(void) {
@@ -247,8 +301,10 @@ static bool device_auth(void) {
                 mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_MISMATCH));
                 continue;
             }
-            mw_ui_progress(TX(XSTR_PW_TITLE), 0, NULL);
+            mw_ui_progress(TX(XSTR_PW_TITLE), 0, TX(XSTR_PW_STAGE_NEW));
+            mw_flow_auth_progress_on(TX(XSTR_PW_TITLE));
             const mw_err_t e = mw_device_auth_set(pw);
+            mw_flow_auth_progress_off();
             mw_ui_progress_close();
             if (e == MW_OK) { ok = true; break; }
             ui_err(e);
@@ -259,8 +315,10 @@ static bool device_auth(void) {
             if (mw_device_auth_lockout_ms()) { auth_report(MW_ERR_ABORTED); continue; }
             if (ask_text(TX(XSTR_PW_ENTER), pw, sizeof(pw)) != MW_OK) break;
             const uint8_t fails_before = mw_device_auth_failed_attempts();
-            mw_ui_progress(TX(XSTR_PW_TITLE), 0, NULL);
+            mw_ui_progress(TX(XSTR_PW_TITLE), 0, TX(XSTR_PW_STAGE_CHECK));
+            mw_flow_auth_progress_on(TX(XSTR_PW_TITLE));
             const mw_err_t e = mw_device_auth_verify(pw);
+            mw_flow_auth_progress_off();
             mw_ui_progress_close();
             mw_memzero(pw, sizeof(pw));
             if (e == MW_OK) {
@@ -383,14 +441,43 @@ static mw_err_t flow_create_wallet(void) {
         const mw_err_t de = mw_dice_to_entropy(rolls, (size_t)rolled, entropy);
         mw_memzero(rolls, sizeof(rolls));
         if (de != MW_OK) { ui_err(de); e = de; goto fail; }
+
+        // The rolls are combined with the hardware TRNG, not used alone:
+        //     entropy = HMAC-SHA512(key = TRNG(32), dice_entropy)[0..32)
+        // The seed is at least as strong as the better of the two sources -
+        // biased dice cannot weaken it and a broken TRNG is covered by the
+        // dice. (Consequence: the seed cannot be recomputed from the rolls.)
+        if (mw_random_selftest() != MW_RNG_OK) {
+            mw_ui_message(T(STR_ERR_GENERIC), T(STR_ERR_GENERIC));
+            e = MW_ERR_IO;
+            goto fail;
+        }
+        {
+            uint8_t trng[32], mixed[64];
+            mw_random_bytes(trng, sizeof(trng));
+            mw_hmac_sha512(trng, sizeof(trng), entropy, sizeof(entropy), mixed);
+            memcpy(entropy, mixed, sizeof(entropy));
+            mw_memzero(trng, sizeof(trng));
+            mw_memzero(mixed, sizeof(mixed));
+        }
+        MW_LOGP("dice rolls mixed with the hardware TRNG");
+        mw_ui_message(TX(XSTR_ENTROPY_SOURCE), TX(XSTR_DICE_MIXED));
     }
 
     if (type == MW_SEED_MONERO_LEGACY) {
-        memcpy(material, entropy, 32);
+        // Canonical phrase (audit round 2, item 3): Monero encodes the spend
+        // key already reduced mod l. Raw 256-bit entropy exceeds l in ~15 of
+        // 16 cases, and Feather / monero-cli would then show a different
+        // phrase for the same address after a restore.
+        mw_scalar_t sk;
+        memcpy(sk.b, entropy, 32);
+        mw_sc_reduce32(&sk);
+        memcpy(material, sk.b, 32);
+        mw_memzero(&sk, sizeof(sk));
         material_len = 32;
         e = mw_legacy_seed_encode(material, wl, indices);
     } else {
-        e = mw_polyseed_create(entropy, sizeof(entropy), 0, 0, &ps);
+        e = mw_polyseed_create(entropy, sizeof(entropy), ask_birth_month(), 0, &ps);
         if (e == MW_OK) e = mw_polyseed_encode(&ps, wl, indices);
         if (e == MW_OK) e = mw_polyseed_pack(&ps, material, sizeof(material), &material_len);
         if (e == MW_OK) restore_height = mw_polyseed_restore_height(&ps, active_network());
@@ -763,6 +850,17 @@ static void ops_progress(void* user, const char* stage, uint32_t done, uint32_t 
 // ===========================================================================
 //  Files from the PC (task 3, algorithm steps 2-10)
 // ===========================================================================
+// The key image cache is full: the result is valid, but the device can no
+// longer track some outputs (a later transaction spending them is refused).
+static void cache_full_warning(void) {
+    const uint32_t lost = mw_ops_cache_overflow();
+    if (!lost) return;
+    char msg[200];
+    snprintf(msg, sizeof(msg), TX(XSTR_KI_CACHE_FULL), (unsigned)MW_KI_CACHE_MAX,
+             (unsigned)lost);
+    mw_ui_message(T(STR_ERR_GENERIC), msg);
+}
+
 static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t len,
                            uint8_t* out) {
     mw_ops_error_t er;
@@ -801,7 +899,7 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
     MW_LOGI("file", "key images ready for the PC: %u records, %u bytes (cache: %u)",
             (unsigned)info.count, (unsigned)out_len, (unsigned)mw_ki_cache_count());
     snprintf(body, sizeof(body), TX(XSTR_KI_DONE), (unsigned)info.count);
-    mw_ui_message(T(STR_SUCCESS), body);
+    mw_ui_message(T(STR_SUCCESS), body);    cache_full_warning();
 }
 
 static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t len,
@@ -881,6 +979,7 @@ static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t
         if (e != MW_OK) { ui_err(e); goto done; }
         MW_LOGI("file", "signed transaction set ready for the PC (%u bytes)", (unsigned)out_len);
         mw_ui_message(T(STR_SUCCESS), TX(XSTR_TX_DONE));
+        cache_full_warning();
     }
 
 done:
@@ -932,8 +1031,10 @@ static void handle_request(const mw_account_keys_t* keys, uint8_t req) {
     bool ok;
     if (vk) {
         if (keys->view_only && mw_sc_is_zero(&keys->sec.view)) ok = false;
-        // A typed number, not a tap: the view key reveals every payment.
-        else ok = mw_ui_confirm_code(TX(XSTR_VIEWKEY_TITLE), TX(XSTR_REQ_VK_Q));
+        // A plain Yes / No on the device (the user asked for this instead of
+        // the typed code): the screen spells out what leaves the device.
+        else ok = mw_ui_confirm(TX(XSTR_VIEWKEY_TITLE), TX(XSTR_REQ_VK_Q),
+                                TX(XSTR_YES), TX(XSTR_NO));
     } else {
         ok = mw_ui_confirm(TX(XSTR_ADDRESS), TX(XSTR_REQ_ADDR_Q), TX(XSTR_YES), TX(XSTR_NO));
     }
@@ -1017,6 +1118,8 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
 
     if (mw_ki_cache_open(id, variant, keys) != MW_OK) {
         MW_LOGE("wallet", "key image cache unavailable");
+    } else if (mw_ki_cache_rolled_back()) {
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_KI_ROLLBACK));
     }
     // Leftovers from before the wallet was open are not for this wallet.
     for (int k = 0; k < MW_FILE_KIND_COUNT; ++k) mw_link_inbox_clear((mw_file_kind_id_t)k);
@@ -1281,6 +1384,19 @@ static void lock_device(void) {
     MW_LOGI("shell", "device locked");
 }
 
+// USB comes up only after the first correct device password (user request:
+// no USB link while the device is locked at power-on). Started once; a later
+// lock keeps the transport but the link state refuses every file/request.
+extern "C" mw_err_t mw_usb_link_init(void);
+extern "C" bool     mw_usb_link_running(void);
+static void ensure_usb_link(void) {
+#if defined(ARDUINO) && !defined(MW_HOST_BUILD)
+    if (mw_usb_link_running()) return;
+    const mw_err_t e = mw_usb_link_init();
+    MW_LOGI("shell", "usb link started after unlock -> %s", mw_err_str(e));
+#endif
+}
+
 extern "C" void mw_shell_run(void) {
     const mw_ops_alloc_t a = { ops_alloc, ops_free };
     mw_ops_set_allocator(&a);
@@ -1291,6 +1407,7 @@ extern "C" void mw_shell_run(void) {
         mw_ui_show(MW_SCREEN_MAIN_MENU);          // neutral background
         mw_screen_game_run();
         if (!device_auth()) continue;
+        ensure_usb_link();
 
         {   // A crash crumb from the previous run (enums only, no secrets).
             uint8_t op = 0, st = 0;

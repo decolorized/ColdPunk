@@ -255,7 +255,11 @@ MW_TEST(test_birthday)
                  MW_OK);
     CHECK_EQ_INT(seed.birthday, 0);
     CHECK_EQ_INT(mw_polyseed_birthday_time(&seed), MW_POLYSEED_EPOCH);
-    CHECK_EQ_INT(mw_polyseed_restore_height(&seed, MW_NET_MAINNET), 2500000);
+    // wallet2::get_approximate_blockchain_height() at the epoch, minus the
+    // one-week margin: 1009827 + (1635768000 - 1458748658) / 120 - 5040.
+    CHECK_EQ_INT(mw_polyseed_restore_height(&seed, MW_NET_MAINNET),
+                 1009827 + (1635768000 - 1458748658) / 120 - 5040);
+    CHECK(mw_polyseed_restore_height(&seed, MW_NET_MAINNET) < 2484988);
 
     // Exactly one time step later -> one 120-second block window per step.
     CHECK_EQ_INT(mw_polyseed_create(entropy, sizeof(entropy),
@@ -263,7 +267,7 @@ MW_TEST(test_birthday)
                                     0, &seed), MW_OK);
     CHECK_EQ_INT(seed.birthday, 1);
     CHECK_EQ_INT(mw_polyseed_restore_height(&seed, MW_NET_MAINNET),
-                 2500000 + MW_POLYSEED_TIME_STEP / 120);
+                 1009827 + (1635768000 - 1458748658 + MW_POLYSEED_TIME_STEP) / 120 - 5040);
     CHECK(mw_polyseed_restore_height(&seed, MW_NET_STAGENET) <
           mw_polyseed_restore_height(&seed, MW_NET_MAINNET));
 

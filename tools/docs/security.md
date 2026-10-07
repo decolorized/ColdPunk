@@ -72,10 +72,16 @@ and the only secret that ever leaves it is a signed transaction.
 * **Sealed seed record** — always exactly 64 bytes of plaintext:
 
   ```
-  [0]        seed length (19..32)
-  [1..n]     seed material
-  [n+1..63]  random padding
+  legacy / raw keys:  [0..31] material            [32..63] random padding
+  polyseed (v2):      [0] record version = 2
+                      [1] payload length
+                      [2..]  serialized polyseed (header + secret)
+                      rest   random padding
   ```
+
+  (Version-1 polyseed records had `[0]` = secret length and no birthday or
+  features; `payload_from_plain()` recognises them by that byte and refuses
+  them with `MW_ERR_VERSION` instead of misreading them.)
 
   Constant length means `wallet_entry_t.encrypted_seed[64]` is always full and
   the ciphertext does not leak whether a wallet is a 25-word legacy seed or a
@@ -94,7 +100,7 @@ padding, so the ciphertext leaks neither the payload length nor the wallet kind.
 | `wallet_type` | `[0..31]` | `[32..63]` | Key derivation on load |
 | --- | --- | --- | --- |
 | 0 — legacy | 32-byte Monero seed | random padding | `mw_seed_to_keys(LEGACY, …, passphrase)` |
-| 1 — polyseed | `[0]` = length (19–32), then the secret | random padding | `mw_seed_to_keys(POLYSEED, …, passphrase)` |
+| 1 — polyseed | `[0]` = record version 2, `[1]` = length, then the serialized polyseed | random padding | `mw_seed_to_keys(POLYSEED, …, passphrase)` |
 | 2 — raw keys (TZ 4.2 import) | spend **secret** | random padding | spend as stored, view = `Hs(spend)` |
 | 3 — raw view-only | view **secret** | **public** spend key | view as stored, `pub.spend` as stored, `view_only = true` |
 
@@ -190,10 +196,16 @@ For legacy seeds the passphrase is folded in with Monero's own **seed offset**
 scheme (`src/monero/mnemonic.h`):
 
 ```
-passphrase == ""   ->  spend = sc_reduce32(seed)                       (no offset)
-passphrase != ""   ->  spend = sc_add(sc_reduce32(seed),
-                                      hash_to_scalar(passphrase))
+key32 = the 32 bytes the seed encodes (legacy) / polyseed_keygen() (polyseed)
+passphrase != ""   ->  key32 = sc_sub(key32, cn_slow_hash(passphrase))   (ref10 sc_sub)
+spend = sc_reduce32(key32)
+view  = sc_reduce32(keccak256(spend))
 ```
+
+This is `cryptonote::decrypt_key()` exactly as monero-wallet-cli, the GUI and
+Feather apply a seed offset on restore (`src/monero/seed_keys.c`). The host
+tests should carry a "seed + passphrase -> address" vector taken from
+monero-wallet-cli so a drift of either side shows up.
 
 The empty case is a genuine no-op — **not** `hash_to_scalar("")` — so a wallet
 created without a passphrase reproduces the plain Monero wallet exactly and is
@@ -298,8 +310,10 @@ CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0        # matches MW_HMAC_EFUSE_KEY_ID
 CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES=... # unchanged
 ```
 
-and a partition table entry for the NVS key store when the flash-encryption
-based scheme is used instead:
+A partition for the NVS key store is needed ONLY for the flash-encryption
+based scheme; the project's `partitions.csv` has none because the HMAC
+provider below is the chosen path. If you switch to the flash-encryption
+scheme, add:
 
 ```
 nvs_key,  data, nvs_keys, ,        4K, encrypted

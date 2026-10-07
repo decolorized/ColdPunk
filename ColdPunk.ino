@@ -222,8 +222,11 @@ void setup() {
     // ---- 5. exchange channels -------------------------------------------
     mw_transfer_init();
     mw_link_set_info_provider(link_info_provider, nullptr);
-    mw_err_t link_err = mw_usb_link_init();
-    MW_LOGI("boot", "usb link -> %s", mw_err_str(link_err));
+    // The USB link (CDC + HID) is NOT started here: the shell starts it after
+    // the first correct device password (flows.cpp, ensure_usb_link). Until
+    // then the device answers nothing on USB. With Tools > "USB CDC On Boot:
+    // Enabled" the core itself enumerates the CDC port before setup(); set it
+    // to Disabled for no USB device at all before the password.
     mw_shell_link_install();          // file classifier + wake on PC events
 
     // ---- 6. tasks --------------------------------------------------------

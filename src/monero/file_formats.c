@@ -694,6 +694,14 @@ static mw_err_t read_source(mw_reader_t* r, source_rec_t* s, uint32_t index,
                  (unsigned)index, (unsigned long long)n_outs, (unsigned)MW_MAX_RING_SIZE);
         return MW_ERR_TOO_MANY;
     }
+    // Consensus (v15+) accepts exactly MW_RING_SIZE members on every network;
+    // anything else is a transaction the network would refuse, so it is not
+    // signed here either (audit round 1).
+    if (n_outs != MW_RING_SIZE) {
+        diag_set(diag, at, "input #%u: ring size %llu, the network requires %u",
+                 (unsigned)index, (unsigned long long)n_outs, (unsigned)MW_RING_SIZE);
+        return MW_ERR_FORMAT;
+    }
     for (uint64_t k = 0; k < n_outs; ++k) {
         if (!read_marker(r, 2) || !mw_read_varint(r, &s->abs_index[k]) ||
             !mw_read_point(r, &s->ring[k].dest) || !mw_read_point(r, &s->ring[k].mask)) {

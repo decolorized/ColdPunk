@@ -6,19 +6,16 @@
 //  "scroll keyboard" layout. Both layouts drive exactly the same model and
 //  both work under touch AND the six-button navigation of TZ 5.6.
 //
-//  BUTTON SEMANTICS (TZ 5.6):
-//    Back, hold          - backspace with auto-repeat: one character now, then
-//                          every MW_ARROW_REPEAT_INTERVAL_MS after
-//                          MW_ARROW_REPEAT_DELAY_MS until released;
-//    arrow keys, hold    - one step immediately, then repeat every
-//                          MW_ARROW_REPEAT_INTERVAL_MS after
-//                          MW_ARROW_REPEAT_DELAY_MS until released;
-//    SELECT, short       - act on the focused cell on release (letter,
-//                          candidate, ⌫ / Space / ↵, or [Back] in the header);
-//    SELECT, hold        - the moment hold_ms reaches MW_BACK_LONG_MS, finish
-//                          the input (MW_KB_R_OK) right away. Nothing is
-//                          typed on the press edge, so a long press cannot
-//                          emit a spurious character before finishing.
+//  BUTTON SEMANTICS (v6, keyboard_nav.h):
+//    SELECT short        - act on the focused cell (letter, candidate, ⌫ /
+//                          Space / ↵, or [Back] in the header);
+//    SELECT long         - finish the input (MW_KB_R_OK); nothing is typed;
+//    BACK short          - delete one character;
+//    BACK long           - leave the input (MW_KB_R_BACK / MW_KB_R_CANCEL);
+//    arrow               - one step; held: auto-repeat like a PC keyboard;
+//    two arrows at once  - switch the layout (= the on-screen layout key);
+//    4-button boards     - UP / DOWN walk every focusable item in order.
+//    In seed input the dead letters are skipped by every move.
 //
 //  A [Back] button is present in the header on every layout and every tier,
 //  including the 128x64 scroll keyboard. Up from the top row focuses it, and
@@ -29,6 +26,7 @@
 
 #include "screen_common.h"
 #include "../data/wordlist.h"
+#include "keyboard_nav.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -123,7 +121,9 @@ struct mw_kb_state {
     lv_obj_t*            cand_btn[MW_KB_MAX_CAND];
     int                  cand_slots;
     lv_obj_t*            keys_cont;
-    lv_obj_t*            btn_back;        // [Back] in the header
+    lv_obj_t*            btn_back;        // [<] Back in the header
+    lv_obj_t*            btn_ok;          // [OK] in the header (v6)
+    int                  head_col;        // header focus: 0 = Back, 1 = OK
 
     // full keyboard: 30 cells; scroll keyboard: 26 letters + 4 specials
     lv_obj_t*            key_btn[MW_KB_GRID_CELLS];
@@ -143,10 +143,12 @@ struct mw_kb_state {
     mw_kb_area_t         area;
     int                  cur_row, cur_col;
 
-    // --- auto-repeat for Back and the arrow keys ---
-    mw_button_t          repeat_btn;      // currently held button (0 = none)
-    uint32_t             repeat_next_ms;  // when the next repeat is allowed
-    bool                 select_hold_fired; // true once the long SELECT fired
+    // --- buttons (keyboard_nav.h): press / hold / chord state, and the
+    //     cursor before the last move so a two-arrow chord can take it back
+    mw_kn_t              nav;
+    bool                 linear;          // 4-button board: UP/DOWN walk everything
+    mw_kb_area_t         prev_area;
+    int                  prev_row, prev_col;
 
     // --- output ---
     char*                out;
@@ -155,6 +157,11 @@ struct mw_kb_state {
 
 // ---- model, implemented in keyboard_full.cpp ------------------------------
 bool  mw_kb_is_dict(const mw_kb_state_t* st);
+// A key cell the cursor may rest on: a command, or a letter that can still
+// continue a word (always true in free text).
+bool  mw_kb_cell_live(const mw_kb_state_t* st, int cell);
+// The on-screen layout key (free text), if this layout has one: -1 otherwise.
+int   mw_kb_layer_cell(const mw_kb_state_t* st);
 void  mw_kb_refresh(mw_kb_state_t* st);
 void  mw_kb_input_char(mw_kb_state_t* st, char c);
 void  mw_kb_backspace(mw_kb_state_t* st);
@@ -162,6 +169,8 @@ void  mw_kb_clear_prefix(mw_kb_state_t* st);
 void  mw_kb_clear_all(mw_kb_state_t* st);
 void  mw_kb_accept_candidate(mw_kb_state_t* st, int idx);
 void  mw_kb_finish(mw_kb_state_t* st, int result);
+// [OK] in the header: finish (free text) or take the first candidate.
+void  mw_kb_ok(mw_kb_state_t* st);
 bool  mw_kb_letter_live(const mw_kb_state_t* st, char c);
 void  mw_kb_touch_activity(mw_kb_state_t* st);
 const char* mw_kb_layer_chars(mw_kb_layer_t layer);

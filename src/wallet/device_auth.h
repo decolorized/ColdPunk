@@ -53,6 +53,19 @@ typedef enum {
 #define MW_DEVICE_PW_FREE_TRIES  3        // failures before the delay kicks in
 #define MW_DEVICE_PW_MAX_DELAY_MS (10u * 60u * 1000u)
 
+// Progress of the slow parts (the key derivation takes seconds on the
+// device). Called on the task that runs verify()/set()/change(), at most once
+// per 0.1 % of work, with the stage and 0..1000 within that stage. NULL
+// switches it off.
+enum {
+    MW_AUTH_STAGE_CHECK = 1,      // checking the password
+    MW_AUTH_STAGE_UPGRADE,        // one-off: moving an old record to the new KDF
+    MW_AUTH_STAGE_NEW,            // deriving the key of a new password
+    MW_AUTH_STAGE_REKEY           // re-sealing the wallets
+};
+typedef void (*mw_device_auth_progress_fn)(int stage, int permille, void* ctx);
+void mw_device_auth_set_progress(mw_device_auth_progress_fn fn, void* ctx);
+
 // Loads the stored record (if any) and arms the lockout timer.
 mw_err_t mw_device_auth_init(void);
 mw_device_auth_state_t mw_device_auth_state(void);

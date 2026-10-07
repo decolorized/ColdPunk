@@ -72,6 +72,13 @@ void mw_hmac_sha512(const uint8_t* key, size_t key_len,
                     uint8_t out[MW_SHA512_DIGEST]);
 
 // PBKDF2-HMAC-SHA256 - required by Polyseed (10000 iterations, TZ 6.3).
+// Optional progress hook for long derivations: called from inside
+// mw_pbkdf2_sha256/512 with the number of iterations done since the last
+// call (every 1024). NULL switches it off. Not thread safe: set it around
+// one derivation on one task.
+typedef void (*mw_pbkdf2_progress_fn)(uint32_t iterations_done, void* ctx);
+void mw_pbkdf2_set_progress(mw_pbkdf2_progress_fn fn, void* ctx);
+
 void mw_pbkdf2_sha256(const uint8_t* pw, size_t pw_len,
                       const uint8_t* salt, size_t salt_len,
                       uint32_t iterations, uint8_t* out, size_t out_len);

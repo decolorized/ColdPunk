@@ -16,15 +16,12 @@
 // #define MW_BOARD_ST7701S_480x480
 // #define MW_BOARD_SSD1306_BUTTONS
 //#define MW_BOARD_ST7789_240x240
+// #define MW_BOARD_ST7735S_128x160
+// #define MW_BOARD_SSD1306_NO_SD
 // #define MW_BOARD_CAM_QR
 
 #if defined(MW_BOARD_ES3C28P)
 #  include "boards/es3c28p.h"
-
-#elif defined(MW_BOARD_TOUCH_LCD_2_240x320)
-#  include "boards/esp32s3_touch_lcd_2_240x320.h "
-
-
 #elif defined(MW_BOARD_ST7789_240x320)
 #  include "boards/esp32s3_st7789_240x320.h"
 
@@ -32,7 +29,7 @@
 #  include "boards/esp32s3_st7789_240x240.h"
 
 
-#elif defined(ESP32S3_ST7735S_128x160)
+#elif defined(MW_BOARD_ST7735S_128x160) || defined(ESP32S3_ST7735S_128x160)
 #  include "boards/esp32s3_st7735s_128x160.h"
 
 #elif defined(MW_BOARD_GC9A01_ROUND)

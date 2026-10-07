@@ -51,6 +51,9 @@ mw_err_t mw_ki_cache_open(uint32_t wallet_id, uint8_t variant,
 void     mw_ki_cache_close(void);
 bool     mw_ki_cache_is_open(void);
 uint32_t mw_ki_cache_count(void);
+// True when the file found on open was an older copy than the one last
+// saved (rollback); the cache was started empty instead.
+bool     mw_ki_cache_rolled_back(void);
 
 const mw_ki_entry_t* mw_ki_cache_find_pub(const mw_pubkey_t* out_pub);
 const mw_ki_entry_t* mw_ki_cache_find_image(const mw_keyimage_t* image);

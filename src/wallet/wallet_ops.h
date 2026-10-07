@@ -62,6 +62,11 @@ mw_err_t mw_ops_outputs_inspect(const mw_account_keys_t* keys,
                                 uint8_t* file, size_t file_len, size_t* plain_len,
                                 mw_ki_export_info_t* info, mw_ops_error_t* er);
 
+// Key image cache entries that did not fit (cache full) during the last
+// mw_ops_outputs_to_keyimages() / mw_ops_unsigned_sign(); 0 normally. The
+// result itself is still valid, but the device cannot track those outputs.
+uint32_t mw_ops_cache_overflow(void);
+
 // Computes the key image + signature of every output (the whole file fails
 // on the first output that is not ours), records them in the open key
 // image cache, and writes the SEALED "Monero key image export" file.

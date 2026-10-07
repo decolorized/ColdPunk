@@ -133,6 +133,27 @@ mw_err_t mw_ops_outputs_inspect(const mw_account_keys_t* keys,
     return MW_OK;
 }
 
+// Key image cache inserts. A full cache (MW_KI_CACHE_MAX) never evicts - a
+// forgotten key image would make a spent output look unknown - so the
+// entries that did not fit are counted and reported instead of dropped in
+// silence (audit round 1).
+static uint32_t g_cache_overflow;
+
+static void cache_put(const mw_ki_entry_t* ce)
+{
+    if (mw_ki_cache_put(ce) == MW_ERR_TOO_MANY) g_cache_overflow++;
+}
+
+static void cache_overflow_report(const char* what)
+{
+    if (g_cache_overflow == 0) return;
+    MW_LOGE("ops", "%s: key image cache full (%u entries), %u key image(s) not recorded; "
+                   "transactions spending those outputs will be refused",
+            what, (unsigned)MW_KI_CACHE_MAX, (unsigned)g_cache_overflow);
+}
+
+uint32_t mw_ops_cache_overflow(void) { return g_cache_overflow; }
+
 mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
                                      const uint8_t* plain, size_t plain_len,
                                      uint8_t* out, size_t out_cap, size_t* out_len,
@@ -145,6 +166,7 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
     memset(&d, 0, sizeof d);
     if (!keys || !plain || !out || !out_len) return MW_ERR_INVALID_ARG;
     *out_len = 0;
+    g_cache_overflow = 0;
 
     e = mw_outputs_begin(&it, plain, plain_len, keys, &d);
     if (e != MW_OK) return diag_fail(er, e, &d, "outputs: bad header");
@@ -195,7 +217,7 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
         ce.major = o.subaddr_major;
         ce.minor = o.subaddr_minor;
         ce.flags = MW_KI_F_EXPORTED;
-        (void)mw_ki_cache_put(&ce);           // no-op when the cache is closed
+        cache_put(&ce);                       // no-op when the cache is closed
 
         if ((i & 7u) == 0 || i + 1 == total) progress(cb, "key images", i + 1, total);
     }
@@ -205,6 +227,7 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
     if (e != MW_OK) return fail(er, e, "cannot seal the key image file (%s)", mw_err_str(e));
     *out_len = sealed;
     (void)mw_ki_cache_save();
+    cache_overflow_report("key image export");
     return MW_OK;
 }
 
@@ -399,6 +422,14 @@ mw_err_t mw_ops_unsigned_inspect(const mw_account_keys_t* keys, mw_network_t net
                             amt, mw_err_str(e));
             }
             const mw_ki_entry_t* ce = mw_ki_cache_find_image(&ki);
+            if (!ce && require_known_ki && mw_ki_cache_count() >= MW_KI_CACHE_MAX) {
+                return fail(er, MW_ERR_TOO_MANY,
+                            "tx %u input %u (%s XMR): key image unknown and the "
+                            "device's key image cache of this wallet is full (%u "
+                            "outputs) - it cannot track more outputs",
+                            (unsigned)(i + 1), (unsigned)(j + 1), amt,
+                            (unsigned)MW_KI_CACHE_MAX);
+            }
             if (!ce && require_known_ki) {
                 return fail(er, MW_ERR_NOT_SUPPORTED,
                             "tx %u input %u (%s XMR): key image not synchronised - "
@@ -482,6 +513,7 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
     if (!keys || !s || !out || !out_len || !s->set.data) return MW_ERR_INVALID_ARG;
     *out_len = 0;
     memset(&sc, 0, sizeof sc);
+    g_cache_overflow = 0;
 
     const uint32_t n = s->set.n_txes;
     sc.cap_kis = n * MW_MAX_OUTPUTS + (uint32_t)s->set.nt_count;
@@ -536,7 +568,7 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             ce.major = src->subaddr_major;
             ce.minor = src->subaddr_minor;
             ce.flags = MW_KI_F_SPENT;
-            (void)mw_ki_cache_put(&ce);
+            cache_put(&ce);
         }
         for (uint8_t k = 0; k < tx->n_outputs; ++k) {
             if (!tx->out_ki_valid[k] || sc.n_kis >= sc.cap_kis) continue;
@@ -550,7 +582,7 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             ce.major = tx->change_major;
             ce.minor = tx->change_minor;
             ce.flags = MW_KI_F_CHANGE;
-            (void)mw_ki_cache_put(&ce);
+            cache_put(&ce);
         }
         mw_memzero(&s->sd, sizeof s->sd);
     }
@@ -588,7 +620,7 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             ce.major = o.subaddr_major;
             ce.minor = o.subaddr_minor;
             ce.flags = MW_KI_F_EXPORTED;
-            (void)mw_ki_cache_put(&ce);
+            cache_put(&ce);
             if ((i & 7u) == 0 || i + 1 == total) progress(cb, "requested key images", i + 1, total);
         }
     }
@@ -631,10 +663,14 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
                 (unsigned)sealed, (unsigned)sc.n_kis);
     }
     (void)mw_ki_cache_save();
+    cache_overflow_report("signing");
 
 done:
     if (e != MW_OK) mw_memzero(out, out_cap < 4096 ? out_cap : 4096);
     mw_memzero(&s->sd, sizeof s->sd);
+    // The last transaction's tx secret key, input/output masks and one-time
+    // key material: in the signed set now, not needed in RAM any more.
+    mw_memzero(&s->tx, sizeof s->tx);
     mw_memzero(&s->file_key, sizeof s->file_key);
     s->has_file_key = false;
     scratch_free(&sc);

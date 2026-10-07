@@ -1,1 +1,19 @@
 .aider*
+
+# Exchange files of the PC courier: outputs, key images, (un)signed
+# transactions, view-only data and the history are PRIVATE (they link the
+# wallet to its outputs). Never commit or publish them.
+tools/tools/mwlink/exchange/
+tools/tools/mwlink/sent/
+tools/tools/mwlink/config.json
+tools/tools/mwlink/*_outputs*
+tools/tools/mwlink/*_keyImages*
+tools/tools/mwlink/*monero_tx*
+tools/tools/mwlink/*.json
+tools/tools/mwlink/__pycache__/
+__pycache__/
+
+# Build output of the host tests
+tools/test/build/
+tools/test/build-asan/
+tools/test/build-stackcheck/

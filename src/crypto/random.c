@@ -20,9 +20,7 @@
 #include <string.h>
 
 #if defined(MW_HOST_BUILD)
-#if defined(_WIN32)
 #include <stdlib.h>
-#endif
 #include <stdio.h>
 #else
 #ifdef ARDUINO
@@ -290,13 +288,30 @@ mw_rng_status_t mw_random_init(void) {
     return mw_random_selftest();
 }
 
+// Fail closed (audit round 2, item 1). Random bytes feed IVs, the fake
+// responses of CLSAG and the blinding factors of Bulletproofs+; zeros there
+// would make the real input distinguishable in the signature itself, i.e.
+// visible to anyone reading the chain. There is no safe value to return, so
+// the operation is stopped: on the device the chip restarts (the crash crumb
+// tells the PC which operation it was), on the host the test aborts.
+static void rng_fatal(const char* why) {
+#if defined(MW_HOST_BUILD)
+    fprintf(stderr, "mw_random: %s - aborting\n", why);
+    abort();
+#elif defined(ARDUINO)
+    esp_system_abort(why);
+#else
+    (void)why;
+    for (;;) { }
+#endif
+}
+
 void mw_random_bytes(void* out, size_t len) {
     if (!g_drbg.initialised) {
         // Late initialisation: never hand back predictable bytes.
         if (drbg_reseed() != MW_RNG_OK) {
-            // Last resort - zeroing is safer than returning stack garbage that
-            // a caller might mistake for entropy.
-            memset(out, 0, len);
+            if (out && len) memset(out, 0, len);   // never left as garbage
+            rng_fatal("no entropy source");
             return;
         }
     }

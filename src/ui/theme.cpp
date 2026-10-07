@@ -224,9 +224,16 @@ static void build_metrics(const mw_hal_caps_t* c) {
         if (s_m.btn_h < min_touch) s_m.btn_h = min_touch;
     }
 
-    // Keyboard header buttons and candidates share the row height.
+    // Keyboard header: icon buttons [<] and [OK], lower than a menu row so
+    // the key grid gets the room (v6: "уменьшить размер"). Candidates keep
+    // the full row height - they carry whole words.
     s_m.bar_h  = s_m.row_h;
-    s_m.cand_h = s_m.bar_h;
+    if (!s_m.mono && !s_m.compact) {
+        lv_coord_t b = (lv_coord_t)(f_body + 12);
+        if (b < 28) b = 28;
+        if (b < s_m.bar_h) s_m.bar_h = b;
+    }
+    s_m.cand_h = s_m.row_h;
 
     // 6x5 key hint: full inner width split in six, height capped by what is
     // left under the header, the typed line and the candidates.

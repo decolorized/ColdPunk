@@ -151,6 +151,15 @@ typedef enum {
 
     // v6 (ColdPunk audit fixes; keep inside this block)
     XSTR_PW_CORRUPT,
+    XSTR_DICE_MIXED,
+    XSTR_BIRTH_MONTH,
+    XSTR_BIRTH_MONTH_BAD,
+    XSTR_KI_CACHE_FULL,
+    XSTR_KI_ROLLBACK,
+    XSTR_PW_STAGE_CHECK,
+    XSTR_PW_STAGE_UPGRADE,
+    XSTR_PW_STAGE_NEW,
+    XSTR_PW_STAGE_REKEY,
     // end v6
 
     XSTR_COUNT

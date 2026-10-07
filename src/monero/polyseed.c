@@ -439,21 +439,28 @@ uint32_t mw_polyseed_restore_height(const mw_polyseed_t* seed, mw_network_t net)
         return 0;
     }
 
-    uint32_t anchor_height;
+    // wallet2::get_approximate_blockchain_height(): height of the v2 fork plus
+    // the seconds since it at 120 s per block (DIFFICULTY_TARGET_V2). The old
+    // fixed anchor (2 500 000 at the polyseed epoch) was ~15 000 blocks too
+    // high on mainnet, i.e. a restore could start AFTER the first payments.
+    uint64_t fork_time, fork_block;
     switch (net) {
-    case MW_NET_STAGENET: anchor_height =  950000u; break;  // rough
-    case MW_NET_TESTNET:  anchor_height = 1600000u; break;  // rough
+    case MW_NET_TESTNET:  fork_time = 1448285909ULL; fork_block = 624634ULL;  break;
+    case MW_NET_STAGENET: fork_time = 1520937818ULL; fork_block = 32000ULL;   break;
     case MW_NET_MAINNET:
-    default:              anchor_height = 2500000u; break;
+    default:              fork_time = 1458748658ULL; fork_block = 1009827ULL; break;
     }
+
+    // The birthday is already rounded down to its time step; on top of that
+    // a week of margin covers the drift of the real chain from the estimate.
+    // Starting a little early only costs scanning time, starting late loses
+    // payments.
+    const uint64_t margin = 7ULL * 24 * 3600 / MW_BLOCK_TIME_SEC;
 
     uint64_t t = birthday_decode(seed->birthday);
-    if (t <= MW_POLYSEED_EPOCH) {
-        return anchor_height;
-    }
-
-    uint64_t height = (uint64_t)anchor_height +
-                      (t - MW_POLYSEED_EPOCH) / MW_BLOCK_TIME_SEC;
+    if (t < MW_POLYSEED_EPOCH) t = MW_POLYSEED_EPOCH;
+    uint64_t height = fork_block + (t > fork_time ? (t - fork_time) / MW_BLOCK_TIME_SEC : 0);
+    height = (height > margin) ? height - margin : 0;
     if (height > 0xFFFFFFFFULL) {
         height = 0xFFFFFFFFULL;
     }

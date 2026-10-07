@@ -239,6 +239,49 @@ static bool password_ok(const char* pw) {
 }
 
 // ---------------------------------------------------------------------------
+// Progress (the derivation takes seconds on the device)
+// ---------------------------------------------------------------------------
+static mw_device_auth_progress_fn g_prog_fn;
+static void*                      g_prog_ctx;
+static int                        g_prog_stage;
+static uint64_t                   g_prog_done, g_prog_total;
+static int                        g_prog_last = -1;
+
+void mw_device_auth_set_progress(mw_device_auth_progress_fn fn, void* ctx) {
+    g_prog_fn  = fn;
+    g_prog_ctx = ctx;
+}
+
+static void prog_report(void) {
+    if (!g_prog_fn) return;
+    int pm = g_prog_total ? (int)(g_prog_done * 1000u / g_prog_total) : 0;
+    if (pm > 1000) pm = 1000;
+    if (pm == g_prog_last) return;           // the screen only redraws on a change
+    g_prog_last = pm;
+    g_prog_fn(g_prog_stage, pm, g_prog_ctx);
+}
+
+// Starts a stage whose work is `total` PBKDF2 iterations.
+static void prog_stage(int stage, uint64_t total) {
+    g_prog_stage = stage;
+    g_prog_done  = 0;
+    g_prog_total = total;
+    g_prog_last  = -1;
+    prog_report();
+}
+
+static void prog_tick(uint32_t iterations, void* ctx) {
+    (void)ctx;
+    g_prog_done += iterations;
+    prog_report();
+}
+
+static void prog_finish(void) {
+    g_prog_done = g_prog_total;
+    prog_report();
+}
+
+// ---------------------------------------------------------------------------
 // Derivation
 // ---------------------------------------------------------------------------
 // One pass through the eFuse HMAC: out = HW(tag || step || state).
@@ -275,6 +318,8 @@ static mw_err_t derive(const char* pw, const params_t* p,
                        uint8_t pw_key[32], uint8_t verifier[VERIFIER_LEN]) {
     uint8_t out[64];
     mw_err_t e = MW_OK;
+    const uint64_t prog_base = g_prog_done;
+    mw_pbkdf2_set_progress(g_prog_fn ? prog_tick : NULL, NULL);
 
     if (p->version == 1) {
         uint8_t full_salt[SALT_LEN + sizeof(SALT_TAG_V1) - 1];
@@ -283,6 +328,8 @@ static mw_err_t derive(const char* pw, const params_t* p,
         mw_pbkdf2_sha512((const uint8_t*)pw, strlen(pw), full_salt, sizeof full_salt,
                          p->rounds, out, sizeof out);
         mw_memzero(full_salt, sizeof full_salt);
+        g_prog_done = prog_base + p->rounds;          // the ticks miss the tail
+        prog_report();
     } else {
         // PBKDF2-HMAC-SHA256: on the 32-bit Xtensa core SHA-256 is several
         // times faster than SHA-512 per round, so the same unlock time buys
@@ -298,6 +345,8 @@ static mw_err_t derive(const char* pw, const params_t* p,
         salt[sizeof salt - 1] = 0;
         mw_pbkdf2_sha256((const uint8_t*)pw, strlen(pw), salt, sizeof salt, per,
                          state, sizeof state);
+        g_prog_done = prog_base + per;                // exact after each chunk
+        prog_report();
         for (unsigned i = 1; i < steps; ++i) {
             e = hw_step("mw.pw.hw", (uint8_t)i, state, p->hw_bound, h);
             if (e != MW_OK) break;
@@ -309,6 +358,8 @@ static mw_err_t derive(const char* pw, const params_t* p,
             salt[sizeof salt - 1] = (uint8_t)i;
             mw_pbkdf2_sha256(next_pw, sizeof next_pw, salt, sizeof salt, per,
                              state, sizeof state);
+            g_prog_done = prog_base + (uint64_t)per * (i + 1);
+            prog_report();
         }
         if (e == MW_OK) e = hw_step("mw.pw.hw.final", 0, state, p->hw_bound, h);
         if (e == MW_OK) mw_hmac_sha512(h, sizeof h, state, sizeof state, out);
@@ -317,6 +368,7 @@ static mw_err_t derive(const char* pw, const params_t* p,
         mw_memzero(h, sizeof h);
         mw_memzero(salt, sizeof salt);
     }
+    mw_pbkdf2_set_progress(NULL, NULL);
     if (e == MW_OK) {
         memcpy(pw_key, out, 32);
         mw_hmac_sha256(out + 32, 32, (const uint8_t*)VERIFY_TAG, sizeof(VERIFY_TAG) - 1,
@@ -407,7 +459,9 @@ mw_err_t mw_device_auth_set(const char* password) {
     uint8_t key[32];
     rec_t rec;
     memset(&rec, 0, sizeof rec);
+    prog_stage(MW_AUTH_STAGE_NEW, MW_DEVICE_PW_ROUNDS);
     e = new_params(password, &rec.cur, key);
+    prog_finish();
     if (e != MW_OK) { mw_memzero(key, sizeof key); return e; }
     rec.present = true;
     g_rec = rec;
@@ -461,7 +515,9 @@ static mw_err_t switch_password(const params_t* next, const uint8_t old_key[32],
         }
     }
 
+    prog_stage(MW_AUTH_STAGE_REKEY, 1);
     e = mw_wallet_store_rekey(old_key, new_key);   // step 2, idempotent
+    prog_finish();
     if (e != MW_OK) {
         // Back to the old password: re-seal whatever was converted (also
         // idempotent) and drop the pending part.
@@ -490,6 +546,8 @@ static mw_err_t switch_password(const params_t* next, const uint8_t old_key[32],
 // the current password (after completing an interrupted change, if any).
 static mw_err_t check(const char* password, uint8_t key[32]) {
     uint8_t ver[VERIFIER_LEN], other[32];
+    prog_stage(MW_AUTH_STAGE_CHECK,
+               (uint64_t)g_rec.cur.rounds + (g_rec.changing ? g_rec.pend.rounds : 0));
     mw_err_t e = derive(password, &g_rec.cur, key, ver);
     bool ok = (e == MW_OK) && mw_ct_equal(ver, g_rec.cur.verifier, VERIFIER_LEN) != 0;
 
@@ -532,6 +590,7 @@ static void maybe_upgrade(const char* password, const uint8_t key[32]) {
 
     params_t next;
     uint8_t  new_key[32];
+    prog_stage(MW_AUTH_STAGE_UPGRADE, MW_DEVICE_PW_ROUNDS);
     if (new_params(password, &next, new_key) == MW_OK) {
         MW_LOGI("auth", "upgrading the password record (v%u, %u rounds%s -> v2, %u rounds%s)",
                 (unsigned)g_rec.cur.version, (unsigned)g_rec.cur.rounds,
@@ -608,6 +667,7 @@ mw_err_t mw_device_auth_change(const char* old_password, const char* new_passwor
     uint8_t old_key[32], new_key[32], ver[VERIFIER_LEN];
     params_t next;
     memset(&next, 0, sizeof next);
+    prog_stage(MW_AUTH_STAGE_NEW, (uint64_t)g_rec.cur.rounds + MW_DEVICE_PW_ROUNDS);
     e = derive(old_password, &g_rec.cur, old_key, ver);
     mw_memzero(ver, sizeof ver);
     if (e == MW_OK) e = new_params(new_password, &next, new_key);

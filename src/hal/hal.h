@@ -77,6 +77,10 @@ mw_err_t mw_touch_calibrate(int32_t coeffs[6]);   // persisted in NVS
 mw_err_t mw_buttons_init(void);
 // Bitmask of currently pressed buttons, bit index = mw_button_t value.
 uint32_t mw_buttons_read(void);
+// Bitmask of the buttons the board actually has wired (same bit layout).
+// A board without LEFT/RIGHT (4-button boards) gets the linear keyboard
+// navigation of src/ui/keyboard_nav.h.
+uint32_t mw_buttons_present(void);
 // Encoder delta since the last call (0 when no encoder).
 int32_t  mw_encoder_read(void);
 

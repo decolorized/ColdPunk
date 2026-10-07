@@ -650,14 +650,32 @@ one-dimensional group navigation is not enough for a 6x5 grid, so the
 keyboards move a 2-D cursor themselves and call `lv_group_focus_obj()` to move
 the focus ring:
 
-| | full keyboard | scroll keyboard |
-| :--- | :--- | :--- |
-| Left / Right | move one cell, wrapping to the previous/next row | scroll the strip to the previous/next **live** letter (dead letters are skipped) |
-| Up / Down | move one row; Up from the top key row enters the candidate grid, Down from the bottom candidate row returns to the keys | move between the candidate list, the strip and the special row |
-| Select | enter the focused letter, or accept the focused candidate | same |
-| Back — tap | backspace; with an empty prefix and `allow_back`, step to the previous word | same |
-| Back — long (>= 600 ms) | clear the prefix | same |
-| Back — very long (>= 2000 ms) | clear the whole phrase (`MW_KB_RESTART`) | same |
+The press logic is `src/ui/keyboard_nav.{h,c}` (host-tested in
+`tools/test/test_keyboard_nav.c`); the layouts only map its actions:
+
+| Button | Action (both keyboards) |
+| :--- | :--- |
+| Select — short (released < 600 ms) | enter the focused letter / accept the focused candidate / act on the focused header icon |
+| Select — long (>= 600 ms) | finish the input (OK); nothing is typed |
+| Back — short | delete one character |
+| Back — long (>= 600 ms) | leave the input (`MW_KB_R_BACK` with `allow_back`, else cancel) |
+| Arrow | one step at once; held: repeats after 500 ms every 120 ms |
+| Two arrows at once | switch the layout (lower / UPPER / 12# / symbols) — the on-screen layout key stays; the step the first arrow made is taken back |
+
+Movement: full keyboard — a 2-D cursor over the key grid; Up from the top key
+row goes to the candidates, then to the header icons `[<]` / `[OK]` (Left /
+Right switch between them). Scroll keyboard — Left / Right walk the letter
+strip, Up / Down move between header, candidates, strip and special row.
+
+**Four-button boards** (no LEFT / RIGHT wired, `mw_buttons_present()`): Up /
+Down walk every focusable item in reading order with wrap-around — `[<]`,
+`[OK]`, the candidates, the keys.
+
+In seed-word input every move skips letters that cannot continue a word.
+
+The header of every input is `[<]  caption  [x]  [OK]` with icon buttons and a
+lower row (`bar_h`, theme.cpp) than menu rows, which leaves the key grid more
+room.
 
 Every other screen uses plain `lv_group` navigation instead: Up/Down map to
 `LV_KEY_PREV`/`LV_KEY_NEXT`, Select to `LV_KEY_ENTER`, Back to `LV_KEY_ESC`,
