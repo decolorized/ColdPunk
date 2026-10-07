@@ -119,15 +119,20 @@ static constexpr bool MW_BLIT_BIG_ENDIAN = (MW_LVGL_COLOR_16_SWAP != 0);
 static Arduino_DataBus* s_bus = nullptr;
 static Arduino_GFX*     s_gfx = nullptr;
 
-// DISPLAY_WIDTH x DISPLAY_HEIGHT are the LOGICAL size after DISPLAY_ROTATION.
-// Every supported panel is portrait (or square) at rotation 0, so an odd
-// rotation must come with WIDTH > HEIGHT: a header that sets ROTATION 1 but
-// keeps 240x320 would draw a landscape image into a portrait LVGL screen.
-static_assert(DISPLAY_WIDTH == DISPLAY_HEIGHT ||
-              ((DISPLAY_ROTATION & 1) ? (DISPLAY_WIDTH > DISPLAY_HEIGHT)
-                                      : (DISPLAY_WIDTH < DISPLAY_HEIGHT)),
-              "DISPLAY_WIDTH/HEIGHT must be the size after DISPLAY_ROTATION: "
-              "odd rotations are landscape (WIDTH > HEIGHT)");
+// DISPLAY_WIDTH x DISPLAY_HEIGHT is the PHYSICAL panel (rotation 0) and is
+// what every Arduino_GFX constructor below takes.  The logical size is read
+// back from the driver after begin() - see display_drivers.h.
+static_assert(DISPLAY_WIDTH > 0 && DISPLAY_HEIGHT > 0 &&
+              DISPLAY_WIDTH <= 1024 && DISPLAY_HEIGHT <= 1024,
+              "DISPLAY_WIDTH/HEIGHT: physical panel size at rotation 0");
+static_assert(DISPLAY_ROTATION >= 0 && DISPLAY_ROTATION <= 3,
+              "DISPLAY_ROTATION is 0..3");
+
+// Logical size as reported by the driver; 0 until mw_display_init().
+static uint16_t s_log_w = 0, s_log_h = 0;
+
+uint16_t mw_display_width(void)  { return s_log_w ? s_log_w : (uint16_t)MW_DISPLAY_EXPECT_W; }
+uint16_t mw_display_height(void) { return s_log_h ? s_log_h : (uint16_t)MW_DISPLAY_EXPECT_H; }
 
 #if MW_DISPLAY_RGB_PANEL
 static Arduino_ESP32RGBPanel* s_panel = nullptr;
@@ -238,13 +243,27 @@ mw_err_t mw_display_init(void)
     if (!mw_gfx_build()) return MW_ERR_MEMORY;
     if (!s_gfx->begin((int32_t)DISPLAY_SPI_HZ)) return MW_ERR_IO;
 
-    // Arduino_GFX swaps width/height itself for odd rotations; a mismatch
-    // means the board header and the driver disagree about the geometry.
-    if (s_gfx->width() != DISPLAY_WIDTH || s_gfx->height() != DISPLAY_HEIGHT) {
-        MW_LOGE("display", "driver reports %dx%d, board header says %dx%d (rotation %d)",
-                (int)s_gfx->width(), (int)s_gfx->height(),
-                (int)DISPLAY_WIDTH, (int)DISPLAY_HEIGHT, (int)DISPLAY_ROTATION);
+    // The logical frame is whatever the driver now says it is: some drivers
+    // swap width/height for an odd rotation, some leave the RAM window as it
+    // is.  LVGL gets exactly this size (via mw_hal_caps()), so the frame the
+    // UI renders and the window the driver addresses always agree.
+    const int32_t gw = (int32_t)s_gfx->width(), gh = (int32_t)s_gfx->height();
+    const bool sane = gw > 0 && gh > 0 && gw <= 1024 && gh <= 1024 &&
+                      (int32_t)gw * gh == (int32_t)DISPLAY_WIDTH * DISPLAY_HEIGHT;
+    if (sane) {
+        s_log_w = (uint16_t)gw;
+        s_log_h = (uint16_t)gh;
+    } else {
+        s_log_w = (uint16_t)MW_DISPLAY_EXPECT_W;
+        s_log_h = (uint16_t)MW_DISPLAY_EXPECT_H;
+        MW_LOGE("display", "driver reports %dx%d for a %dx%d panel - using %ux%u",
+                (int)gw, (int)gh, (int)DISPLAY_WIDTH, (int)DISPLAY_HEIGHT,
+                (unsigned)s_log_w, (unsigned)s_log_h);
     }
+    MW_LOGI("display", "panel %dx%d rot %d -> logical %ux%u%s",
+            (int)DISPLAY_WIDTH, (int)DISPLAY_HEIGHT, (int)DISPLAY_ROTATION,
+            (unsigned)s_log_w, (unsigned)s_log_h,
+            (s_log_w == MW_DISPLAY_EXPECT_W) ? "" : " (driver keeps the axes)");
 
     s_gfx->fillScreen(0x0000);          // dark theme (TZ 4.1) from frame one
     return MW_OK;
@@ -294,6 +313,12 @@ void mw_display_wait_dma(void)
 #if (DISPLAY_WIDTH != 128) || (DISPLAY_HEIGHT != 64)
 #error "The mono OLED path is wired for 128x64 (TZ 2.3 / 5.6 minimum screen)"
 #endif
+
+#if DISPLAY_ROTATION != 0
+#error "The mono OLED path draws in panel order: DISPLAY_ROTATION must be 0"
+#endif
+uint16_t mw_display_width(void)  { return (uint16_t)DISPLAY_WIDTH; }
+uint16_t mw_display_height(void) { return (uint16_t)DISPLAY_HEIGHT; }
 
 #define MW_OLED_PAGES   (DISPLAY_HEIGHT / 8)          // 8
 #define MW_OLED_FB_SIZE (DISPLAY_WIDTH * MW_OLED_PAGES)

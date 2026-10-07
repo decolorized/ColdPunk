@@ -29,6 +29,9 @@ extern "C" {
 #define TOUCH_CST816S 3
 #define TOUCH_GT911   4
 #define TOUCH_XPT2046 5
+// CST816D / CST816T use the CST816S register map (0x15, regs 0x01..0x06).
+#define TOUCH_CST816D TOUCH_CST816S
+#define TOUCH_CST816T TOUCH_CST816S
 
 typedef struct {
     uint16_t width, height;

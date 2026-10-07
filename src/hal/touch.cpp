@@ -59,10 +59,7 @@ static const mw_touch_geom_t s_geom = {
     (uint8_t)(DISPLAY_ROTATION & 3),
     TOUCH_SWAP_XY != 0, TOUCH_MIRROR_X != 0, TOUCH_MIRROR_Y != 0
 };
-static_assert((DISPLAY_ROTATION & 1) ? (TOUCH_NATIVE_W == DISPLAY_HEIGHT &&
-                                        TOUCH_NATIVE_H == DISPLAY_WIDTH)
-                                     : (TOUCH_NATIVE_W == DISPLAY_WIDTH &&
-                                        TOUCH_NATIVE_H == DISPLAY_HEIGHT),
+static_assert(TOUCH_NATIVE_W > 0 && TOUCH_NATIVE_H > 0,
               "TOUCH_NATIVE_W/H must be the glass size at rotation 0");
 #endif
 
@@ -91,8 +88,8 @@ static void cal_defaults(void)
 #if TOUCH_DRIVER == TOUCH_XPT2046
     const int32_t raw_lo = 200, raw_hi = 3900;
     const int32_t span   = raw_hi - raw_lo;
-    int32_t sx = (int32_t)(((int64_t)DISPLAY_WIDTH  * MW_Q16) / span);
-    int32_t sy = (int32_t)(((int64_t)DISPLAY_HEIGHT * MW_Q16) / span);
+    int32_t sx = (int32_t)(((int64_t)mw_display_width()  * MW_Q16) / span);
+    int32_t sy = (int32_t)(((int64_t)mw_display_height() * MW_Q16) / span);
 #if TOUCH_SWAP_XY
     s_cal[0] = 0;  s_cal[1] = sx; s_cal[2] = -sx * raw_lo;
     s_cal[3] = sy; s_cal[4] = 0;  s_cal[5] = -sy * raw_lo;
@@ -110,7 +107,7 @@ static void cal_defaults(void)
 static void to_screen(int32_t u, int32_t v, uint16_t* x, uint16_t* y)
 {
 #if TOUCH_DRIVER == TOUCH_XPT2046
-    mw_touch_cal_apply(s_cal, u, v, DISPLAY_WIDTH, DISPLAY_HEIGHT, x, y);
+    mw_touch_cal_apply(s_cal, u, v, mw_display_width(), mw_display_height(), x, y);
 #else
     mw_touch_map_point(&s_geom, u, v, x, y);
 #endif
@@ -313,7 +310,7 @@ mw_err_t mw_touch_init(void)
     if (mw_settings_load(&st) == MW_OK && st.touch_calibrated) {
 #if TOUCH_DRIVER == TOUCH_XPT2046
         if (mw_touch_cal_tag_ok(st.touch_cal_tag, DISPLAY_ROTATION & 3,
-                                DISPLAY_WIDTH, DISPLAY_HEIGHT)) {
+                                mw_display_width(), mw_display_height())) {
             memcpy(s_cal, st.touch_calib, sizeof(s_cal));
             cal = "loaded";
         } else {
@@ -331,13 +328,13 @@ mw_err_t mw_touch_init(void)
     // Geometry only, never a coordinate.
 #if TOUCH_DRIVER == TOUCH_XPT2046
     MW_LOGI("touch", "%s rot=%d logical=%dx%d swap=%d cal=%s%s", driver_name(),
-            (int)(DISPLAY_ROTATION & 3), (int)DISPLAY_WIDTH, (int)DISPLAY_HEIGHT,
+            (int)(DISPLAY_ROTATION & 3), (int)mw_display_width(), (int)mw_display_height(),
             (int)(TOUCH_SWAP_XY != 0), cal, s_ready ? "" : " (bus error)");
 #else
     MW_LOGI("touch", "%s rot=%d native=%dx%d logical=%dx%d swap=%d mx=%d my=%d cal=%s%s",
             driver_name(), (int)(DISPLAY_ROTATION & 3),
             (int)TOUCH_NATIVE_W, (int)TOUCH_NATIVE_H,
-            (int)DISPLAY_WIDTH, (int)DISPLAY_HEIGHT, (int)(TOUCH_SWAP_XY != 0),
+            (int)mw_display_width(), (int)mw_display_height(), (int)(TOUCH_SWAP_XY != 0),
             (int)(TOUCH_MIRROR_X != 0), (int)(TOUCH_MIRROR_Y != 0), cal,
             s_ready ? "" : " (bus error)");
 #endif
@@ -395,8 +392,9 @@ static void draw_target(int16_t cx, int16_t cy)
     int16_t x = (int16_t)(cx - 8), y = (int16_t)(cy - 8);
     if (x < 0) x = 0;
     if (y < 0) y = 0;
-    if (x + 16 > DISPLAY_WIDTH)  x = (int16_t)(DISPLAY_WIDTH  - 16);
-    if (y + 16 > DISPLAY_HEIGHT) y = (int16_t)(DISPLAY_HEIGHT - 16);
+    const int16_t W = (int16_t)mw_display_width(), H = (int16_t)mw_display_height();
+    if (x + 16 > W) x = (int16_t)(W - 16);
+    if (y + 16 > H) y = (int16_t)(H - 16);
     mw_display_blit(x, y, 16, 16, block);
     mw_display_flush();
 }
@@ -443,10 +441,9 @@ mw_err_t mw_touch_calibrate(int32_t coeffs[6])
     // Targets at 15 %/85 % of each axis: far enough apart for a well
     // conditioned system, far enough from the bezel to be reachable.  The
     // 4th (centre) target only verifies the result.
-    const int32_t tx[4] = { DISPLAY_WIDTH  * 15 / 100, DISPLAY_WIDTH  * 85 / 100,
-                            DISPLAY_WIDTH  * 15 / 100, DISPLAY_WIDTH  / 2 };
-    const int32_t ty[4] = { DISPLAY_HEIGHT * 15 / 100, DISPLAY_HEIGHT * 15 / 100,
-                            DISPLAY_HEIGHT * 85 / 100, DISPLAY_HEIGHT / 2 };
+    const int32_t W = (int32_t)mw_display_width(), H = (int32_t)mw_display_height();
+    const int32_t tx[4] = { W * 15 / 100, W * 85 / 100, W * 15 / 100, W / 2 };
+    const int32_t ty[4] = { H * 15 / 100, H * 15 / 100, H * 85 / 100, H / 2 };
 
     int32_t u[4], v[4];
     for (int i = 0; i < 4; ++i) {
@@ -476,7 +473,7 @@ mw_err_t mw_touch_calibrate(int32_t coeffs[6])
     memcpy(st.touch_calib, s_cal, sizeof(st.touch_calib));
     st.touch_calibrated = true;
     mw_touch_cal_tag_make(st.touch_cal_tag, DISPLAY_ROTATION & 3,
-                          DISPLAY_WIDTH, DISPLAY_HEIGHT);
+                          mw_display_width(), mw_display_height());
     return mw_settings_save(&st);
 }
 

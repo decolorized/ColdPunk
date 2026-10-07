@@ -57,6 +57,7 @@ the three routes finds a header, the build stops with a pointer to this file.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `es3c28p.h` | ILI9341 240×320 SPI | FT6336G (I²C) | — | yes, shared bus | no | no | TZ 2.2 reference board |
 | `esp32s3_st7789_240x320.h` | ST7789 240×320 SPI | CST816S (I²C) | — | yes, shared bus | no | GPIO4 | the common 2.4″/2.8″ S3 touch modules |
+| `esp32s3_touch_lcd_2_240x320.h` | ST7789T3 240×320 SPI, landscape | CST816D (I²C) | — | **no** | no | no | Waveshare ESP32-S3-Touch-LCD-2 (`MW_BOARD_TOUCH_LCD_2`) |
 | `esp32s3_gc9a01_round.h` | GC9A01 240×240 round | CST816S (I²C) | — | **no** | no | GPIO1 | Waveshare ESP32-S3-Touch-LCD-1.28; USB/QR only |
 | `esp32s3_ili9488_320x480.h` | ILI9488 320×480 SPI | XPT2046 (SPI, resistive) | — | yes, shared bus | no | GPIO4 | the only board that really needs calibration |
 | `esp32s3_st7701s_480x480.h` | ST7701S 480×480 RGB | GT911 (I²C) | — | **no** | no | no | Guition ESP32-S3-4848S040 class; pin-starved |
@@ -121,9 +122,20 @@ top of the file. Every board here follows it.
 `HAS_TOUCH`, `HAS_SD`, `HAS_CAMERA`, `HAS_BUTTONS`, `HAS_PSRAM`,
 `PSRAM_SIZE_MB`, `HAS_HMAC`, `HAS_USB_OTG`, `DEFAULT_SEED_INPUT_MODE`.
 
+`DISPLAY_WIDTH` × `DISPLAY_HEIGHT` is the **physical** panel — its size at
+rotation 0, as in the datasheet (240×320 for a 2.8" ILI9341 or a 2" ST7789T3),
+whatever `DISPLAY_ROTATION` is. The logical size the UI uses is not written
+anywhere: after `begin()` the firmware asks the driver (`s_gfx->width()` /
+`height()`) and hands that to LVGL, the theme metrics and the touch code via
+`mw_hal_caps()`. A driver that swaps the axes for an odd rotation and one that
+keeps its RAM window both work, because LVGL always gets the size the driver
+actually addresses. The boot log shows the result:
+`panel 240x320 rot 1 -> logical 320x240`.
+
 `DISPLAY_DRIVER` is one of `DISPLAY_ILI9341 / ST7789 / ST7701S / GC9A01 /
 ILI9488 / SSD1306 / SH1106`; `TOUCH_DRIVER` is one of `TOUCH_NONE / FT6336G /
-FT6236 / CST816S / GT911 / XPT2046` (all from `src/hal/hal.h`). An
+FT6236 / CST816S / GT911 / XPT2046` (`CST816D` / `CST816T` are aliases of
+`CST816S`; all from `src/hal/hal.h`). An
 unrecognised value is a compile error, not a runtime surprise.
 
 ### Optional defines and their defaults
@@ -133,7 +145,7 @@ header never has to be touched when a new knob is added.
 
 | Define | Default | Meaning |
 | --- | --- | --- |
-| `DISPLAY_ROTATION` | 0 | 0–3, passed to the GFX driver |
+| `DISPLAY_ROTATION` | 0 | 0–3, passed to the GFX driver; odd = landscape on a portrait panel |
 | `DISPLAY_IPS` | 1 | inverted panel |
 | `DISPLAY_SPI_HZ` | 40 MHz | panel clock |
 | `TFT_BL` | −1 | −1 makes `mw_display_backlight()` a no-op |

@@ -144,8 +144,10 @@ static void caps_fill(void)
     if (s_caps_ready) return;
     memset(&s_caps, 0, sizeof(s_caps));
 
-    s_caps.width       = DISPLAY_WIDTH;
-    s_caps.height      = DISPLAY_HEIGHT;
+    // Logical size: from the driver once the display is up (see
+    // display_drivers.h), the expected value before that.
+    s_caps.width       = mw_display_width();
+    s_caps.height      = mw_display_height();
     s_caps.rotation    = DISPLAY_ROTATION;
     s_caps.monochrome  = MW_DISPLAY_MONO ? true : false;
     s_caps.has_touch   = (HAS_TOUCH && TOUCH_DRIVER != TOUCH_NONE);
@@ -333,6 +335,9 @@ mw_err_t mw_hal_init(void)
     mw_display_backlight(100);
 
     // --- 4. Inputs (both optional, neither fatal) -------------------------
+    // Refill: something may have read the caps before the driver was up and
+    // the logical size is only known now.
+    s_caps_ready = false;
     caps_fill();
     if (s_caps.has_touch) {
         e = mw_touch_init();

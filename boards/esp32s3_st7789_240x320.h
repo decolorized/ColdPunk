@@ -24,7 +24,7 @@
 // ===== Display =====
 #define DISPLAY_DRIVER   DISPLAY_ST7789
 #define DISPLAY_WIDTH    240
-#define DISPLAY_HEIGHT   240
+#define DISPLAY_HEIGHT   320
 #define DISPLAY_ROTATION 0
 #define TFT_CS           10
 #define TFT_DC           9

@@ -12,9 +12,9 @@
 
 // ===== Display =====
 #define DISPLAY_DRIVER   DISPLAY_ILI9341
-#define DISPLAY_WIDTH    320
-#define DISPLAY_HEIGHT   240
-#define DISPLAY_ROTATION 1
+#define DISPLAY_WIDTH    240                  // physical panel, rotation 0
+#define DISPLAY_HEIGHT   320
+#define DISPLAY_ROTATION 1                    // landscape: logical 320x240
 #define DISPLAY_IPS      1                    // ILI9341V на этом модуле Ч IPS
 #define DISPLAY_SPI_HZ   40000000UL           // 40 ћ√ц, как в рабочем скетче
 

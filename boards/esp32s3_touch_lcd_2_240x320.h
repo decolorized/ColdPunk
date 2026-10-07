@@ -10,9 +10,11 @@
 // ===== Дисплей =====
 // На этой плате установлена IPS-матрица 2 дюйма с драйвером ST7789T3
 #define DISPLAY_DRIVER   DISPLAY_ST7789       // ST7789T3
-#define DISPLAY_WIDTH    240                  // Ширина в портретной ориентации
-#define DISPLAY_HEIGHT   320                  // Высота в портретной ориентации
-#define DISPLAY_ROTATION 1                    // 0 = портрет (240x320)
+// DISPLAY_WIDTH/HEIGHT - физический размер панели (при rotation 0).
+// Логический размер после поворота прошивка берёт у драйвера в рантайме.
+#define DISPLAY_WIDTH    240
+#define DISPLAY_HEIGHT   320
+#define DISPLAY_ROTATION 1                    // 0/2 = портрет 240x320, 1/3 = альбом 320x240
 #define DISPLAY_IPS      1                    // Панель IPS
 #define DISPLAY_SPI_HZ   40000000UL           // 40 МГц (подтверждено рабочими проектами)
 
@@ -28,7 +30,7 @@
 
 // ===== Тачскрин (CST816D) =====
 #define HAS_TOUCH        1
-#define TOUCH_DRIVER     TOUCH_CST816D
+#define TOUCH_DRIVER     TOUCH_CST816D        // = драйвер CST816S (та же карта регистров)
 #define TOUCH_SDA        48
 #define TOUCH_SCL        47
 #define TOUCH_INT        -1                   // Прерывание не используется (см. рабочие проекты)

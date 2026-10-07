@@ -60,6 +60,26 @@
 #ifndef DISPLAY_ROTATION
 #define DISPLAY_ROTATION 0
 #endif
+
+// Display geometry contract (v6):
+//   DISPLAY_WIDTH x DISPLAY_HEIGHT is the PHYSICAL panel, i.e. its size at
+//   rotation 0 - the numbers from the panel datasheet (240x320 for a 2.8"
+//   ILI9341 or a 2" ST7789T3, whatever DISPLAY_ROTATION says).
+//   The LOGICAL size the UI works in is NOT a compile-time constant: it is
+//   read from the driver after begin() (mw_display_width/height() below) and
+//   reaches LVGL and the theme metrics through mw_hal_caps().  A controller
+//   whose driver swaps the axes for an odd rotation and one whose driver does
+//   not both end up with LVGL and the driver agreeing on the frame size.
+// MW_DISPLAY_EXPECT_W/H is only the usual answer (axes swapped for an odd
+// rotation): the value before the driver is up and the reference the init
+// log compares the driver against.
+#if (DISPLAY_ROTATION & 1)
+#  define MW_DISPLAY_EXPECT_W DISPLAY_HEIGHT
+#  define MW_DISPLAY_EXPECT_H DISPLAY_WIDTH
+#else
+#  define MW_DISPLAY_EXPECT_W DISPLAY_WIDTH
+#  define MW_DISPLAY_EXPECT_H DISPLAY_HEIGHT
+#endif
 #ifndef TFT_CS
 #define TFT_CS -1
 #endif
@@ -129,21 +149,12 @@
 #define TOUCH_MIRROR_Y 0
 #endif
 // Native (rotation 0) size of the touch glass; by default the panel's own
-// size, i.e. DISPLAY_WIDTH x DISPLAY_HEIGHT with the axes swapped back for an
-// odd DISPLAY_ROTATION.
+// physical size, DISPLAY_WIDTH x DISPLAY_HEIGHT.
 #ifndef TOUCH_NATIVE_W
-#  if (DISPLAY_ROTATION & 1)
-#    define TOUCH_NATIVE_W DISPLAY_HEIGHT
-#  else
-#    define TOUCH_NATIVE_W DISPLAY_WIDTH
-#  endif
+#  define TOUCH_NATIVE_W DISPLAY_WIDTH
 #endif
 #ifndef TOUCH_NATIVE_H
-#  if (DISPLAY_ROTATION & 1)
-#    define TOUCH_NATIVE_H DISPLAY_WIDTH
-#  else
-#    define TOUCH_NATIVE_H DISPLAY_HEIGHT
-#  endif
+#  define TOUCH_NATIVE_H DISPLAY_HEIGHT
 #endif
 
 // Buttons / encoder.
@@ -412,6 +423,12 @@ uint32_t mw_buttons_press_ms(mw_button_t btn);
 void     mw_buttons_poll(void);
 
 // --- display extras --------------------------------------------------------
+// Logical (after DISPLAY_ROTATION) size of the frame the driver accepts.
+// After mw_display_init() this is what the driver itself reports; before it
+// (or if the driver reports nonsense) MW_DISPLAY_EXPECT_W/H.  Every layer
+// above the HAL takes the size from mw_hal_caps(), which is filled from here.
+uint16_t mw_display_width(void);
+uint16_t mw_display_height(void);
 // Fills the whole panel with one RGB565 colour without allocating a frame.
 void     mw_display_fill(uint16_t rgb565);
 // 1 when the panel is monochrome and mw_display_blit() thresholds to 1 bpp.
