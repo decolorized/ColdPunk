@@ -1,0 +1,485 @@
+// Display driver dispatch for the seven panels of TZ 2.3.
+//
+// Backend: Arduino_GFX (GFX Library for Arduino) for the five colour panels,
+// and a small self-contained I2C driver for the two monochrome OLEDs.
+//
+// Why the OLEDs are not routed through Arduino_GFX: mw_display_blit() is
+// specified as an LVGL-friendly RGB565 blit, so a 1 bpp panel needs a shadow
+// framebuffer and a threshold pass no matter which library sits underneath.
+// Once that framebuffer exists the remaining work is one init sequence and a
+// page write, which keeps the OLED path free of any library-version
+// assumptions.  128x64x1bpp = 1024 bytes of DRAM, which is nothing.
+//
+// LIBRARY VERSION: written against Arduino_GFX (moononournation) 1.4.x, where
+// the data-bus classes take the pins and the display classes take the bus:
+//   Arduino_HWSPI(dc, cs, sck, mosi, miso, SPIClass*, is_shared_interface)
+//   Arduino_ESP32SPI(dc, cs, sck, mosi, miso)
+//   Arduino_SWSPI(dc, cs, sck, mosi, miso)
+//   Arduino_ST7789(bus, rst, rotation, ips, w, h, col/row offsets...)
+//   Arduino_RGB_Display(w, h, panel, rot, auto_flush, bus, rst, init, len)
+// The 1.2.x line had a different Arduino_HWSPI (dc, cs, SPIClass*, shared) and
+// carried the RGB pins on the display class instead of the panel class; if the
+// installed library is that old, these five constructor calls are the only
+// things that need adjusting.
+//
+// Everything here is compiled only on the device build.
+#if defined(ARDUINO) && !defined(MW_HOST_BUILD)
+
+#include <Arduino.h>
+#include <string.h>
+#include "display_drivers.h"
+
+// ---------------------------------------------------------------------------
+// LVGL colour byte order.
+//
+// mw_display_blit() is handed whatever LVGL rendered, so the two ends have to
+// agree on the byte order of an RGB565 pixel - Arduino_GFX has a separate
+// entry point for the big-endian form.  They used to agree only by luck: this
+// file defaulted MW_LVGL_COLOR_16_SWAP to 0 while docs/build_arduino.md told
+// the reader to set LV_COLOR_16_SWAP=1, and nothing tied the two together.
+//
+// The fix is to stop having a second opinion.  LVGL's configuration is the
+// single source of truth, so this file includes <lvgl.h> and reads it.  Yes,
+// that is a dependency the HAL did not have before; the alternative is two
+// independent defaults that can silently disagree, which is exactly the bug.
+//
+// What LVGL 9.6 actually does:
+//   * lv_conf.h no longer carries LV_COLOR_DEPTH.  The pixel format is
+//     LV_COLOR_FORMAT_DEFAULT, which lv_display_create() gives every display;
+//     this project's lv_conf.h sets LV_COLOR_FORMAT_RGB565, i.e. little-endian.
+//     LV_COLOR_DEPTH still exists, but only because lv_conf_internal.h derives
+//     it back from the format - and it is 16 for both RGB565 and
+//     RGB565_SWAPPED, so it cannot answer the byte-order question.
+//   * LV_COLOR_FORMAT_RGB565_SWAPPED is the big-endian form.  In v9 that -
+//     not LV_COLOR_16_SWAP - is how byte order is chosen.
+//   * LV_COLOR_16_SWAP survives only as a v8 compatibility shim: when it is
+//     defined non-zero, lv_refr.c byte-swaps the rendered buffer immediately
+//     before calling flush_cb (and LVGL emits a deprecation #warning).  It is
+//     still honoured, so it is honoured here too.
+//
+// The format comparison has to be C++ rather than #if: LV_COLOR_FORMAT_* are
+// enumerators, and the preprocessor would read every one of them as 0 and find
+// them all equal.  The branch below is on a constexpr, so the unused half is
+// eliminated exactly as the old #if was.
+//
+// MW_LVGL_COLOR_16_SWAP remains as a board-level escape hatch; leave it alone
+// unless a board really does flush through something other than lvgl_port.cpp.
+// ---------------------------------------------------------------------------
+#if defined(__has_include)
+#  if __has_include(<lvgl.h>)
+#    define MW_HAVE_LVGL 1
+#  endif
+#endif
+#ifndef MW_HAVE_LVGL
+#  define MW_HAVE_LVGL 0
+#endif
+#if MW_HAVE_LVGL
+#  include <lvgl.h>
+#endif
+
+#ifndef MW_LVGL_COLOR_16_SWAP
+#  if MW_HAVE_LVGL && defined(LV_COLOR_16_SWAP) && LV_COLOR_16_SWAP
+#    define MW_LVGL_COLOR_16_SWAP 1     // v8 compatibility shim is active
+#  else
+#    define MW_LVGL_COLOR_16_SWAP 0
+#  endif
+#endif
+
+#if MW_HAVE_LVGL && (LVGL_VERSION_MAJOR >= 9)
+// A 24/32-bit LVGL build would hand mw_display_blit() something that is not an
+// array of uint16_t at all, so refuse it here rather than render confetti.
+static_assert(LV_COLOR_FORMAT_DEFAULT == LV_COLOR_FORMAT_RGB565 ||
+              LV_COLOR_FORMAT_DEFAULT == LV_COLOR_FORMAT_RGB565_SWAPPED,
+              "mw_display_blit() takes RGB565: set LV_COLOR_FORMAT_DEFAULT to "
+              "LV_COLOR_FORMAT_RGB565 or LV_COLOR_FORMAT_RGB565_SWAPPED");
+// Asking for the swapped format *and* the v8 shim swaps twice, which lands
+// back on little-endian by accident.  Catch it instead of shipping it.
+static_assert(!(LV_COLOR_FORMAT_DEFAULT == LV_COLOR_FORMAT_RGB565_SWAPPED &&
+                MW_LVGL_COLOR_16_SWAP),
+              "LV_COLOR_FORMAT_RGB565_SWAPPED and LV_COLOR_16_SWAP=1 swap "
+              "twice: pick one (prefer the format, LV_COLOR_16_SWAP is v8)");
+
+static constexpr bool MW_BLIT_BIG_ENDIAN =
+    (LV_COLOR_FORMAT_DEFAULT == LV_COLOR_FORMAT_RGB565_SWAPPED) ||
+    (MW_LVGL_COLOR_16_SWAP != 0);
+#else
+static constexpr bool MW_BLIT_BIG_ENDIAN = (MW_LVGL_COLOR_16_SWAP != 0);
+#endif
+
+// ===========================================================================
+// Colour panels: Arduino_GFX
+// ===========================================================================
+#if !MW_DISPLAY_MONO
+
+#include <SPI.h>
+#include <Arduino_GFX_Library.h>
+
+static Arduino_DataBus* s_bus = nullptr;
+static Arduino_GFX*     s_gfx = nullptr;
+
+#if MW_DISPLAY_RGB_PANEL
+static Arduino_ESP32RGBPanel* s_panel = nullptr;
+static Arduino_RGB_Display*   s_rgb   = nullptr;
+#endif
+
+Arduino_GFX* mw_display_gfx(void) { return s_gfx; }
+
+static bool mw_gfx_build(void)
+{
+#if MW_DISPLAY_RGB_PANEL
+    // ---- ST7701S 480x480: 16-bit RGB through LCD_CAM + 3-wire SPI init ----
+    // The init registers are pushed over a bit-banged 3-wire SPI (no MISO,
+    // no DC line: the 9th bit carries D/C), then the panel free-runs off the
+    // RGB timings below.
+    s_bus = new Arduino_SWSPI(GFX_NOT_DEFINED /* DC, 9-bit mode */,
+                              LCD_SPI_CS, LCD_SPI_SCK, LCD_SPI_SDA,
+                              GFX_NOT_DEFINED /* MISO */);
+    if (!s_bus) return false;
+
+    s_panel = new Arduino_ESP32RGBPanel(
+        LCD_DE, LCD_VSYNC, LCD_HSYNC, LCD_PCLK,
+        LCD_R0, LCD_R1, LCD_R2, LCD_R3, LCD_R4,
+        LCD_G0, LCD_G1, LCD_G2, LCD_G3, LCD_G4, LCD_G5,
+        LCD_B0, LCD_B1, LCD_B2, LCD_B3, LCD_B4,
+        LCD_HSYNC_POLARITY, LCD_HSYNC_FRONT_PORCH,
+        LCD_HSYNC_PULSE_WIDTH, LCD_HSYNC_BACK_PORCH,
+        LCD_VSYNC_POLARITY, LCD_VSYNC_FRONT_PORCH,
+        LCD_VSYNC_PULSE_WIDTH, LCD_VSYNC_BACK_PORCH,
+        LCD_PCLK_ACTIVE_NEG, LCD_PREFER_SPEED);
+    if (!s_panel) return false;
+
+    // LCD_ST7701_INIT_OPS selects the panel's register set; Arduino_GFX ships
+    // st7701_type1..type9_init_operations and the right one is panel- (not
+    // controller-) specific.  Set it in board_config.h if the glass differs.
+    s_rgb = new Arduino_RGB_Display(
+        DISPLAY_WIDTH, DISPLAY_HEIGHT, s_panel,
+        DISPLAY_ROTATION, true /* auto_flush */,
+        s_bus, TFT_RST, LCD_ST7701_INIT_OPS, LCD_ST7701_INIT_OPS_LEN);
+    s_gfx = s_rgb;
+    return s_gfx != nullptr;
+
+#else   // ---- SPI colour panels -------------------------------------------
+
+#if MW_SPI_BUS_SHARED
+    // The SD card sits on the same three wires (TZ 2.2).  Going through
+    // SPIClass lets the SD library and Arduino_GFX arbitrate with
+    // beginTransaction()/endTransaction(); is_shared_interface = true makes
+    // Arduino_GFX wrap every transfer instead of holding the bus.
+    s_bus = new Arduino_HWSPI(TFT_DC, TFT_CS, TFT_SCK, TFT_MOSI, TFT_MISO,
+                              &SPI, true /* is_shared_interface */);
+#else
+    // Exclusive bus: the register-level ESP32 backend is noticeably faster.
+    s_bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCK, TFT_MOSI, TFT_MISO);
+#endif
+    if (!s_bus) return false;
+
+#if   DISPLAY_DRIVER == DISPLAY_ILI9341
+    s_gfx = new Arduino_ILI9341(s_bus, TFT_RST, DISPLAY_ROTATION,
+                                DISPLAY_IPS ? true : false);
+#elif DISPLAY_DRIVER == DISPLAY_ST7789
+    // The 240x240 and 240x320 ST7789 modules differ only in the RAM offsets,
+    // which board_config.h supplies as ST7789_COL_OFFSET / ST7789_ROW_OFFSET.
+    s_gfx = new Arduino_ST7789(s_bus, TFT_RST, DISPLAY_ROTATION,
+                               DISPLAY_IPS ? true : false,
+                               DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                               ST7789_COL_OFFSET, ST7789_ROW_OFFSET,
+                               ST7789_COL_OFFSET, ST7789_ROW_OFFSET);
+#elif DISPLAY_DRIVER == DISPLAY_GC9A01
+    s_gfx = new Arduino_GC9A01(s_bus, TFT_RST, DISPLAY_ROTATION,
+                               DISPLAY_IPS ? true : false);
+#elif DISPLAY_DRIVER == DISPLAY_ILI9488
+    // Over SPI the ILI9488 cannot do 16 bpp pixel data, only 18 bpp; the
+    // _18bit class does the RGB565 -> RGB666 expansion on the fly.  The plain
+    // Arduino_ILI9488 class is for the 8/16-bit parallel wiring.
+    s_gfx = new Arduino_ILI9488_18bit(s_bus, TFT_RST, DISPLAY_ROTATION,
+                                      DISPLAY_IPS ? true : false);
+#else
+#error "DISPLAY_DRIVER is not one of the TZ 2.3 panels"
+#endif
+    return s_gfx != nullptr;
+#endif  // MW_DISPLAY_RGB_PANEL
+}
+
+mw_err_t mw_display_init(void)
+{
+    if (s_gfx) return MW_OK;
+
+#if MW_SPI_BUS_SHARED
+    // Bring the shared bus up once, here, before either user touches it.
+    // The SD chip select must be inactive while the panel is initialised.
+    if (SD_CS >= 0) { pinMode(SD_CS, OUTPUT); digitalWrite(SD_CS, HIGH); }
+    SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, -1 /* no automatic CS */);
+#endif
+
+    if (!mw_gfx_build()) return MW_ERR_MEMORY;
+    if (!s_gfx->begin((int32_t)DISPLAY_SPI_HZ)) return MW_ERR_IO;
+
+    s_gfx->fillScreen(0x0000);          // dark theme (TZ 4.1) from frame one
+    return MW_OK;
+}
+
+void mw_display_blit(int16_t x, int16_t y, int16_t w, int16_t h,
+                     const uint16_t* pixels)
+{
+    if (!s_gfx || !pixels || w <= 0 || h <= 0) return;
+    if (MW_BLIT_BIG_ENDIAN)
+        s_gfx->draw16bitBeRGBBitmap(x, y, const_cast<uint16_t*>(pixels), w, h);
+    else
+        s_gfx->draw16bitRGBBitmap(x, y, const_cast<uint16_t*>(pixels), w, h);
+}
+
+void mw_display_fill(uint16_t rgb565)
+{
+    if (s_gfx) s_gfx->fillScreen(rgb565);
+}
+
+void mw_display_flush(void)
+{
+#if MW_DISPLAY_RGB_PANEL
+    // Arduino_RGB_Display was built with auto_flush = true, so the bounce
+    // buffer is already pushed; flush() is kept for the manual-flush variant.
+    if (s_rgb) s_rgb->flush();
+#endif
+}
+
+void mw_display_wait_dma(void)
+{
+    // Arduino_ESP32SPI / Arduino_HWSPI transfers are synchronous: by the time
+    // draw16bitRGBBitmap() returns the bytes are on the wire.  The function
+    // exists so lvgl_port.cpp can call lv_disp_flush_ready() unconditionally
+    // and so an async DMA backend can be dropped in later without touching
+    // the port.
+    mw_display_flush();
+}
+
+// ===========================================================================
+// Monochrome panels: SSD1306 / SH1106, 128x64, I2C
+// ===========================================================================
+#else   // MW_DISPLAY_MONO
+
+#include <Wire.h>
+
+#if (DISPLAY_WIDTH != 128) || (DISPLAY_HEIGHT != 64)
+#error "The mono OLED path is wired for 128x64 (TZ 2.3 / 5.6 minimum screen)"
+#endif
+
+#define MW_OLED_PAGES   (DISPLAY_HEIGHT / 8)          // 8
+#define MW_OLED_FB_SIZE (DISPLAY_WIDTH * MW_OLED_PAGES)
+
+// SH1106 has 132 columns of RAM behind a 128-pixel window, so the visible
+// area starts at column 2.  SSD1306 has no such offset.
+#if DISPLAY_DRIVER == DISPLAY_SH1106
+#define MW_OLED_COL_OFFSET 2
+#else
+#define MW_OLED_COL_OFFSET 0
+#endif
+
+static uint8_t s_fb[MW_OLED_FB_SIZE];
+static bool    s_fb_dirty[MW_OLED_PAGES];
+static bool    s_oled_ready = false;
+static uint8_t s_contrast   = 0xCF;
+
+static void oled_cmd(uint8_t c)
+{
+    Wire.beginTransmission((uint8_t)OLED_I2C_ADDR);
+    Wire.write((uint8_t)0x00);          // Co = 0, D/C# = 0 -> command stream
+    Wire.write(c);
+    Wire.endTransmission();
+}
+
+static void oled_cmd2(uint8_t c, uint8_t arg)
+{
+    Wire.beginTransmission((uint8_t)OLED_I2C_ADDR);
+    Wire.write((uint8_t)0x00);
+    Wire.write(c);
+    Wire.write(arg);
+    Wire.endTransmission();
+}
+
+static void oled_flush_page(uint8_t page)
+{
+    const uint8_t* src = &s_fb[(size_t)page * DISPLAY_WIDTH];
+
+#if DISPLAY_DRIVER == DISPLAY_SH1106
+    oled_cmd((uint8_t)(0xB0 | page));                        // page address
+    oled_cmd((uint8_t)(0x00 | (MW_OLED_COL_OFFSET & 0x0F))); // col low
+    oled_cmd((uint8_t)(0x10 | (MW_OLED_COL_OFFSET >> 4)));   // col high
+#else
+    oled_cmd(0x22); oled_cmd(page); oled_cmd(page);          // page range
+    oled_cmd(0x21); oled_cmd(0);     oled_cmd(DISPLAY_WIDTH - 1);
+#endif
+
+    // Wire's TX buffer is 128 bytes on most cores; send in 16-byte chunks so
+    // the control byte plus payload always fits whatever the core provides.
+    for (int i = 0; i < DISPLAY_WIDTH; i += 16) {
+        Wire.beginTransmission((uint8_t)OLED_I2C_ADDR);
+        Wire.write((uint8_t)0x40);      // Co = 0, D/C# = 1 -> data stream
+        Wire.write(&src[i], 16);
+        Wire.endTransmission();
+    }
+}
+
+mw_err_t mw_display_init(void)
+{
+    if (s_oled_ready) return MW_OK;
+
+    Wire.begin(OLED_I2C_SDA, OLED_I2C_SCL, OLED_I2C_HZ);
+
+    // Probe before sending 25 commands into the void.
+    Wire.beginTransmission((uint8_t)OLED_I2C_ADDR);
+    if (Wire.endTransmission() != 0) return MW_ERR_IO;
+
+    static const uint8_t init_seq[] = {
+        0xAE,                   // display off
+        0xD5, 0x80,             // clock divide / osc freq
+        0xA8, 0x3F,             // multiplex ratio = 64
+        0xD3, 0x00,             // display offset
+        0x40,                   // start line 0
+#if DISPLAY_DRIVER == DISPLAY_SSD1306
+        0x8D, 0x14,             // charge pump on (SSD1306 only)
+        0x20, 0x00,             // horizontal addressing mode
+#else
+        0xAD, 0x8B,             // SH1106 DC-DC on
+        0x32,                   // SH1106 pump voltage 8.0 V
+#endif
+        0xA1,                   // segment remap (column 127 -> SEG0)
+        0xC8,                   // COM scan direction remapped
+        0xDA, 0x12,             // COM pins: alternative, no left/right remap
+        0x81, 0xCF,             // contrast
+        0xD9, 0xF1,             // pre-charge period
+        0xDB, 0x40,             // VCOMH deselect
+        0xA4,                   // resume from RAM
+        0xA6,                   // normal (not inverted)
+        0xAF                    // display on
+    };
+    for (size_t i = 0; i < sizeof(init_seq); ++i) oled_cmd(init_seq[i]);
+
+    memset(s_fb, 0, sizeof(s_fb));
+    for (int p = 0; p < MW_OLED_PAGES; ++p) { s_fb_dirty[p] = true; }
+    s_oled_ready = true;
+    mw_display_flush();
+    return MW_OK;
+}
+
+// RGB565 -> 1 bpp.  Rec.601 luma, threshold at mid grey; the dark LVGL theme
+// draws light text on a black ground so this maps straight onto lit pixels.
+// The byte order is the same question as on the colour panels, so it is
+// answered from the same constant rather than assumed.
+static inline bool mono_pixel(uint16_t c)
+{
+    if (MW_BLIT_BIG_ENDIAN) c = (uint16_t)((c >> 8) | (c << 8));
+    // 5/6-bit -> 8-bit with the usual rounding constants: (v*527+23)>>6 and
+    // (v*259+33)>>6 are exact enough that 0x1F/0x3F land on 255, so white
+    // really is 255 and not 248.
+    uint32_t r = ((((uint32_t)(c >> 11) & 0x1F) * 527u + 23u) >> 6);
+    uint32_t g = ((((uint32_t)(c >> 5)  & 0x3F) * 259u + 33u) >> 6);
+    uint32_t b = ((((uint32_t) c        & 0x1F) * 527u + 23u) >> 6);
+    uint32_t y = (r * 77u + g * 151u + b * 28u) >> 8;   // Rec.601, 0..255
+    return y > 127u;
+}
+
+void mw_display_blit(int16_t x, int16_t y, int16_t w, int16_t h,
+                     const uint16_t* pixels)
+{
+    if (!s_oled_ready || !pixels || w <= 0 || h <= 0) return;
+
+    for (int16_t row = 0; row < h; ++row) {
+        int16_t py = y + row;
+        if (py < 0 || py >= DISPLAY_HEIGHT) continue;
+        uint8_t page = (uint8_t)(py >> 3);
+        uint8_t bit  = (uint8_t)(1u << (py & 7));
+
+        for (int16_t col = 0; col < w; ++col) {
+            int16_t px = x + col;
+            if (px < 0 || px >= DISPLAY_WIDTH) continue;
+            size_t  idx = (size_t)page * DISPLAY_WIDTH + (size_t)px;
+            uint8_t old = s_fb[idx];
+            if (mono_pixel(pixels[(size_t)row * w + col])) s_fb[idx] |=  bit;
+            else                                           s_fb[idx] &= ~bit;
+            if (s_fb[idx] != old) s_fb_dirty[page] = true;
+        }
+    }
+}
+
+void mw_display_fill(uint16_t rgb565)
+{
+    if (!s_oled_ready) return;
+    memset(s_fb, mono_pixel(rgb565) ? 0xFF : 0x00, sizeof(s_fb));
+    for (int p = 0; p < MW_OLED_PAGES; ++p) s_fb_dirty[p] = true;
+    mw_display_flush();
+}
+
+void mw_display_flush(void)
+{
+    if (!s_oled_ready) return;
+    for (uint8_t p = 0; p < MW_OLED_PAGES; ++p) {
+        if (!s_fb_dirty[p]) continue;
+        oled_flush_page(p);
+        s_fb_dirty[p] = false;
+    }
+}
+
+void mw_display_wait_dma(void) { mw_display_flush(); }
+
+#endif  // MW_DISPLAY_MONO
+
+// ===========================================================================
+// Shared: capability query and backlight
+// ===========================================================================
+bool mw_display_is_mono(void) { return MW_DISPLAY_MONO ? true : false; }
+
+// ---------------------------------------------------------------------------
+// Backlight over LEDC.  TFT_BL == -1 makes every call a no-op (the two OLEDs
+// and any panel whose backlight is hard-wired to 3V3).  On a mono OLED the
+// "backlight" is the contrast register, which is the closest equivalent.
+// ---------------------------------------------------------------------------
+#define MW_BL_LEDC_CHANNEL 0
+#define MW_BL_LEDC_FREQ    5000
+#define MW_BL_LEDC_BITS    10           // 0..1023
+#define MW_BL_LEDC_MAX     ((1 << MW_BL_LEDC_BITS) - 1)
+
+#if !MW_DISPLAY_MONO
+static bool s_bl_ready = false;
+
+static void bl_setup(void)
+{
+    if (s_bl_ready || TFT_BL < 0) return;
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+    // Arduino core 3.x / IDF 5.x: channels are allocated per pin.
+    ledcAttach(TFT_BL, MW_BL_LEDC_FREQ, MW_BL_LEDC_BITS);
+#else
+    ledcSetup(MW_BL_LEDC_CHANNEL, MW_BL_LEDC_FREQ, MW_BL_LEDC_BITS);
+    ledcAttachPin(TFT_BL, MW_BL_LEDC_CHANNEL);
+#endif
+    s_bl_ready = true;
+}
+#endif  // !MW_DISPLAY_MONO
+
+void mw_display_backlight(uint8_t percent)
+{
+    if (percent > 100) percent = 100;
+
+#if MW_DISPLAY_MONO
+    // No backlight on an OLED: map the percentage onto the contrast register
+    // and treat 0 % as "panel off" so the auto-lock screen really goes dark.
+    if (!s_oled_ready) return;
+    if (percent == 0) { oled_cmd(0xAE); return; }
+    oled_cmd(0xAF);
+    s_contrast = (uint8_t)((percent * 255u) / 100u);
+    oled_cmd2(0x81, s_contrast);
+#else
+    if (TFT_BL < 0) return;             // hard-wired backlight
+    bl_setup();
+    uint32_t duty = ((uint32_t)percent * MW_BL_LEDC_MAX) / 100u;
+#if !TFT_BL_ACTIVE_HIGH
+    duty = MW_BL_LEDC_MAX - duty;       // low-side / PNP driver
+#endif
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
+    ledcWrite(TFT_BL, duty);
+#else
+    ledcWrite(MW_BL_LEDC_CHANNEL, duty);
+#endif
+#endif
+}
+
+#endif  // ARDUINO && !MW_HOST_BUILD

@@ -1,0 +1,7 @@
+{
+  "transport": "auto",
+  "serial_port": "",
+  "rpc_url": "http://127.0.0.1:18081",
+  "rpc_user": "",
+  "rpc_password": ""
+}

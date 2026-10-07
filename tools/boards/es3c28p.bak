@@ -1,0 +1,84 @@
+// ES3C28P - ESP32-S3 + 2.8" ILI9341 240x320 + FT6336G touch + microSD.
+// Reference board of TZ 2.2.
+//
+// NOTE ON THE TZ PIN TABLE: section 2.2 lists classic-ESP32 pin numbers
+// (TFT_MOSI 23, TFT_SCK 18, TOUCH_SDA 21 ...) while section 1.4 mandates
+// ESP32-S3. Those pins do not exist or are strapping pins on the S3, and
+// CAM_PIN_SIOC 39 collides with TOUCH_INT 39. The values below are the
+// S3-correct equivalents; the structure is kept exactly as specified.
+#ifndef BOARD_CONFIG_H
+#define BOARD_CONFIG_H
+
+//#include "../src/config/app_config.h"
+#include "../MoneroColdWallet/src/config/app_config.h"
+#define BOARD_NAME "ES3C28P"
+
+// ===== Display =====
+#define DISPLAY_DRIVER   DISPLAY_ILI9341
+#define DISPLAY_WIDTH    240
+#define DISPLAY_HEIGHT   320
+#define DISPLAY_ROTATION 0
+#define TFT_CS           10
+#define TFT_DC           9
+#define TFT_RST          8
+#define TFT_MOSI         11
+#define TFT_MISO         13
+#define TFT_SCK          12
+#define TFT_BL           14
+#define TFT_BL_ACTIVE_HIGH 1
+
+// ===== Touch =====
+#define HAS_TOUCH        1
+#define TOUCH_DRIVER     TOUCH_FT6336G
+#define TOUCH_SDA        17
+#define TOUCH_SCL        18
+#define TOUCH_INT        16
+#define TOUCH_RST        15
+
+// ===== SD Card (shares the display SPI bus) =====
+#define HAS_SD           1
+#define SD_CS            21
+#define SD_MISO          13
+#define SD_MOSI          11
+#define SD_SCK           12
+
+// ===== Camera =====
+#define HAS_CAMERA       0
+#define CAM_PIN_PWDN     -1
+#define CAM_PIN_RESET    -1
+#define CAM_PIN_XCLK     -1
+#define CAM_PIN_SIOD     -1
+#define CAM_PIN_SIOC     -1
+#define CAM_PIN_D7       -1
+#define CAM_PIN_D6       -1
+#define CAM_PIN_D5       -1
+#define CAM_PIN_D4       -1
+#define CAM_PIN_D3       -1
+#define CAM_PIN_D2       -1
+#define CAM_PIN_D1       -1
+#define CAM_PIN_D0       -1
+#define CAM_PIN_VSYNC    -1
+#define CAM_PIN_HREF     -1
+#define CAM_PIN_PCLK     -1
+
+// ===== Buttons =====
+#define HAS_BUTTONS      0
+#define BUTTON_UP        -1
+#define BUTTON_DOWN      -1
+#define BUTTON_LEFT      -1
+#define BUTTON_RIGHT     -1
+#define BUTTON_SELECT    -1
+#define BUTTON_BACK      -1
+#define BUTTON_ENCODER_A -1
+#define BUTTON_ENCODER_B -1
+
+// ===== Feature flags =====
+#define HAS_PSRAM        1
+#define PSRAM_SIZE_MB    8
+#define HAS_HMAC         1
+#define HAS_USB_OTG      1
+
+// ===== Default input mode =====
+#define DEFAULT_SEED_INPUT_MODE  SEED_INPUT_AUTO
+
+#endif

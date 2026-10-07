@@ -1,0 +1,10 @@
+{
+  "kind": "signed_tx",
+  "saved_time": "2026-10-02 19:51:49",
+  "size": 8714,
+  "file": "1790959909_signed_monero_tx",
+  "crc32": "c8eeedb0",
+  "magic": "Monero signed tx set",
+  "version": "0x05",
+  "iv": "05ea94a72972c274"
+}
