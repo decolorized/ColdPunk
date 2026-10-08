@@ -33,6 +33,7 @@ well.
 - [Repository layout](#repository-layout)
 - [Tests](#tests)
 - [Documentation](#documentation)
+- [Related projects](#related-projects)
 - [License](#license)
 
 ---
@@ -92,7 +93,7 @@ explicit confirmation on the device screen. The PC program is only a courier.
   bound to the wallet and protected against rollback (generation counter in
   NVS), and the device warns about inputs already spent by an earlier
   signature.
-- Address and private view key as text or static **QR code**.
+- Address and private view key shown as text on the device.
 - PC requests for the address or the view-only data (address + private view
   key + restore height) with a plain Yes / No on the device.
 
@@ -105,7 +106,7 @@ explicit confirmation on the device screen. The PC program is only a courier.
   exponentially (2 s … 10 min, kept across reboots).
 - **USB is enabled only after the correct password.**
 - Autolock (default 5 minutes): keys and passphrase are wiped from memory.
-- LVGL 9 user interface in **English and Russian**. Touch screens, and
+- LVGL 9 user interface in **English**. Touch screens, and
   4/5/6-button boards with long-press and auto-repeat navigation.
 - Device log streamed to the PC. Secrets and authentication messages never
   leave the device; details are sent only in debug mode.
@@ -118,19 +119,22 @@ The board is chosen at compile time in [`board_config.h`](board_config.h)
 (uncomment one `#define`). All supported boards use an ESP32-S3 module with
 8 MB octal PSRAM (N16R8 / N8R8).
 
-| Define | Header | Display | Input | SD | Notes |
-| :--- | :--- | :--- | :--- | :---: | :--- |
-| `MW_BOARD_ES3C28P` | `es3c28p.h` | ILI9341 2.8" 240×320, landscape | FT6336G touch | – | reference board |
-| `MW_BOARD_TOUCH_LCD_2` | `esp32s3_touch_lcd_2_240x320.h` | ST7789T3 2" 240×320, landscape | CST816D touch | – | Waveshare ESP32-S3-Touch-LCD-2 |
-| `MW_BOARD_ST7789_240x320` | `esp32s3_st7789_240x320.h` | ST7789 240×320 | buttons | – | common 2.4"/2.8" modules |
-| `MW_BOARD_ST7789_240x240` | `esp32s3_st7789_240x240.h` | ST7789 240×240 | buttons | – | |
-| `MW_BOARD_ST7735S_128x160` | `esp32s3_st7735s_128x160.h` | ST7735S 128×160 | buttons | ✓ | |
-| `MW_BOARD_GC9A01_ROUND` | `esp32s3_gc9a01_round.h` | GC9A01 240×240 round | CST816S touch | – | Waveshare Touch-LCD-1.28 |
-| `MW_BOARD_ILI9488_320x480` | `esp32s3_ili9488_320x480.h` | ILI9488 320×480 | XPT2046 resistive touch | ✓ | needs touch calibration |
-| `MW_BOARD_ST7701S_480x480` | `esp32s3_st7701s_480x480.h` | ST7701S 480×480 RGB | GT911 touch | – | Guition 4848S040 class |
-| `MW_BOARD_SSD1306_BUTTONS` | `esp32s3_ssd1306_buttons.h` | SSD1306 128×64 mono | 6 buttons + encoder | ✓ | minimum viable wallet |
-| `MW_BOARD_SSD1306_NO_SD` | `esp32s3_ssd1306_no_sd.h` | SSD1306 128×64 mono | buttons | – | |
-| `MW_BOARD_CAM_QR` | `esp32s3_cam_qr.h` | ST7789 240×320 | CST816S touch | ✓ | OV2640 camera, scans UR QR codes |
+| Define | Header | Display | Input | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `MW_BOARD_ES3C28P` | `es3c28p.h` | ILI9341 2.8" 240×320, landscape | FT6336G touch | reference board |
+| `MW_BOARD_TOUCH_LCD_2` | `esp32s3_touch_lcd_2_240x320.h` | ST7789T3 2" 240×320, landscape | CST816D touch | Waveshare ESP32-S3-Touch-LCD-2 |
+| `MW_BOARD_ST7789_240x320` | `esp32s3_st7789_240x320.h` | ST7789 240×320 | buttons | common 2.4"/2.8" modules |
+| `MW_BOARD_ST7789_240x240` | `esp32s3_st7789_240x240.h` | ST7789 240×240 | buttons | |
+| `MW_BOARD_ST7735S_128x160` | `esp32s3_st7735s_128x160.h` | ST7735S 128×160 | buttons | |
+| `MW_BOARD_GC9A01_ROUND` | `esp32s3_gc9a01_round.h` | GC9A01 240×240 round | CST816S touch | Waveshare Touch-LCD-1.28 |
+| `MW_BOARD_ILI9488_320x480` | `esp32s3_ili9488_320x480.h` | ILI9488 320×480 | XPT2046 resistive touch | needs touch calibration |
+| `MW_BOARD_ST7701S_480x480` | `esp32s3_st7701s_480x480.h` | ST7701S 480×480 RGB | GT911 touch | Guition 4848S040 class |
+| `MW_BOARD_SSD1306_BUTTONS` | `esp32s3_ssd1306_buttons.h` | SSD1306 128×64 mono | 6 buttons + encoder | minimum viable wallet |
+| `MW_BOARD_SSD1306_NO_SD` | `esp32s3_ssd1306_no_sd.h` | SSD1306 128×64 mono | buttons | |
+| `MW_BOARD_CAM_QR` | `esp32s3_cam_qr.h` | ST7789 240×320 | CST816S touch | board with an OV2640 camera (camera not used) |
+
+The SD card slot is not used at the moment, whatever the board has; all
+exchange with the PC goes over USB.
 
 `DISPLAY_WIDTH` × `DISPLAY_HEIGHT` in a board header is the **physical** panel
 size at rotation 0. The logical size after `DISPLAY_ROTATION` is read from the
@@ -280,7 +284,7 @@ Reference implementation: `src/transfer/link.c` (device) and
 `tools/tools/mwlink/mwlink.py` (PC).
 
 On Linux, give your user access to the HID device with the udev rule from
-MoneroPunkSigner (`install-udev-rule.sh`).
+[MoneroPunkSigner](https://github.com/decolorized/MoneroPunkSigner) ([`install-udev-rule.sh`](https://github.com/decolorized/MoneroPunkSigner/blob/HEAD/install-udev-rule.sh)).
 
 ---
 
@@ -322,8 +326,9 @@ src/
   monero/             keys, mnemonics, polyseed, addresses, key images, CLSAG,
                       Bulletproofs+, transaction parsing and signing, file formats
   wallet/             device password, sealed wallet store, session, key image cache
-  transfer/           mwlink protocol (link.c), USB HID/CDC transport, QR, UR, SD
-  hal/                display, touch, buttons, camera, SD, logging, host stubs
+  transfer/           mwlink protocol (link.c), USB HID/CDC transport
+                      (SD transfer code is present but currently unused)
+  hal/                display, touch, buttons, SD, logging, host stubs
   ui/                 LVGL screens, keyboards, flows, i18n, Minesweeper
 tools/
   docs/               design, security, protocol, user guide, testing
@@ -372,6 +377,18 @@ tested on the host, and the stagenet procedure, are listed in
 | [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md) | build settings in detail (RU) |
 | [`tools/docs/testing.md`](tools/docs/testing.md) | host tests and stagenet checklist (RU) |
 | [`boards/README.md`](boards/README.md) | board headers and adding a board |
+
+---
+
+## Related projects
+
+| Project | Role |
+| :--- | :--- |
+| **[ColdPunk](https://github.com/decolorized/ColdPunk)** (this repository) | firmware of the offline signing device |
+| **[MoneroPunkSigner](https://github.com/decolorized/MoneroPunkSigner)** | Feather Wallet fork for the PC: watch-only wallet with native ColdPunk support over USB HID |
+
+Use matching versions: both sides must speak the same mwlink protocol version
+(currently 3).
 
 ---
 

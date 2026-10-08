@@ -58,11 +58,11 @@ the three routes finds a header, the build stops with a pointer to this file.
 | `es3c28p.h` | ILI9341 240×320 SPI | FT6336G (I²C) | — | yes, shared bus | no | no | TZ 2.2 reference board |
 | `esp32s3_st7789_240x320.h` | ST7789 240×320 SPI | CST816S (I²C) | — | yes, shared bus | no | GPIO4 | the common 2.4″/2.8″ S3 touch modules |
 | `esp32s3_touch_lcd_2_240x320.h` | ST7789T3 240×320 SPI, landscape | CST816D (I²C) | — | **no** | no | no | Waveshare ESP32-S3-Touch-LCD-2 (`MW_BOARD_TOUCH_LCD_2`) |
-| `esp32s3_gc9a01_round.h` | GC9A01 240×240 round | CST816S (I²C) | — | **no** | no | GPIO1 | Waveshare ESP32-S3-Touch-LCD-1.28; USB/QR only |
+| `esp32s3_gc9a01_round.h` | GC9A01 240×240 round | CST816S (I²C) | — | **no** | no | GPIO1 | Waveshare ESP32-S3-Touch-LCD-1.28; USB only |
 | `esp32s3_ili9488_320x480.h` | ILI9488 320×480 SPI | XPT2046 (SPI, resistive) | — | yes, shared bus | no | GPIO4 | the only board that really needs calibration |
 | `esp32s3_st7701s_480x480.h` | ST7701S 480×480 RGB | GT911 (I²C) | — | **no** | no | no | Guition ESP32-S3-4848S040 class; pin-starved |
 | `esp32s3_ssd1306_buttons.h` | SSD1306 128×64 I²C mono | **none** | 6 buttons + EC11 encoder | yes, own bus | no | no | TZ 2.5 reference; minimum viable wallet |
-| `esp32s3_cam_qr.h` | ST7789 240×320 SPI | CST816S (I²C) | — | yes, shared bus | **OV2640** | no | scans *and* shows UR QR codes (TZ 3.7) |
+| `esp32s3_cam_qr.h` | ST7789 240×320 SPI | CST816S (I²C) | — | yes, shared bus | **OV2640** | no | camera fitted but not used by the firmware |
 
 Every board: ESP32-S3, 8 MB PSRAM, HMAC/eFuse, USB OTG. All seven exercise a
 different corner of the HAL, which is the point — between them they cover both

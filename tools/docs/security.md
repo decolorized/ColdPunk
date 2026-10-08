@@ -14,8 +14,9 @@ device with a balance you cannot afford to lose.
 
 The device is an **air-gapped signer**. It never has a network stack compiled
 in (`app_config.h` refuses to build if `MW_ENABLE_WIFI` or `MW_ENABLE_BT` is
-defined), so the only inputs are SD card files, QR codes and USB mass storage,
-and the only secret that ever leaves it is a signed transaction.
+defined), so the only input is the USB link to the PC (mwlink). What leaves
+it is key images, signed transactions and, only on a request confirmed on the
+device, the address or the private view key.
 
 ### 1.1 What an attacker **cannot** do
 
