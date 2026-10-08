@@ -756,8 +756,22 @@ static mw_err_t flow_import_wallet(void) {
         }
     }
 
-    e = mw_flow_passphrase(pass, sizeof(pass));
-    if (e != MW_OK) goto fail;
+    // Cake Wallet / Cupcake phrases carry polyseed's "encrypted" flag: the
+    // passphrase unmasks the phrase (no seed offset) and cannot be skipped.
+    // Feather / ColdPunk phrases are plain; their passphrase is optional.
+    {
+        const bool cake = type == MW_SEED_POLYSEED && mw_polyseed_is_encrypted(&ps);
+        if (cake) {
+            MW_LOGI("wallet", "encrypted polyseed (Cake / Cupcake format)");
+            mw_ui_message(T(STR_PASSPHRASE), TX(XSTR_SEED_CAKE));
+        }
+        for (;;) {
+            e = mw_flow_passphrase(pass, sizeof(pass));
+            if (e != MW_OK) goto fail;
+            if (!cake || pass[0]) break;
+            mw_ui_message(T(STR_PASSPHRASE), TX(XSTR_PP_REQUIRED));
+        }
+    }
 
     if (type == MW_SEED_MONERO_LEGACY) {
         memset(height_txt, 0, sizeof(height_txt));
@@ -1190,6 +1204,24 @@ closed:
     MW_LOGI("wallet", "wallet closed");
 }
 
+// True for a polyseed stored in the Cake Wallet / Cupcake form (the phrase
+// itself is encrypted with the passphrase, polyseed feature bit 16). Packed
+// context: birthday(2) || features(1) || secret.
+static bool wallet_is_cake(uint32_t id) {
+    const wallet_entry_t* w = mw_wallet_get(id);
+    if (!w || w->wallet_type != MW_SEED_POLYSEED) return false;
+    uint8_t blob[64];
+    size_t  len = 0;
+    bool    cake = false;
+    if (mw_wallet_unseal_seed(id, blob, sizeof(blob), &len) == MW_OK && len >= 3) {
+        mw_polyseed_t ps;
+        if (mw_polyseed_unpack(blob, len, &ps) == MW_OK) cake = mw_polyseed_is_encrypted(&ps) != 0;
+        mw_memzero(&ps, sizeof(ps));
+    }
+    mw_memzero(blob, sizeof(blob));
+    return cake;
+}
+
 // Asks for the passphrase when the wallet has one (task 3 item 5) and opens
 // the base or the passphrase variant.
 static bool open_wallet(uint32_t id, mw_account_keys_t* keys, uint8_t* variant) {
@@ -1200,12 +1232,18 @@ static bool open_wallet(uint32_t id, mw_account_keys_t* keys, uint8_t* variant) 
     memset(pass, 0, sizeof(pass));
 
     const uint8_t state = mw_wallet_pp_state(id);
+    const bool    cake  = state != MW_PP_NONE && wallet_is_cake(id);
     for (;;) {
         if (state != MW_PP_NONE) {
-            if (state == MW_PP_SET) mw_ui_message_timeout(name, TX(XSTR_PP_OPEN_HINT), 2500);
+            if (cake)                    mw_ui_message_timeout(name, TX(XSTR_PP_OPEN_CAKE), 2500);
+            else if (state == MW_PP_SET) mw_ui_message_timeout(name, TX(XSTR_PP_OPEN_HINT), 2500);
             if (mw_screen_passphrase_open_run(name, pass, sizeof(pass)) != MW_OK) {
                 mw_memzero(pass, sizeof(pass));
                 return false;
+            }
+            if (cake && !pass[0]) {
+                mw_ui_message(name, TX(XSTR_PP_REQUIRED));
+                continue;
             }
         }
         bool verified = false;

@@ -160,6 +160,9 @@ typedef enum {
     XSTR_PW_STAGE_UPGRADE,
     XSTR_PW_STAGE_NEW,
     XSTR_PW_STAGE_REKEY,
+    XSTR_SEED_CAKE,
+    XSTR_PP_REQUIRED,
+    XSTR_PP_OPEN_CAKE,
     // end v6
 
     XSTR_COUNT

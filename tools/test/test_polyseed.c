@@ -184,6 +184,56 @@ MW_TEST(test_crypt_vector)
     CHECK_EQ_INT(reloaded.features, original.features);
 }
 
+// Cake Wallet / Cupcake: the passphrase encrypts the phrase itself (polyseed
+// "encrypted" flag). The vector was made with tevador/polyseed (OpenSSL
+// PBKDF2): UPSTREAM_PHRASE + polyseed_crypt("password"), coin Monero.
+#define CUPCAKE_PHRASE \
+    "soup festival edge attend unusual hawk slush grocery lady still " \
+    "knock way bubble shallow receive admit"
+
+static mw_err_t keys_of(const char* phrase, const char* pass, mw_account_keys_t* k)
+{
+    const mw_wordlist_t* wl = mw_wordlist(MW_WL_POLYSEED_EN);
+    uint16_t idx[MW_POLYSEED_WORDS];
+    if (indices_of(phrase, wl, idx, MW_POLYSEED_WORDS) != MW_POLYSEED_WORDS) return MW_ERR_FORMAT;
+    mw_polyseed_t seed;
+    mw_err_t e = mw_polyseed_decode(idx, wl, &seed);
+    if (e != MW_OK) return e;
+    uint8_t blob[MW_POLYSEED_BLOB_MAX];
+    size_t len = 0;
+    e = mw_polyseed_pack(&seed, blob, sizeof blob, &len);
+    if (e != MW_OK) return e;
+    return mw_seed_to_keys(MW_SEED_POLYSEED, blob, len, pass, k);
+}
+
+MW_TEST(test_cupcake_encrypted_restore)
+{
+    const mw_wordlist_t* wl = mw_wordlist(MW_WL_POLYSEED_EN);
+    uint16_t idx[MW_POLYSEED_WORDS];
+    CHECK_EQ_INT(indices_of(CUPCAKE_PHRASE, wl, idx, MW_POLYSEED_WORDS), MW_POLYSEED_WORDS);
+    mw_polyseed_t seed;
+    CHECK_EQ_INT(mw_polyseed_decode(idx, wl, &seed), MW_OK);
+    CHECK_EQ_INT(mw_polyseed_is_encrypted(&seed), 1);        // detected from the phrase
+
+    // Encrypted phrase + its passphrase == the plain phrase without one.
+    mw_account_keys_t plain, cake;
+    CHECK_EQ_INT(keys_of(UPSTREAM_PHRASE, "", &plain), MW_OK);
+    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, "password", &cake), MW_OK);
+    CHECK_EQ_MEM(cake.sec.spend.b, plain.sec.spend.b, 32);
+    CHECK_EQ_MEM(cake.sec.view.b, plain.sec.view.b, 32);
+    CHECK_EQ_MEM(cake.pub.spend.b, plain.pub.spend.b, 32);
+
+    // No passphrase: refused, not a silently foreign wallet.
+    mw_account_keys_t none;
+    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, "", &none), MW_ERR_DECRYPT);
+    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, NULL, &none), MW_ERR_DECRYPT);
+
+    // A wrong passphrase gives another (valid) wallet - polyseed cannot tell.
+    mw_account_keys_t wrong;
+    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, "Password", &wrong), MW_OK);
+    CHECK(memcmp(wrong.pub.spend.b, plain.pub.spend.b, 32) != 0);
+}
+
 MW_TEST(test_create_roundtrip)
 {
     const mw_wordlist_t* wl = mw_wordlist(MW_WL_POLYSEED_EN);
@@ -343,6 +393,7 @@ int main(void)
     RUN_TEST(test_upstream_vector);
     RUN_TEST(test_keygen_vector);
     RUN_TEST(test_crypt_vector);
+    RUN_TEST(test_cupcake_encrypted_restore);
     RUN_TEST(test_create_roundtrip);
     RUN_TEST(test_birthday);
     RUN_TEST(test_rejections);

@@ -98,6 +98,11 @@ uint32_t mw_polyseed_restore_height(const mw_polyseed_t* seed, mw_network_t net)
 // The empty case is a genuine no-op, which is what makes an empty passphrase
 // reproduce the plain wallet of the same phrase. See seed_keys.c.
 //
+// Exception - Cake Wallet / Cupcake polyseeds: a phrase with the "encrypted"
+// feature flag is unmasked with the passphrase (mw_polyseed_crypt) before
+// keygen and gets no seed offset; without a passphrase mw_seed_to_keys()
+// returns MW_ERR_DECRYPT. The format is detected from the phrase itself.
+//
 // Applies the seed offset in place (no-op for NULL / ""). Needs the
 // cn_slow_hash scratchpad; MW_ERR_MEMORY when it cannot be allocated.
 mw_err_t mw_seed_offset_apply(uint8_t key32[32], const char* passphrase);

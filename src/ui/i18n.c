@@ -447,6 +447,9 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_PW_STAGE_UPGRADE] = "Усиление защиты пароля (один раз)",
     [XSTR_PW_STAGE_NEW] = "Вычисление ключа нового пароля",
     [XSTR_PW_STAGE_REKEY] = "Перешифровка кошельков",
+    [XSTR_SEED_CAKE] = "Фраза зашифрована passphrase\n(формат Cake Wallet / Cupcake).\nНа следующем шаге введите\nэту passphrase.",
+    [XSTR_PP_REQUIRED] = "Для этой фразы passphrase\nобязательна.",
+    [XSTR_PP_OPEN_CAKE] = "Кошелёк Cake / Cupcake.\nВведите passphrase:\nбез неё он не откроется.",
     // end v6 RU
 };
 
@@ -728,6 +731,9 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_PW_STAGE_UPGRADE] = "Strengthening the password (once)",
     [XSTR_PW_STAGE_NEW] = "Deriving the new password key",
     [XSTR_PW_STAGE_REKEY] = "Re-sealing the wallets",
+    [XSTR_SEED_CAKE] = "The phrase is encrypted with a\npassphrase (Cake Wallet / Cupcake).\nEnter that passphrase\nin the next step.",
+    [XSTR_PP_REQUIRED] = "This phrase needs\nits passphrase.",
+    [XSTR_PP_OPEN_CAKE] = "Cake / Cupcake wallet.\nEnter the passphrase:\nit does not open without it.",
     // end v6 EN
 };
 

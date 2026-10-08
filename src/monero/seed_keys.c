@@ -16,10 +16,18 @@
 // An empty passphrase is a genuine no-op, which is what makes "no passphrase"
 // the plain Monero / Feather wallet of the same phrase.
 //
-// Polyseed's own passphrase feature (the "encrypted" flag, polyseed_crypt) is
-// deliberately NOT used: Feather restores a polyseed with a seed offset through
-// the spend-key path above, so that is the scheme a phrase written down on this
-// device must reproduce there (ТЗ 2.0 §3.1).
+// Two passphrase schemes exist for polyseed, told apart by the phrase itself:
+//
+//   Feather (and this device when it creates a wallet): the phrase is plain,
+//     the passphrase is the seed offset above.
+//   Cake Wallet / Cupcake: polyseed's own encryption - the phrase carries the
+//     "encrypted" feature flag (bit 16) and its secret is masked with
+//     PBKDF2(passphrase, "POLYSEED mask"). Restore = polyseed_crypt() with the
+//     passphrase (unmask, clears the flag), then polyseed_keygen(), and NO
+//     seed offset. An encrypted phrase cannot be used without its passphrase
+//     (MW_ERR_DECRYPT).
+//
+// New wallets are always created in the Feather form (plain phrase).
 #include "mnemonic.h"
 #include "keys.h"
 #include "../config/app_config.h"
@@ -67,6 +75,7 @@ mw_err_t mw_seed_to_keys(mw_seed_type_t type, const uint8_t* seed_material,
 
     uint8_t  key[32];
     mw_err_t err;
+    int      offset = 1;                 // apply the seed offset (Feather scheme)
 
     if (type == MW_SEED_MONERO_LEGACY) {
         if (seed_len != 32) {
@@ -86,6 +95,15 @@ mw_err_t mw_seed_to_keys(mw_seed_type_t type, const uint8_t* seed_material,
             mw_memzero(&seed, sizeof(seed));
             return err;
         }
+        if (mw_polyseed_is_encrypted(&seed)) {
+            // Cake / Cupcake: the passphrase unlocks the phrase itself.
+            if (!passphrase_used(passphrase)) {
+                mw_memzero(&seed, sizeof(seed));
+                return MW_ERR_DECRYPT;
+            }
+            mw_polyseed_crypt(&seed, passphrase);
+            offset = 0;
+        }
         mw_polyseed_keygen(&seed, MW_POLYSEED_COIN_MONERO, key);
         mw_memzero(&seed, sizeof(seed));
 
@@ -93,7 +111,7 @@ mw_err_t mw_seed_to_keys(mw_seed_type_t type, const uint8_t* seed_material,
         return MW_ERR_NOT_SUPPORTED;
     }
 
-    err = mw_seed_offset_apply(key, passphrase);
+    err = offset ? mw_seed_offset_apply(key, passphrase) : MW_OK;
     if (err != MW_OK) {
         mw_memzero(key, sizeof(key));
         return err;
