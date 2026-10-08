@@ -170,6 +170,15 @@ static bool raw_read(int32_t* u, int32_t* v)
     uint8_t b[5];
     if (!i2c_rd(addr, 0x02, b, sizeof(b))) return false;
     if ((b[0] & 0x0F) == 0) return false;               // no contact
+    // P1_XH bits 7:6 = event flag: 0 press down, 1 lift up, 2 contact,
+    // 3 no event.  After the finger leaves, both chips may keep reporting
+    // one contact with the "lift up" flag (and the old coordinates) for a
+    // while.  Counting that as a press hides the release from LVGL: the next
+    // tap is then glued onto the previous press, and LVGL - which clicks the
+    // object the press STARTED on - fires the wrong button or none at all
+    // ("works only on the second tap").
+    const uint8_t ev = (uint8_t)(b[1] >> 6);
+    if (ev == 1 || ev == 3) return false;               // lifted / stale
     *u = (int32_t)(((uint16_t)(b[1] & 0x0F) << 8) | b[2]);
     *v = (int32_t)(((uint16_t)(b[3] & 0x0F) << 8) | b[4]);
     return true;

@@ -7,6 +7,26 @@ USB-стек TinyUSB. Документ описывает процедуру д�
 Проверенных версий пока нет: прошивка не собрана целиком, поэтому
 конкретные номера версий ниже — рекомендация, а не подтверждённая связка.
 
+## 0. Быстрый путь: arduino-cli и sketch.yaml
+
+В папке скетча лежит `sketch.yaml` с профилем сборки: точная версия ядра
+ESP32 (3.3.11), библиотеки (`lvgl` 9.6.0, `GFX Library for Arduino` 1.6.9),
+все пункты меню Tools и путь к `lv_conf.h`. Нужен только arduino-cli:
+
+```
+arduino-cli compile                 # собрать (профиль coldpunk)
+arduino-cli compile -u -p COM5      # собрать и прошить
+arduino-cli compile --profile coldpunk-debug   # лог ядра на уровне Info
+```
+
+При первой сборке arduino-cli сам скачает ядро и библиотеки в свой кэш; Boards
+Manager, Library Manager и копия `lv_conf.h` рядом с библиотеками не нужны.
+Порт — USB-UART мост платы (UART0), его показывает `arduino-cli board list`;
+чтобы не писать `-p`, раскомментируйте `port:` в `sketch.yaml`. Плата
+по-прежнему выбирается в `board_config.h`.
+
+Arduino IDE 2 профили не читает — для неё разделы ниже.
+
 ---
 
 ## 1. Что поставить

@@ -1,0 +1,63 @@
+# ColdPunk - Arduino CLI build profile.
+#
+# Build and flash with nothing installed beforehand except arduino-cli:
+#
+#   arduino-cli compile                      # build (default profile below)
+#   arduino-cli upload -p COM5               # flash (your port; see below)
+#   arduino-cli compile -u -p COM5           # both in one go
+#
+# arduino-cli downloads the exact ESP32 core and libraries listed here into its
+# own cache on the first build; nothing from Boards / Library Manager is used.
+#
+# Port: the native USB is the wallet's USB-OTG link (HID), so the board is
+# flashed through its USB-UART bridge (UART0). `arduino-cli board list` shows
+# it; on Windows it is a COMx of the CH340 / CP210x chip. Set `port:` below
+# once and the `-p` can be dropped.
+#
+# Which board the firmware is built for is chosen in board_config.h, not here:
+# every supported board is an ESP32-S3 with 16 MB flash and 8 MB octal PSRAM
+# (N16R8 module), so they all share this FQBN.
+#
+# Arduino IDE 2 does not read build profiles. For the IDE, set the same values
+# in the Tools menu (docs/build_arduino.md) and put lv_conf.h next to the
+# lvgl library folder.
+
+profiles:
+  coldpunk:
+    notes: Release build. ESP32-S3 N16R8, USB-OTG (TinyUSB) for the HID link,
+      console on UART0, custom partitions.csv, flash NOT erased on upload
+      (NVS holds the wallets).
+    fqbn: >-
+      esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default,UploadSpeed=921600
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - lvgl (9.6.0)
+      - GFX Library for Arduino (1.6.9)
+    # LVGL looks for lv_conf.h with __has_include: putting the sketch folder on
+    # the include path makes it use the project's lv_conf.h from here, so no
+    # copy next to the library folder is needed.
+    build_properties:
+      - compiler.c.extra_flags=-I"{build.source.path}"
+      - compiler.cpp.extra_flags=-I"{build.source.path}"
+    # port: COM5
+
+  # Same as above with the ESP-IDF core log at Info level (no secrets are
+  # logged; use for bring-up only).
+  coldpunk-debug:
+    notes: Debug build - core log level Info, everything else as coldpunk.
+    fqbn: >-
+      esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,DebugLevel=info,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default,UploadSpeed=921600
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - lvgl (9.6.0)
+      - GFX Library for Arduino (1.6.9)
+    build_properties:
+      - compiler.c.extra_flags=-I"{build.source.path}"
+      - compiler.cpp.extra_flags=-I"{build.source.path}"
+    # port: COM5
+
+default_profile: coldpunk
