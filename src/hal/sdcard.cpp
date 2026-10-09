@@ -1,5 +1,6 @@
 // microSD: over SPI (sharing the display bus, TZ 2.2 / 3.2) or over SDIO
-// (SD_MMC) when the board header sets MW_SD_SDMMC (ES3C28P).
+// (SD_MMC) when the board header sets MW_SD_SDMMC (ES3C28P). Waveshare
+// ESP32-S3-Touch-LCD-2 uses SPI on the display bus.
 //
 // FAT32 with long file names, files up to MW_SD_FILE_MAX (256 KB, the same
 // ceiling as the USB link).  A file is always read whole into the caller's

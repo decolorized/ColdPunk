@@ -39,13 +39,16 @@
 #define TOUCH_I2C_HZ     400000UL
 
 // ===== SD-карта =====
-// TF-слот есть, но для SPI-режима требуется отдельный драйвер.
-#define HAS_SD           0                    // Отключено до реализации SPI-драйвера SD
-#define SD_CS            -1
-#define SD_MISO          -1
-#define SD_MOSI          -1
-#define SD_SCK           -1
-#define SD_DETECT        -1
+// TF-слот в режиме SPI на общей шине с дисплеем (схема Waveshare
+// ESP32-S3-Touch-LCD-2: SD_CS IO41, SD_MOSI IO38, SD_SCLK IO39, SD_MISO IO40).
+// SD_SCK == TFT_SCK, поэтому display_drivers.h включает MW_SPI_BUS_SHARED:
+// дисплей и карта делят SPIClass через beginTransaction()/endTransaction().
+#define HAS_SD           1
+#define SD_CS            41
+#define SD_MISO          40
+#define SD_MOSI          38
+#define SD_SCK           39
+#define SD_DETECT        -1                   // Датчика наличия карты нет
 
 // ===== Камера =====
 // На плате есть 24-pin разъём для OV2640 / OV5640.

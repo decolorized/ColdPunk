@@ -152,11 +152,11 @@ explicit confirmation on the device screen. The PC program is only a courier.
 - Address and private view key shown as text on the device.
 - PC requests for the address or the view-only data (address + private view
   key + restore height) with a plain Yes / No on the device.
-- **SD card exchange** (ES3C28P): the wallet menu lists the Feather files in
+- **SD card exchange** (ES3C28P, Touch-LCD-2): the wallet menu lists the Feather files in
   the card root (newest first). Pick one to sign it or to make key images; the
   result is written next to it with the same date. The list follows the card:
   it empties when the card is pulled out and fills again when one is put in.
-- **View key to SD card** (ES3C28P): `<wallet>_viewonly.txt` with the primary
+- **View key to SD card** (ES3C28P, Touch-LCD-2): `<wallet>_viewonly.txt` with the primary
   address, private view key and restore height, after a warning on the device.
 
 **Device**
@@ -196,8 +196,10 @@ The board is chosen at compile time in [`board_config.h`](board_config.h)
 | `MW_BOARD_SSD1306_NO_SD` | `esp32s3_ssd1306_no_sd.h` | SSD1306 128×64 mono | buttons | |
 | `MW_BOARD_CAM_QR` | `esp32s3_cam_qr.h` | ST7789 240×320 | CST816S touch | board with an OV2640 camera (camera not used) |
 
-**SD card:** supported on ES3C28P (SDIO, 4-bit with 1-bit fallback). On the
-other boards the slot is not used yet, and all exchange with the PC goes over USB.
+**SD card:** supported on ES3C28P (SDIO, 4-bit with 1-bit fallback) and on the
+Waveshare ESP32-S3-Touch-LCD-2 (SPI, sharing the display bus: CS IO41, MOSI
+IO38, SCK IO39, MISO IO40). On the other boards the slot is not used yet, and
+all exchange with the PC goes over USB.
 
 `DISPLAY_WIDTH` × `DISPLAY_HEIGHT` in a board header is the **physical** panel
 size at rotation 0. The logical size after `DISPLAY_ROTATION` is read from the
@@ -299,7 +301,7 @@ details are in [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md).
    *Sign*. Do not power off while Bulletproofs+ is computed.
 3. The signed transaction comes back; review and broadcast it on the PC.
 
-**Over the SD card (ES3C28P):**
+**Over the SD card (ES3C28P, Touch-LCD-2):**
 
 1. Copy the Feather file (`…_outputs` or `…_unsigned_monero_tx`) into the
    **root** of a FAT32 microSD card and insert it into the device.

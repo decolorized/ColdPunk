@@ -15,10 +15,10 @@ device with a balance you cannot afford to lose.
 The device is an **air-gapped signer**. It never has a network stack compiled
 in (`app_config.h` refuses to build if `MW_ENABLE_WIFI` or `MW_ENABLE_BT` is
 defined), so the only inputs are the USB link to the PC (mwlink) and, on
-ES3C28P, Feather files on a microSD card. What leaves
+ES3C28P and Touch-LCD-2, Feather files on a microSD card. What leaves
 it is key images, signed transactions and, only on a request confirmed on the
 device, the address or the private view key (to the PC, or - "View key to SD
-card", ES3C28P - as a text file on the card).
+card", ES3C28P and Touch-LCD-2 - as a text file on the card).
 
 ### 1.1 What an attacker **cannot** do
 
