@@ -385,10 +385,27 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
     const mw_metrics_t* m = mw_metrics();
     lv_obj_t* root = st->page.body;
 
+    // Touch slack around [<] and [OK]. The keys keep their size, but their
+    // hit area reaches up to the screen edge (the body's top padding is
+    // moved into the header) and a few pixels down towards the typed line:
+    // a finger aimed at a 28 px key at the very top of the glass is often
+    // reported just outside it. The header row carries that slack as its
+    // own padding, because LVGL only looks for a child under the finger
+    // inside the parent's area.
+    const lv_coord_t ext_top = m->touch ? m->pad : 0;
+    lv_coord_t ext_bot = 0;
+    if (m->touch) {
+        ext_bot = (lv_coord_t)(m->bar_h / 5);
+        if (ext_bot < 4) ext_bot = 4;
+    }
+    if (ext_top > 0) lv_obj_set_style_pad_top(root, 0, LV_PART_MAIN);
+
     lv_obj_t* head = lv_obj_create(root);
     lv_obj_remove_style_all(head);
     lv_obj_set_width(head, lv_pct(100));
-    lv_obj_set_height(head, m->bar_h);
+    lv_obj_set_height(head, (lv_coord_t)(m->bar_h + ext_top + ext_bot));
+    lv_obj_set_style_pad_top(head, ext_top, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(head, ext_bot, LV_PART_MAIN);
     lv_obj_set_flex_flow(head, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(head, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -410,6 +427,8 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
         if (icon_w < m->bar_h) icon_w = m->bar_h;
     }
     st->btn_back = head_button(st, head, LV_SYMBOL_LEFT, icon_w, kb_close_cb);
+    const lv_coord_t ext = (ext_top > ext_bot) ? ext_top : ext_bot;
+    if (ext > 0) lv_obj_set_ext_click_area(st->btn_back, ext);
 
     st->lbl_word = lv_label_create(head);
     lv_obj_add_style(st->lbl_word, mw_style_dim(), LV_PART_MAIN);
@@ -429,6 +448,7 @@ void mw_kb_build_frame(mw_kb_state_t* st) {
     // [OK]: finish the input (free text) or take the first candidate (seed
     // words), same as the accept / enter key cap.
     st->btn_ok = head_button(st, head, LV_SYMBOL_OK, icon_w, kb_ok_cb);
+    if (ext > 0) lv_obj_set_ext_click_area(st->btn_ok, ext);
 
     st->lbl_prefix = lv_label_create(root);
     lv_obj_add_style(st->lbl_prefix, mw_style_mono(), LV_PART_MAIN);
@@ -591,6 +611,7 @@ lv_obj_t* mw_kb_make_key(mw_kb_state_t* st, lv_obj_t* parent, int cell,
     lv_obj_remove_style_all(b);
     lv_obj_add_style(b, mw_style_key(), LV_PART_MAIN);
     lv_obj_add_style(b, mw_style_focus(), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_style(b, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_size(b, w, h);
     lv_obj_add_flag(b, LV_OBJ_FLAG_EVENT_BUBBLE);
     MW_OBJ_CLEAR_FLAG(b, LV_OBJ_FLAG_SCROLLABLE);

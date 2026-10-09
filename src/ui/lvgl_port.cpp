@@ -321,6 +321,11 @@ extern "C" bool mw_touch_needs_calibration(void)     { return s_tneeds_cal; }
 static lv_coord_t s_last_x = 0, s_last_y = 0;
 
 #if LVGL_VERSION_MAJOR >= 9
+// Defined in lv_indev.c but missing from the public header of LVGL 9.x.
+extern "C" lv_timer_t* lv_indev_get_read_timer(lv_indev_t* indev);
+#endif
+
+#if LVGL_VERSION_MAJOR >= 9
 static void mw_touch_cb(lv_indev_t* indev, lv_indev_data_t* data)
 #else
 static void mw_touch_cb(lv_indev_drv_t* indev, lv_indev_data_t* data)
@@ -790,6 +795,10 @@ mw_err_t mw_ui_init(void) {
         // pixels of movement LVGL does not start a scroll (and so does not
         // swallow the CLICKED event of a list row).
         lv_indev_set_scroll_limit(s_indev_touch, 16);
+        // Poll the panel every 10 ms, not once per display refresh (30 ms):
+        // a quick tap must be seen while the finger is still down.
+        lv_timer_t* rt = lv_indev_get_read_timer(s_indev_touch);
+        if (rt) lv_timer_set_period(rt, 10);
     }
     if (caps->has_buttons || caps->has_encoder) {
         s_indev_keys = lv_indev_create();

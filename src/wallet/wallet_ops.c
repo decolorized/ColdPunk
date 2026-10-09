@@ -5,6 +5,7 @@
 #include "../monero/address.h"
 #include "../monero/key_image.h"
 #include "../monero/keys.h"
+#include "../crypto/chacha.h"
 #include "../crypto/memzero.h"
 #include "../hal/log.h"
 
@@ -47,6 +48,13 @@ static void progress(const mw_ops_cb_t* cb, const char* stage, uint32_t done,
                      uint32_t total)
 {
     if (cb && cb->progress) cb->progress(cb->user, stage, done, total);
+}
+
+// Sealing without a cached file key runs the CryptoNight slow hash (a few
+// seconds): its own progress is reported as the "sealing" stage.
+static void seal_progress(int permille, void* u)
+{
+    progress((const mw_ops_cb_t*)u, "sealing", (uint32_t)permille, 1000u);
 }
 
 size_t mw_ops_seal_offset(const mw_file_kind_t* kind)
@@ -223,7 +231,11 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
     }
 
     size_t sealed = 0;
+    progress(cb, "sealing", 0, 1000u);
+    if (cb && cb->progress) mw_cn_slow_hash_set_progress(seal_progress, (void*)cb);
     e = mw_file_seal(&MW_FILE_KEYIMAGES, pt, pt_len, keys, out, out_cap, &sealed);
+    mw_cn_slow_hash_set_progress(NULL, NULL);
+    progress(cb, "sealing", 1000u, 1000u);
     if (e != MW_OK) return fail(er, e, "cannot seal the key image file (%s)", mw_err_str(e));
     *out_len = sealed;
     (void)mw_ki_cache_save();
@@ -651,9 +663,12 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             goto done;
         }
         size_t sealed = 0;
-        progress(cb, "sealing", 0, 1);
+        progress(cb, "sealing", 0, 1000u);
+        if (cb && cb->progress) mw_cn_slow_hash_set_progress(seal_progress, (void*)cb);
         e = mw_file_seal_k(&MW_FILE_SIGNED_TX, out + off, pt_len, keys,
                            s->has_file_key ? &s->file_key : NULL, out, out_cap, &sealed);
+        mw_cn_slow_hash_set_progress(NULL, NULL);
+        if (e == MW_OK) progress(cb, "sealing", 1000u, 1000u);
         if (e != MW_OK) {
             fail(er, e, "cannot seal the signed set (%s)", mw_err_str(e));
             goto done;
@@ -688,6 +703,51 @@ static size_t json_escape(const char* in, char* out, size_t cap)
     }
     out[n] = '\0';
     return n;
+}
+
+mw_err_t mw_ops_viewonly_text(const mw_account_keys_t* keys, mw_network_t net,
+                              const char* wallet_name, uint32_t restore_height,
+                              char* out, size_t cap, size_t* len)
+{
+    static const char* nets[] = { "mainnet", "testnet", "stagenet" };
+    static const char hexd[] = "0123456789abcdef";
+    mw_address_t addr;
+    char a[MW_ADDRESS_STR_MAX];
+    char hex[65];
+
+    if (!keys || !out || !len || cap < 64) return MW_ERR_INVALID_ARG;
+    if (mw_sc_is_zero(&keys->sec.view)) return MW_ERR_INVALID_ARG;
+    mw_err_t e = mw_address_from_keys(keys, net, &addr);
+    if (e == MW_OK) e = mw_address_encode(&addr, a, sizeof a);
+    if (e != MW_OK) return e;
+    for (int i = 0; i < 32; ++i) {
+        hex[2 * i] = hexd[keys->sec.view.b[i] >> 4];
+        hex[2 * i + 1] = hexd[keys->sec.view.b[i] & 0x0f];
+    }
+    hex[64] = '\0';
+    const int n = snprintf(out, cap,
+        "ColdPunk - view-only wallet data\r\n"
+        "================================\r\n"
+        "\r\n"
+        "Wallet:           %s\r\n"
+        "Network:          %s\r\n"
+        "Primary address:  %s\r\n"
+        "Private view key: %s\r\n"
+        "Restore height:   %lu\r\n"
+        "\r\n"
+        "Restore a view-only wallet in Feather / MoneroPunkSigner: New wallet ->\r\n"
+        "Restore wallet from keys -> View Only, then paste the address and the\r\n"
+        "private view key. Spending still needs the ColdPunk device.\r\n"
+        "\r\n"
+        "WARNING: whoever reads this file sees every incoming payment and the\r\n"
+        "balance of this wallet. It cannot spend. Delete the file after use.\r\n",
+        wallet_name ? wallet_name : "",
+        ((unsigned)net <= 2u) ? nets[net] : "mainnet", a, hex,
+        (unsigned long)restore_height);
+    mw_memzero(hex, sizeof hex);
+    if (n < 0 || (size_t)n >= cap) { mw_memzero(out, cap); return MW_ERR_TOO_MANY; }
+    *len = (size_t)n;
+    return MW_OK;
 }
 
 mw_err_t mw_ops_wallet_export(const mw_account_keys_t* keys, mw_network_t net,

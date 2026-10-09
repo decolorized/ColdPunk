@@ -79,6 +79,7 @@ void mw_kb_scroll_build(mw_kb_state_t* st) {
     lv_obj_remove_style_all(left);
     lv_obj_add_style(left, mw_style_key(), LV_PART_MAIN);
     lv_obj_add_style(left, mw_style_focus(), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_style(left, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_size(left, m->row_h, cap_h);
     lv_obj_add_flag(left, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_t* ll = lv_label_create(left);
@@ -105,6 +106,7 @@ void mw_kb_scroll_build(mw_kb_state_t* st) {
     lv_obj_remove_style_all(right);
     lv_obj_add_style(right, mw_style_key(), LV_PART_MAIN);
     lv_obj_add_style(right, mw_style_focus(), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_style(right, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_size(right, m->row_h, cap_h);
     lv_obj_add_flag(right, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_t* rl = lv_label_create(right);

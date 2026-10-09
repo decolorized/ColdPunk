@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 #include "screen_common.h"
 #include "../hal/log.h"
+#include "img_monero.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -418,12 +419,11 @@ lv_obj_t* mw_ui_list_row(lv_obj_t* list, const char* icon, const char* text,
     lv_obj_set_style_min_height(row, m->row_h, LV_PART_MAIN);
     lv_obj_set_style_bg_color(row, mw_palette()->surface, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(row, mw_palette()->surface2,
-                              LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_text_color(row, mw_palette()->text, LV_PART_MAIN);
     lv_obj_set_style_text_font(row, m->font_body, LV_PART_MAIN);
     lv_obj_set_style_radius(row, m->mono ? 0 : 4, LV_PART_MAIN);
     lv_obj_add_style(row, mw_style_focus(), LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_style(row, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
     if (cb) lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user);
     return row;
@@ -695,22 +695,38 @@ static void progress_job(void* arg) {
     progress_ctx_t* c = (progress_ctx_t*)arg;
 
     if (!c->open) {
+        // Title, the Monero logo in the middle of the free room, and at the
+        // bottom edge: the stage line, the bar with its percentage, Cancel.
+        const mw_metrics_t* m = mw_metrics();
         mw_ui_overlay_create(&c->page, c->title);
         lv_obj_add_event_cb(c->page.scr, progress_del_cb, LV_EVENT_DELETE, NULL);
 
-        lv_obj_t* spacer = lv_obj_create(c->page.body);
-        lv_obj_remove_style_all(spacer);
-        lv_obj_set_width(spacer, lv_pct(100));
-        lv_obj_set_flex_grow(spacer, 1);
+        lv_obj_t* area = lv_obj_create(c->page.body);
+        lv_obj_remove_style_all(area);
+        lv_obj_set_width(area, lv_pct(100));
+        lv_obj_set_flex_grow(area, 1);
+        MW_OBJ_CLEAR_FLAG(area, LV_OBJ_FLAG_SCROLLABLE);
 
-        c->bar        = mw_ui_bar(c->page.body);
-        c->lbl_pct    = mw_ui_label(c->page.body, "", mw_style_dim());
         c->lbl_detail = mw_ui_label(c->page.body, "", mw_style_dim());
+        lv_label_set_long_mode(c->lbl_detail, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(c->lbl_detail,
+                          (lv_coord_t)lv_font_get_line_height(m->font_small));
 
-        lv_obj_t* spacer2 = lv_obj_create(c->page.body);
-        lv_obj_remove_style_all(spacer2);
-        lv_obj_set_width(spacer2, lv_pct(100));
-        lv_obj_set_flex_grow(spacer2, 1);
+        lv_obj_t* row = lv_obj_create(c->page.body);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_column(row, m->gap * 2, LV_PART_MAIN);
+        MW_OBJ_CLEAR_FLAG(row, LV_OBJ_FLAG_SCROLLABLE);
+        c->bar = mw_ui_bar(row);
+        lv_obj_set_width(c->bar, 0);
+        lv_obj_set_flex_grow(c->bar, 1);
+        c->lbl_pct = lv_label_create(row);
+        lv_obj_add_style(c->lbl_pct, mw_style_dim(), LV_PART_MAIN);
+        lv_label_set_text(c->lbl_pct, "100%");
+        lv_obj_set_width(c->lbl_pct, LV_SIZE_CONTENT);
 
         if (c->cancellable) {
             lv_obj_t* footer = mw_ui_page_footer(&c->page);
@@ -718,6 +734,30 @@ static void progress_job(void* arg) {
             mw_ui_focus_add(&c->page, btn);
             mw_ui_page_set_escape(&c->page, progress_escape, NULL);
         }
+
+        // The largest logo that fits the free room as it is - never scaled
+        // up (a big panel gets the 256 px one at its own size), none at all
+        // on monochrome panels or when even the smallest does not fit.
+#if LVGL_VERSION_MAJOR >= 9
+        if (!m->mono) {
+            // Whatever sizes tools/img2lvgl.py generated (img_monero.h).
+            const lv_image_dsc_t* const* logos = mw_img_monero_all;
+            lv_obj_update_layout(c->page.scr);
+            lv_coord_t room = lv_obj_get_content_height(area);
+            const lv_coord_t wide = lv_obj_get_content_width(area);
+            if (wide < room) room = wide;
+            room = (lv_coord_t)(room - 2 * m->gap);          // keep a margin
+            const lv_image_dsc_t* pick = NULL;
+            for (int i = 0; i < MW_IMG_MONERO_COUNT; ++i) {
+                if ((lv_coord_t)logos[i]->header.h <= room) pick = logos[i];
+            }
+            if (pick) {
+                lv_obj_t* img = lv_image_create(area);
+                lv_image_set_src(img, pick);
+                lv_obj_center(img);
+            }
+        }
+#endif
 
         c->open = true;
     } else if (c->page.title) {

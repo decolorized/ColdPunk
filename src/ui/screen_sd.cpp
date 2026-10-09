@@ -23,6 +23,9 @@ typedef struct {
     const mw_sd_row_t*     rows;
     int                    count;
     int                    initial;
+    const char*            empty;
+    bool                 (*changed)(void);
+    lv_timer_t*            poll;
     mw_page_t              page;
     bool                   done;
 } sd_ctx_t;
@@ -32,8 +35,15 @@ static sd_ctx_t s_sd;
 static void sd_finish(int32_t r) {
     if (s_sd.done) return;
     s_sd.done = true;
+    if (s_sd.poll) { lv_timer_delete(s_sd.poll); s_sd.poll = NULL; }
     mw_ui_page_destroy(&s_sd.page);
     mw_ui_modal_done(r);
+}
+
+// Card pulled out or put in: the caller rebuilds the list.
+static void sd_poll_cb(lv_timer_t* t) {
+    MW_UNUSED(t);
+    if (s_sd.changed && s_sd.changed()) sd_finish(MW_SD_LIST_CHANGED);
 }
 static void sd_row_cb(lv_event_t* e)   { sd_finish((int32_t)(intptr_t)lv_event_get_user_data(e)); }
 static void sd_cancel_cb(lv_event_t* e) { MW_UNUSED(e); sd_finish(-1); }
@@ -57,8 +67,19 @@ static void sd_build(void* arg) {
     mw_ui_page_set_escape(&c->page, sd_escape, c);
     mw_ui_modal_set_cancel(sd_cancel_now);
 
-    lv_obj_t* list = mw_ui_list(c->page.body);
+    lv_obj_t* list = NULL;
     lv_obj_t* focus_row = NULL;
+    if (c->count > 0) {
+        list = mw_ui_list(c->page.body);
+    } else {
+        // No card / nothing to process: say so, and wait for a card.
+        lv_obj_t* l = lv_label_create(c->page.body);
+        lv_obj_set_width(l, lv_pct(100));
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_style_text_font(l, m->font_body, LV_PART_MAIN);
+        lv_label_set_text(l, c->empty ? c->empty : "");
+    }
 
     for (int i = 0; i < c->count; i++) {
         const mw_sd_row_t* r = &c->rows[i];
@@ -72,11 +93,10 @@ static void sd_build(void* arg) {
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_bg_color(row, mw_palette()->surface, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(row, mw_palette()->surface2,
-                                  LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_set_style_radius(row, m->mono ? 0 : 4, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN);
         lv_obj_add_style(row, mw_style_focus(), LV_PART_MAIN | LV_STATE_FOCUSED);
+        lv_obj_add_style(row, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
         lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
         MW_OBJ_CLEAR_FLAG(row, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -109,17 +129,21 @@ static void sd_build(void* arg) {
         lv_obj_set_flex_grow(b, 1);
         mw_ui_focus_add(&c->page, b);
     }
-    if (focus_row)     lv_group_focus_obj(focus_row);
-    else if (c->count) lv_group_focus_obj(lv_obj_get_child(list, 0));
+    if (focus_row)             lv_group_focus_obj(focus_row);
+    else if (c->count && list) lv_group_focus_obj(lv_obj_get_child(list, 0));
+    c->poll = c->changed ? lv_timer_create(sd_poll_cb, 250, c) : NULL;
 }
 
 int mw_screen_sd_files_run(const char* title, const mw_sd_row_t* rows, int count,
-                           int initial) {
-    if (!rows || count <= 0) return -1;
+                           int initial, const char* empty, bool (*changed)(void)) {
+    if (count < 0 || (count > 0 && !rows)) return -1;
     s_sd.title   = title ? title : "";
     s_sd.rows    = rows;
     s_sd.count   = count;
     s_sd.initial = initial;
+    s_sd.empty   = empty;
+    s_sd.changed = changed;
+    s_sd.poll    = NULL;
     s_sd.done    = false;
     return (int)mw_ui_modal_call(sd_build, &s_sd);
 }

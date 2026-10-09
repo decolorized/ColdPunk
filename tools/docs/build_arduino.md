@@ -211,7 +211,8 @@ volume»).
 
 ТЗ 8.1 требует:
 
-- HMAC-ключ в eFuse (`HMAC_KEY0`, назначение `ESP_EFUSE_KEY_PURPOSE_HMAC_UP`),
+- HMAC-ключ в eFuse (старший свободный блок, обычно `BLOCK_KEY5`; назначение
+  `ESP_EFUSE_KEY_PURPOSE_HMAC_UP`),
   read-protected;
 - зашифрованный NVS с `CONFIG_NVS_ENCRYPTION=y` и
   `CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0`.
@@ -245,16 +246,18 @@ NVS. Это осознанный компромисс, а не выполнен�
 
 ### Прошивка eFuse-ключа
 
-`mw_secure_key_provision()` в `secure_storage.h` описан как «One-shot
-provisioning: burns a TRNG key into HMAC_KEY0 with purpose HMAC_UP and
-read-protects it. IRREVERSIBLE». Соответственно:
+`mw_secure_key_provision()` записывает ключ из TRNG в старший свободный блок
+ключей eFuse (обычно `BLOCK_KEY5`) с назначением HMAC_UP и запрещает его
+чтение. Это необратимо. Соответственно:
 
-- вызывается один раз, на этапе первичной настройки устройства;
+- вызывается один раз, при первом включении — до задания пароля; без ключа
+  устройство не работает;
 - после этого ключ нельзя ни прочитать, ни перезаписать — ТЗ 8.1:
   «обновление — только замена чипа»;
 - проверка состояния — `mw_secure_key_status()`.
 
-Альтернатива вне прошивки — `espefuse.py burn_key BLOCK_KEY0 key.bin HMAC_UP`.
+Альтернатива вне прошивки — `espefuse.py burn_key BLOCK_KEY5 key.bin HMAC_UP`
+(прошивка найдёт ключ HMAC_UP в любом блоке).
 Описание процедуры с точки зрения безопасности выходит за рамки этого
 документа.
 

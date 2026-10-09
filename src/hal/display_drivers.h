@@ -471,6 +471,18 @@ mw_err_t mw_sd_ensure(void);
 // card can be pulled out at any time without losing data.
 void     mw_sd_release(void);
 
+// Card hot-plug watch, for the SD file screen. A background task probes the
+// slot about twice a second: a mounted card with a raw sector read (a pulled
+// card fails it; the volume is then released), an empty slot with a mount
+// attempt. On the first change it stops and mw_sd_watch_changed() turns
+// true; the screen then closes and the caller rebuilds it. Nothing else may
+// touch the card between start and stop. mw_sd_watch_stop() waits for the
+// task to end. mw_sd_mounted(): the volume is mounted right now.
+void     mw_sd_watch_start(void);
+void     mw_sd_watch_stop(void);
+bool     mw_sd_watch_changed(void);
+bool     mw_sd_mounted(void);
+
 // --- host-build extras -----------------------------------------------------
 #ifdef MW_HOST_BUILD
 // Writes the in-memory framebuffer to a binary PPM so host tests can eyeball

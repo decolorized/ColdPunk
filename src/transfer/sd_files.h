@@ -53,6 +53,19 @@ void    mw_sdf_sort(mw_sd_entry_t* e, int n);
 // (at most MW_SD_ENTRY_NAME). MW_ERR_INVALID_ARG for MW_SDF_NONE.
 mw_err_t mw_sdf_result_name(mw_sdf_kind_t k, const char* in, char* out, size_t cap);
 
+// A wallet name made safe as a FAT32 / Windows file name. Wallet names are
+// any printable ASCII, so: control and non-ASCII bytes and / \ : * ? " < > |
+// become '_', leading spaces and trailing spaces and dots go, a name whose
+// stem (up to the first '.') is a reserved device name (CON, PRN, AUX, NUL,
+// COM1..9, LPT1..9, any case) gets a leading '_', and an empty result is
+// "wallet". `out` must hold at least 8 bytes; the name is cut to fit.
+mw_err_t mw_sdf_safe_name(const char* in, char* out, size_t cap);
+
+// File name of the view-only export of wallet `wallet`:
+//   n <= 1: "<safe name>_viewonly.txt", n > 1: "<safe name>_viewonly_<n>.txt"
+// (the caller counts n up while the name is taken on the card).
+mw_err_t mw_sdf_viewonly_name(const char* wallet, int n, char* out, size_t cap);
+
 // The help file written to the card root when it is missing.
 extern const char  mw_sdf_readme_name[];
 extern const char  mw_sdf_readme_text[];

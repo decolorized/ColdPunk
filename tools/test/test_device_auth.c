@@ -702,6 +702,20 @@ MW_TEST(test_progress_reported)
     mw_device_auth_set_progress(NULL, NULL);
 }
 
+MW_TEST(test_weak_passwords)
+{
+    CHECK(mw_device_pw_weak("12345678"));
+    CHECK(mw_device_pw_weak("00000000"));
+    CHECK(mw_device_pw_weak("aaaaaaaa"));
+    CHECK(mw_device_pw_weak("abcdefgh"));
+    CHECK(mw_device_pw_weak("hgfedcba"));
+    CHECK(mw_device_pw_weak("90210777"));
+    CHECK(mw_device_pw_weak(""));
+    CHECK(!mw_device_pw_weak("correct horse"));
+    CHECK(!mw_device_pw_weak("abcdefgx"));
+    CHECK(!mw_device_pw_weak("Tr0ub4dor"));
+}
+
 int main(void)
 {
     mw_random_init();
@@ -732,5 +746,6 @@ int main(void)
 
     mw_secure_user_key_clear();
     mw_host_store_reset();
+    RUN_TEST(test_weak_passwords);
     return mw_test_summary();
 }

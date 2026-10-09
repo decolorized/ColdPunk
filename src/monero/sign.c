@@ -49,6 +49,16 @@ static void report(mw_sign_progress_cb cb, void* user, mw_sign_stage_t stage,
     }
 }
 
+// Bulletproofs+ reports its own progress (0..1000) through a global hook;
+// it is forwarded as the BULLETPROOF stage while mw_bpp_prove() runs.
+typedef struct { mw_sign_progress_cb cb; void* user; } bpp_bridge_t;
+
+static void bpp_bridge(int permille, void* u)
+{
+    const bpp_bridge_t* b = (const bpp_bridge_t*)u;
+    report(b->cb, b->user, MW_SIGN_STAGE_BULLETPROOF, permille);
+}
+
 // payment_id ^= keccak(8*r*A || 0x8d)[0..7]
 static mw_err_t encrypt_payment_id(uint8_t pid[8], const mw_pubkey_t* view_pub,
                                    const mw_seckey_t* tx_sec)
@@ -707,7 +717,12 @@ mw_err_t mw_sign_transaction(const mw_account_keys_t* keys, mw_transaction_t* tx
 
     // ------------------------------------------------ 3. range proof
     report(cb, user, MW_SIGN_STAGE_BULLETPROOF, 0);
-    err = mw_bpp_prove(out_amount, out_mask, tx->n_outputs, &out->bpp);
+    {
+        bpp_bridge_t bridge = { cb, user };
+        if (cb != NULL) mw_bpp_set_progress_cb(bpp_bridge, &bridge);
+        err = mw_bpp_prove(out_amount, out_mask, tx->n_outputs, &out->bpp);
+        mw_bpp_set_progress_cb(NULL, NULL);
+    }
     if (err != MW_OK) {
         goto done;
     }

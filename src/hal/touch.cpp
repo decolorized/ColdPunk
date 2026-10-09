@@ -114,9 +114,11 @@ static void to_screen(int32_t u, int32_t v, uint16_t* x, uint16_t* y)
 }
 
 // ===========================================================================
-// Per-controller raw read.  Each returns true when a finger is down and fills
-// (*u, *v) with the controller's own units.
+// Per-controller raw read.  Each returns RAW_CONTACT when a finger is down and
+// fills (*u, *v) with the controller's own units.  RAW_LIFT (FT6x36 / CST816
+// only) means "the finger has just left at (*u, *v)": see mw_touch_read().
 // ===========================================================================
+enum { RAW_NONE = 0, RAW_CONTACT = 1, RAW_LIFT = 2 };
 #if TOUCH_DRIVER != TOUCH_XPT2046
 
 #if TOUCH_DRIVER != TOUCH_GT911
@@ -129,6 +131,14 @@ static bool i2c_rd(uint8_t addr, uint8_t reg, uint8_t* buf, size_t len)
     if ((size_t)Wire.requestFrom((int)addr, (int)len) != len) return false;
     for (size_t i = 0; i < len; ++i) buf[i] = (uint8_t)Wire.read();
     return true;
+}
+
+static bool i2c_wr8(uint8_t addr, uint8_t reg, uint8_t val)
+{
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
 }
 #endif
 
@@ -156,7 +166,7 @@ static bool gt911_wr8(uint16_t reg, uint8_t val)
 }
 #endif  // GT911
 
-static bool raw_read(int32_t* u, int32_t* v)
+static int raw_read(int32_t* u, int32_t* v)
 {
 #if (TOUCH_DRIVER == TOUCH_FT6336G) || (TOUCH_DRIVER == TOUCH_FT6236) || \
     (TOUCH_DRIVER == TOUCH_CST816S)
@@ -168,27 +178,29 @@ static bool raw_read(int32_t* u, int32_t* v)
     const uint8_t addr = 0x38;
 #endif
     uint8_t b[5];
-    if (!i2c_rd(addr, 0x02, b, sizeof(b))) return false;
-    if ((b[0] & 0x0F) == 0) return false;               // no contact
+    if (!i2c_rd(addr, 0x02, b, sizeof(b))) return RAW_NONE;
+    if ((b[0] & 0x0F) == 0) return RAW_NONE;            // no contact
     // P1_XH bits 7:6 = event flag: 0 press down, 1 lift up, 2 contact,
     // 3 no event.  After the finger leaves, both chips may keep reporting
     // one contact with the "lift up" flag (and the old coordinates) for a
     // while.  Counting that as a press hides the release from LVGL: the next
     // tap is then glued onto the previous press, and LVGL - which clicks the
     // object the press STARTED on - fires the wrong button or none at all
-    // ("works only on the second tap").
+    // ("works only on the second tap").  So "lift up" is passed on as
+    // RAW_LIFT and mw_touch_read() decides whether it is a whole short tap
+    // that fell between two polls.
     const uint8_t ev = (uint8_t)(b[1] >> 6);
-    if (ev == 1 || ev == 3) return false;               // lifted / stale
+    if (ev == 3) return RAW_NONE;                       // stale
     *u = (int32_t)(((uint16_t)(b[1] & 0x0F) << 8) | b[2]);
     *v = (int32_t)(((uint16_t)(b[3] & 0x0F) << 8) | b[4]);
-    return true;
+    return (ev == 1) ? RAW_LIFT : RAW_CONTACT;
 
 #elif TOUCH_DRIVER == TOUCH_GT911
     // 0x814E: bit7 = coordinates ready, bits3:0 = contact count.  The status
     // byte must be cleared by the host or the controller stops updating.
     uint8_t st = 0;
-    if (!gt911_rd(0x814E, &st, 1)) return false;
-    if ((st & 0x80) == 0) return false;
+    if (!gt911_rd(0x814E, &st, 1)) return RAW_NONE;
+    if ((st & 0x80) == 0) return RAW_NONE;
     uint8_t n = st & 0x0F;
     bool ok = false;
     if (n >= 1) {
@@ -200,9 +212,32 @@ static bool raw_read(int32_t* u, int32_t* v)
         }
     }
     gt911_wr8(0x814E, 0x00);                            // ack, always
-    return ok;
+    return ok ? RAW_CONTACT : RAW_NONE;
 #else
 #error "TOUCH_DRIVER is not one of the TZ 2.4 controllers"
+#endif
+}
+
+// Keep the controller in its active scan mode.  Out of the box both chips
+// drop into a low-power mode after a second or two without a finger:
+//   CST816x - auto sleep after ~2 s (reg 0xFE DisAutoSleep = 0); the first
+//             touch only wakes it and is lost;
+//   FT6x36  - "monitor" mode (reg 0x86 G_CTRL = 1) scans slower, so a short
+//             tap is often seen only as "lift up".
+// Both were why the [<] / [OK] header keys - pressed after a pause, not in a
+// typing burst - needed a second tap.  A sleeping CST816 does not answer on
+// I2C, so this is retried from mw_touch_read() until it is acknowledged.
+static bool s_awake_set = false;
+
+static void keep_awake(void)
+{
+    if (s_awake_set) return;
+#if TOUCH_DRIVER == TOUCH_CST816S
+    s_awake_set = i2c_wr8(0x15, 0xFE, 0x01);
+#elif (TOUCH_DRIVER == TOUCH_FT6336G) || (TOUCH_DRIVER == TOUCH_FT6236)
+    s_awake_set = i2c_wr8(0x38, 0x86, 0x00);
+#else
+    s_awake_set = true;
 #endif
 }
 
@@ -235,7 +270,9 @@ static mw_err_t bus_init(void)
     const uint8_t addr = 0x38;
 #endif
     Wire.beginTransmission(addr);
-    return (Wire.endTransmission() == 0) ? MW_OK : MW_ERR_IO;
+    if (Wire.endTransmission() != 0) return MW_ERR_IO;
+    keep_awake();
+    return MW_OK;
 #endif
 }
 
@@ -263,11 +300,11 @@ static int cmp_u16(const void* a, const void* b)
     return (x < y) ? -1 : (x > y) ? 1 : 0;
 }
 
-static bool raw_read(int32_t* u, int32_t* v)
+static int raw_read(int32_t* u, int32_t* v)
 {
     // The PENIRQ line is the only cheap "is a finger down" signal; without it
     // the ADC returns noise that looks like a touch near the rails.
-    if (TOUCH_INT >= 0 && digitalRead(TOUCH_INT) != LOW) return false;
+    if (TOUCH_INT >= 0 && digitalRead(TOUCH_INT) != LOW) return RAW_NONE;
 
     uint16_t xs[7], ys[7];
     SPI.beginTransaction(SPISettings(TOUCH_SPI_HZ, MSBFIRST, SPI_MODE0));
@@ -282,11 +319,13 @@ static bool raw_read(int32_t* u, int32_t* v)
     qsort(ys, 7, sizeof(ys[0]), cmp_u16);
     uint16_t x = xs[3], y = ys[3];
 
-    if (x < 64 || x > 4032 || y < 64 || y > 4032) return false;  // rail noise
+    if (x < 64 || x > 4032 || y < 64 || y > 4032) return RAW_NONE;  // rail noise
     *u = (int32_t)x;
     *v = (int32_t)y;
-    return true;
+    return RAW_CONTACT;
 }
+
+static void keep_awake(void) {}
 
 static mw_err_t bus_init(void)
 {
@@ -358,9 +397,37 @@ bool mw_touch_read(mw_touch_state_t* out)
     out->y = 0;
     if (!s_ready) return false;
 
+    keep_awake();
+
     static int32_t s_u = 0, s_v = 0;     // last contact, for the debug view
+    // Short-tap recovery.  LVGL polls every few tens of ms; a quick tap can
+    // start and end between two polls, and then the only thing the chip
+    // still shows is "lift up" at the tap's point.  Dropping that loses the
+    // tap.  So: a lift that follows a released state and has not been used
+    // yet is reported as one pressed sample - the next poll reports released
+    // and LVGL sees a whole click.  The stale lifts the chips keep repeating
+    // afterwards are ignored: the same lift is used once (s_lift_used), and
+    // a new one is recognised by a real release (no contact) in between or
+    // by another point.
+    static bool    s_was_down  = false;
+    static bool    s_lift_used = true;
+    static int32_t s_lu = -1000, s_lv = -1000;
     int32_t u = 0, v = 0;
-    if (!raw_read(&u, &v)) {
+    const int r = raw_read(&u, &v);
+    bool down = (r == RAW_CONTACT);
+    if (r == RAW_LIFT) {
+        const bool moved = abs(u - s_lu) > 6 || abs(v - s_lv) > 6;
+        if (!s_was_down && (!s_lift_used || moved)) down = true;  // missed tap
+        s_lift_used = true;
+        s_lu = u; s_lv = v;
+    } else if (r == RAW_CONTACT) {
+        s_lift_used = true;              // its own lift is not a new tap
+        s_lu = u; s_lv = v;
+    } else {
+        s_lift_used = false;             // a real release: next lift is new
+    }
+    s_was_down = (r == RAW_CONTACT);
+    if (!down) {
         uint16_t x, y;
         to_screen(s_u, s_v, &x, &y);
         mw_touch_debug_note(s_u, s_v, x, y, false);

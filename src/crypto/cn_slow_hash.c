@@ -739,6 +739,18 @@ static inline size_t cn_e2i(const uint8_t a[16]) {
     return (size_t)((cn_load64_le(a) / CN_AES_BLOCK) & (CN_MEMORY / CN_AES_BLOCK - 1));
 }
 
+static mw_cn_progress_cb g_cn_progress = NULL;
+static void*             g_cn_progress_user = NULL;
+
+void mw_cn_slow_hash_set_progress(mw_cn_progress_cb cb, void* user) {
+    g_cn_progress = cb;
+    g_cn_progress_user = user;
+}
+
+static inline void cn_progress(int permille) {
+    if (g_cn_progress) g_cn_progress(permille, g_cn_progress_user);
+}
+
 int mw_cn_slow_hash(const void* data, size_t len, uint8_t hash[32]) {
     uint8_t  state[200];
     uint8_t  text[CN_INIT_SIZE_BYTE];
@@ -761,7 +773,11 @@ int mw_cn_slow_hash(const void* data, size_t len, uint8_t hash[32]) {
 
     // --- 2. Fill the scratchpad -------------------------------------------
     aes_expand_key_256(state, expanded);
+    cn_progress(0);
     for (size_t i = 0; i < CN_MEMORY / CN_INIT_SIZE_BYTE; ++i) {
+        if ((i & 2047u) == 0) {
+            cn_progress((int)(100u * i / (CN_MEMORY / CN_INIT_SIZE_BYTE)));
+        }
         for (size_t j = 0; j < CN_INIT_SIZE_BLK; ++j) {
             aes_pseudo_round(text + CN_AES_BLOCK * j, expanded);
         }
@@ -776,6 +792,9 @@ int mw_cn_slow_hash(const void* data, size_t len, uint8_t hash[32]) {
     // --- 3. Memory-hard loop ----------------------------------------------
     for (uint32_t iter = 0; iter < CN_ITER / 2; ++iter) {
         size_t j;
+        if ((iter & 8191u) == 0) {
+            cn_progress((int)(100u + (uint32_t)(800ull * iter / (CN_ITER / 2))));
+        }
 
         // Iteration 1: one AES round keyed with `a`, result mixed with `b`.
         j = cn_e2i(a) * CN_AES_BLOCK;
@@ -817,6 +836,9 @@ int mw_cn_slow_hash(const void* data, size_t len, uint8_t hash[32]) {
     memcpy(text, state + 64, CN_INIT_SIZE_BYTE);
     aes_expand_key_256(state + 32, expanded);
     for (size_t i = 0; i < CN_MEMORY / CN_INIT_SIZE_BYTE; ++i) {
+        if ((i & 2047u) == 0) {
+            cn_progress((int)(900u + 100u * i / (CN_MEMORY / CN_INIT_SIZE_BYTE)));
+        }
         for (size_t j = 0; j < CN_INIT_SIZE_BLK; ++j) {
             uint8_t* blk = text + j * CN_AES_BLOCK;
             const uint8_t* src = sp + i * CN_INIT_SIZE_BYTE + j * CN_AES_BLOCK;

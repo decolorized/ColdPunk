@@ -91,6 +91,7 @@ static lv_style_t s_st_mono;
 static lv_style_t s_st_key;
 static lv_style_t s_st_key_dead;
 static lv_style_t s_st_focus;
+static lv_style_t s_st_pressed;
 static lv_style_t s_st_seed_current;
 
 // ---------------------------------------------------------------------------
@@ -317,6 +318,21 @@ static void build_styles(void) {
         lv_style_set_outline_width(&s_st_focus, 0);
     }
 
+    // Pressed feedback: a light orange fill with dark text, different from
+    // the solid-orange focus, so a tap is visible even on the focused object
+    // and on header keys that close the screen on release. Mono panels
+    // invert (same as focus - they have nothing else to show).
+    lv_style_init(&s_st_pressed);
+    if (s_m.mono) {
+        lv_style_set_bg_color(&s_st_pressed, lv_color_white());
+        lv_style_set_text_color(&s_st_pressed, lv_color_black());
+    } else {
+        lv_style_set_bg_color(&s_st_pressed, lv_color_hex(0xFFB27A));
+        lv_style_set_text_color(&s_st_pressed, lv_color_hex(0x0A0A0C));
+        lv_style_set_border_color(&s_st_pressed, s_p.accent);
+    }
+    lv_style_set_bg_opa(&s_st_pressed, LV_OPA_COVER);
+
     // Seed word highlight: the first fully visible row of the seed list.
     // On colour panels it is a solid accent block with white text; on
     // monochrome panels it is inverted (white background, black text).
@@ -362,13 +378,13 @@ lv_style_t* mw_style_mono(void)     { return &s_st_mono; }
 lv_style_t* mw_style_key(void)      { return &s_st_key; }
 lv_style_t* mw_style_key_dead(void) { return &s_st_key_dead; }
 lv_style_t* mw_style_focus(void)    { return &s_st_focus; }
+lv_style_t* mw_style_pressed(void)  { return &s_st_pressed; }
 lv_style_t* mw_style_seed_current(void) { return &s_st_seed_current; }
 
 void mw_theme_button(lv_obj_t* btn) {
     if (!btn) return;
     lv_obj_set_style_bg_color(btn, s_p.surface, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(btn, s_p.surface2, LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_set_style_text_color(btn, s_p.text, LV_PART_MAIN);
     lv_obj_set_style_text_font(btn, s_m.font_body, LV_PART_MAIN);
     lv_obj_set_style_radius(btn, s_m.mono ? 0 : 6, LV_PART_MAIN);
@@ -378,6 +394,7 @@ void mw_theme_button(lv_obj_t* btn) {
     lv_obj_set_style_min_height(btn, s_m.btn_h, LV_PART_MAIN);
     if (!s_m.mono) lv_obj_set_style_min_width(btn, 40, LV_PART_MAIN);
     lv_obj_add_style(btn, &s_st_focus, LV_PART_MAIN | LV_STATE_FOCUSED);
+    lv_obj_add_style(btn, &s_st_pressed, LV_PART_MAIN | LV_STATE_PRESSED);
 }
 
 void mw_theme_button_fixed(lv_obj_t* btn, lv_coord_t w, lv_coord_t h) {

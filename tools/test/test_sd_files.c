@@ -109,8 +109,49 @@ MW_TEST(test_readme)
     CHECK(strstr(mw_sdf_readme_text, "FAT32") != NULL);
 }
 
+static const char* safe(const char* in)
+{
+    static char out[40];
+    if (mw_sdf_safe_name(in, out, sizeof out) != MW_OK) return "<err>";
+    return out;
+}
+
+MW_TEST(test_safe_names)
+{
+    CHECK(strcmp(safe("main"), "main") == 0);
+    CHECK(strcmp(safe("my wallet 2"), "my wallet 2") == 0);
+    CHECK(strcmp(safe("a/b\\c:d*e?f\"g<h>i|j"), "a_b_c_d_e_f_g_h_i_j") == 0);
+    CHECK(strcmp(safe("  lead"), "lead") == 0);
+    CHECK(strcmp(safe("trail. . "), "trail") == 0);
+    CHECK(strcmp(safe("..."), "wallet") == 0);
+    CHECK(strcmp(safe(""), "wallet") == 0);
+    CHECK(strcmp(safe("\x01\x7f"), "__") == 0);
+    CHECK(strcmp(safe("CON"), "_CON") == 0);
+    CHECK(strcmp(safe("nul.x"), "_nul.x") == 0);
+    CHECK(strcmp(safe("com7"), "_com7") == 0);
+    CHECK(strcmp(safe("COM0"), "COM0") == 0);
+    CHECK(strcmp(safe("CONSOLE"), "CONSOLE") == 0);
+    char small[8];
+    CHECK_EQ_INT(mw_sdf_safe_name("abcdefghijk", small, sizeof small), MW_OK);
+    CHECK(strcmp(small, "abcdef") == 0);
+    CHECK(mw_sdf_safe_name("x", small, 4) != MW_OK);
+}
+
+MW_TEST(test_viewonly_names)
+{
+    char out[MW_SD_ENTRY_NAME];
+    CHECK_EQ_INT(mw_sdf_viewonly_name("my/wallet", 1, out, sizeof out), MW_OK);
+    CHECK(strcmp(out, "my_wallet_viewonly.txt") == 0);
+    CHECK_EQ_INT(mw_sdf_viewonly_name("aux", 3, out, sizeof out), MW_OK);
+    CHECK(strcmp(out, "_aux_viewonly_3.txt") == 0);
+    CHECK_EQ_INT(mw_sdf_viewonly_name("0123456789012345678901234567890", 99, out, sizeof out), MW_OK);
+    CHECK(strcmp(out, "0123456789012345678901234567890_viewonly_99.txt") == 0);
+}
+
 int main(void)
 {
+    RUN_TEST(test_safe_names);
+    RUN_TEST(test_viewonly_names);
     RUN_TEST(test_kind_by_magic);
     RUN_TEST(test_name_time);
     RUN_TEST(test_sort_newest_first);

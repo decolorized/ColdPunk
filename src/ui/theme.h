@@ -158,6 +158,7 @@ lv_style_t* mw_style_mono(void);       // address / seed word text
 lv_style_t* mw_style_key(void);        // keyboard key cap
 lv_style_t* mw_style_key_dead(void);   // key that cannot extend the prefix
 lv_style_t* mw_style_focus(void);      // lv_group focus ring for button boards
+lv_style_t* mw_style_pressed(void);    // touch feedback while a finger is down
 lv_style_t* mw_style_seed_current(void);   // highlighted seed word (first visible)
 
 // Convenience: applies the standard button look and guarantees the TZ 4.1

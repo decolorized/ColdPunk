@@ -271,7 +271,7 @@ static const char* const X_RU[XSTR_COUNT] = {
                                "Seed не защищён аппаратно.",
 
     [XSTR_EFUSE_PROVISION]   = "Запрограммировать ключ eFuse",
-    [XSTR_EFUSE_WARN1]       = "В eFuse BLOCK_KEY0 будет записан\n"
+    [XSTR_EFUSE_WARN1]       = "В eFuse BLOCK_KEY%d будет записан\n"
                                "случайный 256-битный HMAC-ключ,\n"
                                "после чего чтение блока будет\n"
                                "НАВСЕГДА запрещено.\n"
@@ -287,6 +287,15 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_EFUSE_NEEDED]      = "Кошелёк нельзя создать, пока не\n"
                                "запрограммирован ключ eFuse.\n"
                                "Сделать это сейчас?",
+    [XSTR_EFUSE_FIRST]       = "Первый запуск. Устройство хранит\n"
+                               "кошельки под секретным ключом,\n"
+                               "записанным в сам чип (eFuse).\n"
+                               "Без этого ключа оно не работает.",
+    [XSTR_EFUSE_NO_BLOCK]    = "Нет свободного блока ключа eFuse:\n%s\n"
+                               "Устройство не может защитить\n"
+                               "кошельки и работать не будет.",
+    [XSTR_EFUSE_BLOCKS]      = "Блоки ключей eFuse",
+    [XSTR_EFUSE_BLOCKS_HINT] = "* ключ кошельков; R = чтение запрещено",
 
     [XSTR_TX_MULTI]          = "Набор содержит несколько транзакций.\n"
                                "Разбейте перевод на отдельные\n"
@@ -334,7 +343,7 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_PW_MISMATCH]       = "Пароли не совпадают",
     [XSTR_PW_WRONG]          = "Неверный пароль (попытка %d)",
     [XSTR_PW_LOCKED]         = "Слишком много попыток.\nПодождите %d с.",
-    [XSTR_PW_RULES]          = "Пароль: от 4 до 64 символов",
+    [XSTR_PW_RULES]          = "Пароль: от 8 до 64 символов",
     [XSTR_PW_CHANGE]         = "Сменить пароль устройства",
     [XSTR_PW_OLD]            = "Текущий пароль",
     [XSTR_PW_NEW]            = "Новый пароль",
@@ -458,6 +467,11 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_SD_OUTPUTS] = "Outputs -> key images",
     [XSTR_SD_UNSIGNED] = "Неподписанная транзакция",
     [XSTR_SD_DONE] = "обработан",
+    [XSTR_SD_INSERT] = "Вставьте microSD (FAT32).\nСписок файлов появится сам.",
+    [XSTR_WL_SD_VK] = "View key на SD-карту",
+    [XSTR_SD_VK_WARN] = "В файл на карте попадут адрес\nи private view key: любой, кто\nпрочтёт карту, увидит все\nвходящие платежи. Записать?",
+    [XSTR_SD_VK_NONE] = "У этого кошелька нет\nprivate view key.",
+    [XSTR_PW_WEAK] = "Слабый пароль: только цифры\nили одинаковые символы.\nУстройство в чужих руках\nподберёт его. Оставить?",
     // end v6 RU
 };
 
@@ -565,7 +579,7 @@ static const char* const X_EN[XSTR_COUNT] = {
 
     [XSTR_EFUSE_PROVISION]   = "Provision the eFuse key",
     [XSTR_EFUSE_WARN1]       = "A random 256-bit HMAC key will be\n"
-                               "burned into eFuse BLOCK_KEY0 and\n"
+                               "burned into eFuse BLOCK_KEY%d and\n"
                                "reading that block will then be\n"
                                "disabled FOREVER.\n"
                                "eFuse bits cannot be taken back:\n"
@@ -580,6 +594,15 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_EFUSE_NEEDED]      = "A wallet cannot be created until the\n"
                                "eFuse key has been provisioned.\n"
                                "Do it now?",
+    [XSTR_EFUSE_FIRST]       = "First start. The device keeps its\n"
+                               "wallets under a secret key burned\n"
+                               "into the chip itself (eFuse).\n"
+                               "It does not work without that key.",
+    [XSTR_EFUSE_NO_BLOCK]    = "No free eFuse key block:\n%s\n"
+                               "The device cannot protect wallets\n"
+                               "and will not work.",
+    [XSTR_EFUSE_BLOCKS]      = "eFuse key blocks",
+    [XSTR_EFUSE_BLOCKS_HINT] = "* wallet key; R = read-protected",
 
     [XSTR_TX_MULTI]          = "The set contains several transactions.\n"
                                "Split the transfer into separate\n"
@@ -627,7 +650,7 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_PW_MISMATCH]       = "Passwords do not match",
     [XSTR_PW_WRONG]          = "Wrong password (attempt %d)",
     [XSTR_PW_LOCKED]         = "Too many attempts.\nWait %d s.",
-    [XSTR_PW_RULES]          = "Password: 4 to 64 characters",
+    [XSTR_PW_RULES]          = "Password: 8 to 64 characters",
     [XSTR_PW_CHANGE]         = "Change device password",
     [XSTR_PW_OLD]            = "Current password",
     [XSTR_PW_NEW]            = "New password",
@@ -750,6 +773,11 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_SD_OUTPUTS] = "Outputs -> key images",
     [XSTR_SD_UNSIGNED] = "Unsigned transaction",
     [XSTR_SD_DONE] = "done",
+    [XSTR_SD_INSERT] = "Insert a microSD card (FAT32).\nThe file list appears by itself.",
+    [XSTR_WL_SD_VK] = "View key to SD card",
+    [XSTR_SD_VK_WARN] = "The file will hold the address\nand the private view key: anyone\nwho reads the card sees every\nincoming payment. Write it?",
+    [XSTR_SD_VK_NONE] = "This wallet has no\nprivate view key.",
+    [XSTR_PW_WEAK] = "Weak password: digits only or\none repeated character. A stolen\ndevice can guess it.\nKeep it anyway?",
     // end v6 EN
 };
 

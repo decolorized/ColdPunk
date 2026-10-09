@@ -132,6 +132,14 @@ mw_err_t mw_ops_wallet_export(const mw_account_keys_t* keys, mw_network_t net,
                               bool with_view_key, char* out, size_t cap,
                               size_t* len);
 
+// The same data as plain text (CRLF lines) for a file on the SD card: wallet
+// name, network, primary address, private view key, restore height and how
+// to restore a view-only wallet from it. MW_ERR_INVALID_ARG when the wallet
+// has no private view key.
+mw_err_t mw_ops_viewonly_text(const mw_account_keys_t* keys, mw_network_t net,
+                              const char* wallet_name, uint32_t restore_height,
+                              char* out, size_t cap, size_t* len);
+
 #ifdef __cplusplus
 }
 #endif

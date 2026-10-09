@@ -154,13 +154,17 @@ explicit confirmation on the device screen. The PC program is only a courier.
   key + restore height) with a plain Yes / No on the device.
 - **SD card exchange** (ES3C28P): the wallet menu lists the Feather files in
   the card root (newest first). Pick one to sign it or to make key images; the
-  result is written next to it with the same date.
+  result is written next to it with the same date. The list follows the card:
+  it empties when the card is pulled out and fills again when one is put in.
+- **View key to SD card** (ES3C28P): `<wallet>_viewonly.txt` with the primary
+  address, private view key and restore height, after a warning on the device.
 
 **Device**
 
 - Disguised as **Minesweeper** at power-on and after every lock.
-- **Device password** (4–64 characters): 200 000 PBKDF2-HMAC-SHA256 rounds,
-  with the chip's eFuse HMAC key mixed in between and at the end. The attempt
+- **Device password** (8–64 characters; weak ones draw a warning): 200 000
+  PBKDF2-HMAC-SHA256 rounds on the SHA accelerator, with the chip's eFuse HMAC
+  key mixed in between and at the end. The attempt
   counter is written before each check, and failed attempts back off
   exponentially (2 s … 10 min, kept across reboots).
 - **USB is enabled only after the correct password.**
@@ -258,9 +262,11 @@ details are in [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md).
 
 ## First start
 
-1. **Hardware key.** On a fresh chip the device offers to burn a random 32-byte
-   key into eFuse `BLOCK_KEY0` (purpose `HMAC_UP`, read-protected) behind two
-   confirmation screens. **This is irreversible.** Every wallet on the device
+1. **Hardware key.** Right after the unlock gesture, before the password, a
+   chip without the key offers to burn a random 32-byte key into the highest
+   free eFuse key block (`BLOCK_KEY5` on a fresh chip; purpose `HMAC_UP`,
+   read-protected) behind two confirmation screens. **This is irreversible.**
+   The device does not work without it; declining returns to the game. Every wallet on the device
    is sealed with a key derived from it; a firmware image copied to another
    chip cannot open them. Bench provisioning with `espefuse.py` is described in
    [`tools/docs/security.md`](tools/docs/security.md) §4.
@@ -308,7 +314,8 @@ details are in [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md).
 On the first use the device writes `ColdPunk_readme.txt` with these steps to
 the card. Files up to 256 KB. Every write is flushed and the card unmounted
 right after it, and the card is mounted afresh each time the list opens, so it
-can be pulled out and swapped at any time except during the write itself.
+can be pulled out and swapped at any time except during the write itself. The
+open list notices a card pulled out or put in and updates itself.
 
 **View-only wallet on the PC:** in MoneroPunkSigner, *Restore wallet from keys
 → ColdPunk*, then answer *Yes* on the device. Address, view key, restore height
@@ -395,6 +402,7 @@ boards/               one header per supported board
 sketch.yaml           arduino-cli build profiles
 lv_conf.h             LVGL configuration
 partitions.csv        flash layout
+res/                  source images (monero.png -> src/ui/img_monero.c)
 src/
   config/             app_config.h - build-wide constants
   crypto/             SHA-2, Keccak, HMAC/PBKDF2, AES-GCM, ChaCha, ed25519, CryptoNight, RNG
@@ -405,8 +413,10 @@ src/
   transfer/           mwlink protocol (link.c), USB HID/CDC transport,
                       SD card file browser logic (sd_files.c)
   hal/                display, touch, buttons, SD (SPI and SDIO), logging, host stubs
-  ui/                 LVGL screens, keyboards, flows, i18n, Minesweeper
+  ui/                 LVGL screens, keyboards, flows, i18n, Minesweeper,
+                      img_monero.c (generated logo, 160 px)
 tools/
+  img2lvgl.py         PNG -> LVGL 9 C image (RGB565A8): regenerates img_monero.c
   docs/               design, security, protocol, user guide, testing
   test/               host test suite (gcc, no hardware needed)
   tools/mwlink/       PC courier: CLI, Tk GUI, device simulator, tests

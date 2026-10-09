@@ -49,6 +49,10 @@ bool     mw_sd_exists(const char* p) { (void)p; return false; }
 mw_err_t mw_sd_set_mtime(const char* p, int64_t t) { (void)p; (void)t; return MW_ERR_NOT_SUPPORTED; }
 mw_err_t mw_sd_ensure(void) { return MW_ERR_NOT_SUPPORTED; }
 void     mw_sd_release(void) {}
+void     mw_sd_watch_start(void) {}
+void     mw_sd_watch_stop(void) {}
+bool     mw_sd_watch_changed(void) { return false; }
+bool     mw_sd_mounted(void) { return false; }
 
 #else   // ================= HAS_SD ==========================================
 
@@ -209,6 +213,68 @@ void mw_sd_release(void)
     SDFS.end();
     s_sd_ready = false;
 }
+
+bool mw_sd_mounted(void) { return s_sd_ready; }
+
+// --------------------------------------------------------------------------
+// Hot-plug watch (see display_drivers.h)
+// --------------------------------------------------------------------------
+#define MW_SD_WATCH_MS 500
+
+static volatile bool     s_w_run     = false;
+static volatile bool     s_w_changed = false;
+static SemaphoreHandle_t s_w_done    = NULL;
+
+static void sd_watch_task(void* arg)
+{
+    (void)arg;
+    // A sector read goes to the card itself, never to the FAT cache.
+    static uint8_t sector[512] __attribute__((aligned(4)));
+    while (s_w_run) {
+        vTaskDelay(pdMS_TO_TICKS(MW_SD_WATCH_MS));
+        if (!s_w_run) break;
+        if (s_sd_ready) {
+            bool gone = (SD_DETECT >= 0 && digitalRead(SD_DETECT) != LOW);
+            if (!gone) gone = !SDFS.readRAW(sector, 0);
+            if (gone) {
+                mw_sd_release();
+                s_w_changed = true;
+                break;
+            }
+        } else if (SD_DETECT < 0 || digitalRead(SD_DETECT) == LOW) {
+            if (mw_sd_init() == MW_OK) {
+                s_w_changed = true;
+                break;
+            }
+        }
+    }
+    memset(sector, 0, sizeof(sector));
+    xSemaphoreGive(s_w_done);
+    vTaskDelete(NULL);
+}
+
+void mw_sd_watch_start(void)
+{
+    if (s_w_run) return;                          // already watching
+    if (!s_w_done) s_w_done = xSemaphoreCreateBinary();
+    if (!s_w_done) return;
+    (void)xSemaphoreTake(s_w_done, 0);            // stale give from a past run
+    s_w_changed = false;
+    s_w_run = true;
+    if (xTaskCreate(sd_watch_task, "sd_watch", 8192, NULL, 1, NULL) != pdPASS) {
+        s_w_run = false;
+    }
+}
+
+void mw_sd_watch_stop(void)
+{
+    if (!s_w_done) return;
+    const bool running = s_w_run;
+    s_w_run = false;
+    if (running) (void)xSemaphoreTake(s_w_done, portMAX_DELAY);
+}
+
+bool mw_sd_watch_changed(void) { return s_w_changed; }
 
 // --------------------------------------------------------------------------
 // Read

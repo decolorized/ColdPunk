@@ -83,7 +83,8 @@ typedef enum {
 
     // eFuse provisioning (TZ 8.1) - the one-shot, irreversible key burn.
     XSTR_EFUSE_PROVISION, XSTR_EFUSE_WARN1, XSTR_EFUSE_WARN2,
-    XSTR_EFUSE_DONE, XSTR_EFUSE_NEEDED,
+    XSTR_EFUSE_DONE, XSTR_EFUSE_NEEDED, XSTR_EFUSE_FIRST, XSTR_EFUSE_NO_BLOCK,
+    XSTR_EFUSE_BLOCKS, XSTR_EFUSE_BLOCKS_HINT,
 
     // TZ 12.4: the unsigned set carries more than one transaction.
     XSTR_TX_MULTI,
@@ -171,6 +172,11 @@ typedef enum {
     XSTR_SD_OUTPUTS,
     XSTR_SD_UNSIGNED,
     XSTR_SD_DONE,
+    XSTR_SD_INSERT,
+    XSTR_WL_SD_VK,
+    XSTR_SD_VK_WARN,
+    XSTR_SD_VK_NONE,
+    XSTR_PW_WEAK,
     // end v6
 
     XSTR_COUNT
@@ -426,9 +432,12 @@ typedef struct {
     const char* detail;    // type . size . date . done
     bool        done;      // a result for this file is already on the card
 } mw_sd_row_t;
-// The chosen row, or -1 (Back).
+// The chosen row, -1 (Back), or MW_SD_LIST_CHANGED when changed() turned
+// true while the list was shown (the card was pulled out or put in; polled
+// a few times a second). With count == 0 the screen shows `empty` instead.
+#define MW_SD_LIST_CHANGED (-2)
 int mw_screen_sd_files_run(const char* title, const mw_sd_row_t* rows, int count,
-                           int initial);
+                           int initial, const char* empty, bool (*changed)(void));
 
 // --- screen_tx.cpp ---
 bool mw_screen_tx_run(const mw_tx_summary_t* s, uint64_t unlock_time);
@@ -459,6 +468,9 @@ void mw_screen_settings_run(void);
 // changed without replacing the chip. Returns true when the key is
 // provisioned by the time it returns (including "it already was").
 bool mw_screen_efuse_provision_run(void);
+// "KEY0  free" ... "KEY5  HMAC UP, no read  <- wallets": one line per eFuse
+// key block, for the read-only Settings page and the "no free block" notice.
+void mw_efuse_blocks_text(char* out, size_t cap);
 
 #endif /* MW_UI_STRINGS_ONLY */
 

@@ -232,6 +232,23 @@ static void arm_lockout(void) {
     if (g_next_allowed_ms == 0 && d) g_next_allowed_ms = 1;   // never confuse with "none"
 }
 
+bool mw_device_pw_weak(const char* pw) {
+    if (!pw || !pw[0]) return true;
+    const size_t n = strlen(pw);
+    bool digits = true, same = true, up = true, down = true;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = (unsigned char)pw[i];
+        if (c < '0' || c > '9') digits = false;
+        if (i > 0) {
+            const unsigned char p = (unsigned char)pw[i - 1];
+            if (c != p) same = false;
+            if (c != p + 1) up = false;
+            if (c + 1 != p) down = false;
+        }
+    }
+    return digits || same || (n > 1 && (up || down));
+}
+
 static bool password_ok(const char* pw) {
     if (!pw) return false;
     size_t n = strlen(pw);

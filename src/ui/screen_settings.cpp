@@ -174,6 +174,9 @@ static void settings_build(void* arg) {
 
     if (mw_secure_key_status() != MW_OK) {
         add(LV_SYMBOL_WARNING, TX(XSTR_EFUSE_PROVISION), NULL, SET_EFUSE);
+    } else {
+        snprintf(buf, sizeof(buf), "KEY%d", mw_secure_key_block());
+        add(LV_SYMBOL_SETTINGS, TX(XSTR_EFUSE_BLOCKS), buf, SET_EFUSE);
     }
 
     add(LV_SYMBOL_TRASH,    T(STR_SETTINGS_RESET), NULL, SET_RESET);
@@ -267,11 +270,36 @@ static bool brightness_dialog(uint8_t* value) {
 // ---------------------------------------------------------------------------
 //  eFuse provisioning (TZ 8.1) - irreversible, so behind the typed number.
 // ---------------------------------------------------------------------------
+void mw_efuse_blocks_text(char* out, size_t cap) {
+    mw_key_block_info_t b[MW_SECURE_KEY_BLOCKS];
+    size_t n = 0;
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (mw_secure_key_blocks(b) != MW_OK) return;
+    for (int i = 0; i < MW_SECURE_KEY_BLOCKS && n < cap; ++i) {
+        const int w = snprintf(out + n, cap - n, "%sKEY%d %s %s%s", i ? "\n" : "", i,
+                               b[i].wallet_key ? "*" : " ", b[i].purpose,
+                               b[i].read_protected ? " R" : "");
+        if (w < 0) break;
+        n += (size_t)w;
+    }
+}
+
 bool mw_screen_efuse_provision_run(void) {
     if (mw_secure_key_status() == MW_OK) return true;   // already burned
 
-    if (!mw_ui_confirm(TX(XSTR_EFUSE_PROVISION), TX(XSTR_EFUSE_WARN1),
-                       T(STR_NEXT), T(STR_CANCEL))) {
+    const int blk = mw_secure_key_target_block();
+    if (blk < 0) {
+        char list[200], body[320];
+        mw_efuse_blocks_text(list, sizeof(list));
+        snprintf(body, sizeof(body), TX(XSTR_EFUSE_NO_BLOCK), list);
+        MW_LOGE("settings", "no free eFuse key block");
+        mw_ui_message(T(STR_ERR_GENERIC), body);
+        return false;
+    }
+    char warn[480];
+    snprintf(warn, sizeof(warn), TX(XSTR_EFUSE_WARN1), blk);
+    if (!mw_ui_confirm(TX(XSTR_EFUSE_PROVISION), warn, T(STR_NEXT), T(STR_CANCEL))) {
         return false;
     }
     if (!mw_ui_confirm_code(TX(XSTR_EFUSE_PROVISION), TX(XSTR_EFUSE_WARN2))) {
@@ -280,7 +308,7 @@ bool mw_screen_efuse_provision_run(void) {
 
     const mw_err_t e = mw_secure_key_provision();
     if (e == MW_OK) {
-        MW_LOGI("settings", "eFuse HMAC key provisioned");
+        MW_LOGI("settings", "eFuse HMAC key provisioned in BLOCK_KEY%d", mw_secure_key_block());
         mw_ui_message_timeout(T(STR_SUCCESS), TX(XSTR_EFUSE_DONE), 2000);
         return true;
     }
@@ -505,8 +533,12 @@ static bool ask_new_password(char* new_pw, char* again, size_t cap) {
         mw_memzero(again, cap);
         if (ask_password(TX(XSTR_PW_NEW), new_pw, cap) != MW_OK) return false;
         const size_t n = strlen(new_pw);
-        if (n < MW_DEVICE_PW_MIN || n > MW_DEVICE_PW_MAX) {
+        if (n < MW_DEVICE_PW_MIN_NEW || n > MW_DEVICE_PW_MAX) {
             mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_RULES));
+            continue;
+        }
+        if (mw_device_pw_weak(new_pw) &&
+            !mw_ui_confirm(TX(XSTR_PW_TITLE), TX(XSTR_PW_WEAK), TX(XSTR_YES), TX(XSTR_NO))) {
             continue;
         }
         if (ask_password(TX(XSTR_PW_REPEAT), again, cap) != MW_OK) return false;
@@ -739,7 +771,14 @@ void mw_screen_settings_run(void) {
         }
 
         case SET_EFUSE:
-            mw_screen_efuse_provision_run();
+            if (mw_secure_key_status() == MW_OK) {
+                char list[200], body[260];
+                mw_efuse_blocks_text(list, sizeof(list));
+                snprintf(body, sizeof(body), "%s\n\n%s", list, TX(XSTR_EFUSE_BLOCKS_HINT));
+                mw_ui_message(TX(XSTR_EFUSE_BLOCKS), body);
+            } else {
+                mw_screen_efuse_provision_run();
+            }
             break;
 
         case SET_RESET:

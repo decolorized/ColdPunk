@@ -234,6 +234,28 @@ mw_err_t mw_secure_key_provision(void)
     return err;
 }
 
+/* Emulated key blocks: the "wallet key" sits in BLOCK_KEY5 once provisioned. */
+int mw_secure_key_block(void)
+{
+    return (mw_secure_key_status() == MW_OK) ? 5 : -1;
+}
+
+int mw_secure_key_target_block(void)
+{
+    return 5;
+}
+
+mw_err_t mw_secure_key_blocks(mw_key_block_info_t out[MW_SECURE_KEY_BLOCKS])
+{
+    if (!out) return MW_ERR_INVALID_ARG;
+    const bool have = mw_secure_key_status() == MW_OK;
+    for (int i = 0; i < MW_SECURE_KEY_BLOCKS; ++i) {
+        out[i].used = out[i].read_protected = out[i].wallet_key = (have && i == 5);
+        out[i].purpose = out[i].used ? "HMAC UP" : "free";
+    }
+    return MW_OK;
+}
+
 // ---------------------------------------------------------------------------
 // User password key (task2 item 1) - mirrors secure_storage.cpp.
 // ---------------------------------------------------------------------------
@@ -286,7 +308,7 @@ mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t out[32], bool
 // that is sitting in a file.  Same construction, zero security.  The result is
 // then mixed with the user password key exactly as on the device:
 //     key = HMAC-SHA256(user_key, hw_key || label)
-static mw_err_t derive_label_key(const char* label, uint8_t out[32])
+static mw_err_t derive_label_key(const char* label, uint8_t out[32], bool legacy)
 {
     uint8_t root[32], hw[32], msg[32 + 64];
     size_t  llen;
@@ -294,10 +316,14 @@ static mw_err_t derive_label_key(const char* label, uint8_t out[32])
     if (!label || !*label) return MW_ERR_INVALID_ARG;
     llen = strlen(label);
     if (llen > 64) return MW_ERR_INVALID_ARG;
-    err = read_root_key(root);
-    if (err != MW_OK) { mw_memzero(root, sizeof root); return MW_ERR_NOT_SUPPORTED; }
-    mw_hmac_sha256(root, sizeof root, (const uint8_t*)label, llen, hw);
-    mw_memzero(root, sizeof root);
+    if (legacy) {
+        mw_keccak256((const uint8_t*)label, llen, hw);   /* old bring-up mode */
+    } else {
+        err = read_root_key(root);
+        if (err != MW_OK) { mw_memzero(root, sizeof root); return MW_ERR_NOT_SUPPORTED; }
+        mw_hmac_sha256(root, sizeof root, (const uint8_t*)label, llen, hw);
+        mw_memzero(root, sizeof root);
+    }
 
     if (!g_user_key_set) {
         mw_memzero(hw, sizeof hw);
@@ -311,8 +337,9 @@ static mw_err_t derive_label_key(const char* label, uint8_t out[32])
     return MW_OK;
 }
 
-mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
-                 uint8_t* iv16, uint8_t* tag16, uint8_t* ct, size_t ct_cap)
+static mw_err_t seal_with(const char* label, const uint8_t* pt, size_t pt_len,
+                          uint8_t* iv16, uint8_t* tag16, uint8_t* ct, size_t ct_cap,
+                          bool legacy)
 {
     uint8_t key[32];
     mw_err_t err;
@@ -321,7 +348,7 @@ mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
     if (!label || !iv16 || !tag16 || (pt_len && (!pt || !ct)) || ct_cap < pt_len)
         return MW_ERR_INVALID_ARG;
 
-    err = derive_label_key(label, key);
+    err = derive_label_key(label, key, legacy);
     if (err != MW_OK) { mw_memzero(key, sizeof key); return err; }
 
     mw_random_bytes(iv16, MW_GCM_IV_BYTES);
@@ -329,6 +356,25 @@ mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
                                pt, pt_len, ct, tag16);
     mw_memzero(key, sizeof key);
     return (rc == MW_AES_GCM_OK) ? MW_OK : MW_ERR_INVALID_ARG;
+}
+
+mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
+                 uint8_t* iv16, uint8_t* tag16, uint8_t* ct, size_t ct_cap)
+{
+    return seal_with(label, pt, pt_len, iv16, tag16, ct, ct_cap, false);
+}
+
+mw_err_t mw_host_seal_legacy(const char* label, const uint8_t* pt, size_t pt_len,
+                             uint8_t* iv16, uint8_t* tag16, uint8_t* ct, size_t ct_cap)
+{
+    return seal_with(label, pt, pt_len, iv16, tag16, ct, ct_cap, true);
+}
+
+static bool g_last_legacy = false;
+
+bool mw_secure_last_unseal_legacy(void)
+{
+    return g_last_legacy;
 }
 
 mw_err_t mw_unseal(const char* label, const uint8_t* ct, size_t ct_len,
@@ -339,14 +385,26 @@ mw_err_t mw_unseal(const char* label, const uint8_t* ct, size_t ct_len,
     mw_err_t err;
     int rc;
 
+    g_last_legacy = false;
     if (!label || !iv16 || !tag16 || (ct_len && (!ct || !pt)) || pt_cap < ct_len)
         return MW_ERR_INVALID_ARG;
 
-    err = derive_label_key(label, key);
+    err = derive_label_key(label, key, false);
     if (err != MW_OK) { mw_memzero(key, sizeof key); return err; }
 
     rc = mw_aes256_gcm_decrypt(key, iv16, MW_GCM_IV_BYTES, NULL, 0,
                                ct, ct_len, tag16, pt);
+    if (rc == MW_AES_GCM_BAD_TAG) {            /* mirrors the device */
+        err = derive_label_key(label, key, true);
+        if (err == MW_OK &&
+            mw_aes256_gcm_decrypt(key, iv16, MW_GCM_IV_BYTES, NULL, 0,
+                                  ct, ct_len, tag16, pt) == MW_AES_GCM_OK) {
+            g_last_legacy = true;
+            rc = MW_AES_GCM_OK;
+        } else if (ct_len) {
+            mw_memzero(pt, ct_len);
+        }
+    }
     mw_memzero(key, sizeof key);
     if (rc == MW_AES_GCM_BAD_TAG) return MW_ERR_DECRYPT;
     return (rc == MW_AES_GCM_OK) ? MW_OK : MW_ERR_INVALID_ARG;

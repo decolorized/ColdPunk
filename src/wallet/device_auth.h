@@ -35,7 +35,8 @@
 extern "C" {
 #endif
 
-#define MW_DEVICE_PW_MIN      4
+#define MW_DEVICE_PW_MIN      4      // still opens: passwords set before v7
+#define MW_DEVICE_PW_MIN_NEW  8      // a password being set or changed now
 #define MW_DEVICE_PW_MAX      64
 #ifndef MW_DEVICE_PW_ROUNDS
 #define MW_DEVICE_PW_ROUNDS   200000u
@@ -110,6 +111,11 @@ void     mw_device_auth_forget(void);
 
 // Removes the record; part of the factory reset.
 mw_err_t mw_device_auth_erase(void);
+
+// A password a stolen device would guess quickly even at the KDF's speed:
+// digits only, one repeated character, or a plain run (abcdefgh, 87654321).
+// The UI warns and lets the user keep it.
+bool mw_device_pw_weak(const char* pw);
 
 #ifdef __cplusplus
 }

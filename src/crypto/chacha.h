@@ -37,6 +37,12 @@ int mw_cn_slow_hash(const void* data, size_t len, uint8_t hash[32]);
 int mw_cn_slow_hash_init(void);
 void mw_cn_slow_hash_free(void);
 
+// Optional progress for the UI: permille 0..1000 within ONE mw_cn_slow_hash()
+// call (fill 0..100, loop 100..900, fold 900..1000), about 64 calls each.
+// The hook is global: set it around a call and clear it (NULL) afterwards.
+typedef void (*mw_cn_progress_cb)(int permille, void* user);
+void mw_cn_slow_hash_set_progress(mw_cn_progress_cb cb, void* user);
+
 #ifdef __cplusplus
 }
 #endif

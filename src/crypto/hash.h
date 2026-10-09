@@ -4,6 +4,7 @@
 #ifndef MW_HASH_H
 #define MW_HASH_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -82,6 +83,10 @@ void mw_pbkdf2_set_progress(mw_pbkdf2_progress_fn fn, void* ctx);
 void mw_pbkdf2_sha256(const uint8_t* pw, size_t pw_len,
                       const uint8_t* salt, size_t salt_len,
                       uint32_t iterations, uint8_t* out, size_t out_len);
+
+// true when mw_pbkdf2_sha256 runs on the SHA accelerator (ESP32-S3, after a
+// self-test against the software code); false on the host or if it failed.
+bool mw_pbkdf2_sha256_hw(void);
 
 // PBKDF2-HMAC-SHA512 - required by dice entropy (2048 rounds, TZ 6.4).
 void mw_pbkdf2_sha512(const uint8_t* pw, size_t pw_len,

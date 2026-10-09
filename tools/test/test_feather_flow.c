@@ -948,6 +948,36 @@ MW_TEST(test_wallet_export)
     CHECK(mw_ops_wallet_export(&g_base, MW_NET_MAINNET, "b", 0, true, json, 64, &len) != MW_OK);
 }
 
+MW_TEST(test_viewonly_text)
+{
+    static const char hexd[] = "0123456789abcdef";
+    char txt[1024], hex[65];
+    size_t len = 0;
+    CHECK_EQ_INT(mw_ops_viewonly_text(&g_base, MW_NET_MAINNET, "bo/rya", 3100000, txt,
+                                      sizeof txt, &len), MW_OK);
+    CHECK_EQ_INT((int)strlen(txt), (int)len);
+    CHECK(strstr(txt, "Wallet:           bo/rya\r\n") != NULL);
+    CHECK(strstr(txt, "Network:          mainnet\r\n") != NULL);
+    CHECK(strstr(txt, "Primary address:  4") != NULL);
+    CHECK(strstr(txt, "Restore height:   3100000\r\n") != NULL);
+    for (int i = 0; i < 32; ++i) {
+        hex[2 * i] = hexd[g_base.sec.view.b[i] >> 4];
+        hex[2 * i + 1] = hexd[g_base.sec.view.b[i] & 15];
+    }
+    hex[64] = 0;
+    CHECK(strstr(txt, hex) != NULL);
+    for (int i = 0; i < 32; ++i) {
+        hex[2 * i] = hexd[g_base.sec.spend.b[i] >> 4];
+        hex[2 * i + 1] = hexd[g_base.sec.spend.b[i] & 15];
+    }
+    CHECK(strstr(txt, hex) == NULL);          // never the spend key
+    CHECK(mw_ops_viewonly_text(&g_base, MW_NET_MAINNET, "b", 0, txt, 200, &len) != MW_OK);
+    mw_account_keys_t vo = g_base;
+    memset(vo.sec.view.b, 0, 32);
+    CHECK_EQ_INT(mw_ops_viewonly_text(&vo, MW_NET_MAINNET, "b", 0, txt, sizeof txt, &len),
+                 MW_ERR_INVALID_ARG);
+}
+
 // Audit round 1: an older copy of the cache file put back is refused, and a
 // full cache says so instead of dropping entries silently.
 static uint8_t g_snap[256 * 1024];
@@ -1060,6 +1090,7 @@ int main(void)
     RUN_TEST(test_unsigned_flag_and_account_lies);
     RUN_TEST(test_unsigned_log_hygiene);
     RUN_TEST(test_wallet_export);
+    RUN_TEST(test_viewonly_text);
     RUN_TEST(test_ki_cache_rollback_and_full);
     RUN_TEST(test_delete_wipes_cache);
 

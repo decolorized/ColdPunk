@@ -112,6 +112,61 @@ mw_err_t mw_sdf_result_name(mw_sdf_kind_t k, const char* in, char* out, size_t c
     return MW_ERR_INVALID_ARG;
 }
 
+// ------------------------------------------------------- safe file names
+static bool reserved_stem(const char* s, size_t n)
+{
+    static const char* const fixed[] = { "CON", "PRN", "AUX", "NUL" };
+    char up[5];
+    if (n < 3 || n > 4) return false;
+    for (size_t i = 0; i < n; ++i) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        up[i] = c;
+    }
+    up[n] = '\0';
+    if (n == 3) {
+        for (size_t i = 0; i < sizeof fixed / sizeof fixed[0]; ++i)
+            if (strcmp(up, fixed[i]) == 0) return true;
+        return false;
+    }
+    return (memcmp(up, "COM", 3) == 0 || memcmp(up, "LPT", 3) == 0) &&
+           up[3] >= '1' && up[3] <= '9';
+}
+
+mw_err_t mw_sdf_safe_name(const char* in, char* out, size_t cap)
+{
+    if (!in || !out || cap < 8) return MW_ERR_INVALID_ARG;
+    size_t o = 0;
+    out[o++] = '_';                  // room for the reserved-name prefix
+    for (const char* p = in; *p && o + 1 < cap; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (o == 1 && c == ' ') continue;                 // leading spaces
+        if (c < 0x20 || c > 0x7e || strchr("/\\:*?\"<>|", (int)c) != NULL) c = '_';
+        out[o++] = (char)c;
+    }
+    while (o > 1 && (out[o - 1] == ' ' || out[o - 1] == '.')) --o;
+    out[o] = '\0';
+    if (o == 1) {
+        snprintf(out, cap, "wallet");
+        return MW_OK;
+    }
+    const char* dot = strchr(out + 1, '.');
+    const size_t stem = dot ? (size_t)(dot - (out + 1)) : o - 1;
+    if (!reserved_stem(out + 1, stem)) memmove(out, out + 1, o);   // drop the '_'
+    return MW_OK;
+}
+
+mw_err_t mw_sdf_viewonly_name(const char* wallet, int n, char* out, size_t cap)
+{
+    char safe[40];
+    if (!out || cap < 24) return MW_ERR_INVALID_ARG;
+    mw_err_t e = mw_sdf_safe_name(wallet ? wallet : "", safe, sizeof safe);
+    if (e != MW_OK) return e;
+    int w = (n <= 1) ? snprintf(out, cap, "%s_viewonly.txt", safe)
+                     : snprintf(out, cap, "%s_viewonly_%d.txt", safe, n);
+    return (w > 0 && (size_t)w < cap) ? MW_OK : MW_ERR_TOO_MANY;
+}
+
 const char mw_sdf_readme_name[] = "ColdPunk_readme.txt";
 
 const char mw_sdf_readme_text[] =
@@ -135,6 +190,9 @@ const char mw_sdf_readme_text[] =
     "DEVICE screen, not on the computer.\r\n"
     "\r\n"
     "Card format: FAT32. Files up to 256 KB. The device never writes a seed,\r\n"
-    "a passphrase or a private key to this card.\r\n"
+    "a passphrase or the spend key to this card. The private VIEW key and the\r\n"
+    "address are written only when you choose \"Export view key\" in the\r\n"
+    "wallet menu (file <wallet>_viewonly.txt): that file shows every incoming\r\n"
+    "payment of the wallet to whoever reads it - delete it after use.\r\n"
     "\r\n"
     "https://github.com/decolorized/ColdPunk\r\n";

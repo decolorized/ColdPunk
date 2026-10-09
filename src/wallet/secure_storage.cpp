@@ -1,8 +1,9 @@
 // ESP32-S3 implementation of secure_storage.h (TZ 8.1, 4.2).
 //
 // Key hierarchy
-//   eFuse BLOCK_KEY0 (32 bytes, purpose HMAC_UP, read-protected)
-//        |  esp_hmac_calculate(HMAC_KEY0, label)        <- runs in hardware,
+//   eFuse BLOCK_KEYn (32 bytes, purpose HMAC_UP, read-protected; n is picked
+//        |            at provisioning, see "eFuse key block" below)
+//        |  esp_hmac_calculate(HMAC_KEYn, label)        <- runs in hardware,
 //        v                                                 key never leaves the
 //   per-label AES-256 key                                  eFuse block
 //        |  AES-256-GCM (random 128-bit IV, 128-bit tag)
@@ -17,15 +18,19 @@
 // secure_storage_host.c instead, selected by the MW_HOST_BUILD guard below.
 //
 // ---------------------------------------------------------------------------
-// DEBUG FALLBACK
+// No eFuse key, no sealing
 //
-// When the eFuse HMAC key is not provisioned, derive_label_key() falls back
-// to keccak256(label).  That lets wallets be created during bring-up without
-// burning eFuse.  It is INSECURE - the derived "key" is a public function of
-// a public label, so anyone with the NVS ciphertext can decrypt it.
+// The firmware asks for the eFuse key at the very first start, before the
+// device password (flows.cpp), and nothing is sealed without it: mw_seal()
+// and mw_secure_hw_hmac() refuse with MW_ERR_NOT_SUPPORTED.
 //
-// Define MW_SECURE_ALLOW_FALLBACK=0 (or comment the branch out) before
-// shipping and provision the eFuse as TZ 8.1 requires.
+// Records written by older firmware in the bring-up mode (hardware part =
+// keccak256(label), a public value) can still be OPENED: mw_unseal() tries
+// that key when the eFuse one does not authenticate, and reports it through
+// mw_secure_last_unseal_legacy(). Such records are re-sealed under the eFuse
+// key by the first password-record upgrade after provisioning (device_auth.c
+// re-keys every wallet and key image cache). Nothing new is ever sealed that
+// way.
 // ---------------------------------------------------------------------------
 
 #ifndef MW_HOST_BUILD
@@ -54,11 +59,6 @@ extern "C" {
 #include "nvs_flash.h"
 }
 
-// 1 -> allow keccak256(label) when the eFuse key is missing (bring-up only).
-// 0 -> refuse; wallets cannot be created until the eFuse is provisioned.
-#ifndef MW_SECURE_ALLOW_FALLBACK
-#  define MW_SECURE_ALLOW_FALLBACK 1
-#endif
 
 #define MW_NVS_NAMESPACE      "mwallet"
 #define MW_SETTINGS_BLOB_KEY  "settings"
@@ -66,10 +66,113 @@ extern "C" {
 #define MW_SETTINGS_VERSION   2
 #define MW_SETTINGS_BLOB_LEN  40
 
-// Which eFuse block and which HMAC key id the project uses (TZ 8.1 fixes both
-// at 0; MW_HMAC_EFUSE_KEY_ID lives in app_config.h).
-#define MW_EFUSE_BLOCK  ((esp_efuse_block_t)(EFUSE_BLK_KEY0 + MW_HMAC_EFUSE_KEY_ID))
-#define MW_HMAC_KEY_ID  ((hmac_key_id_t)(HMAC_KEY0 + MW_HMAC_EFUSE_KEY_ID))
+// ---------------------------------------------------------------------------
+// eFuse key block
+//
+// The ESP32-S3 has six 256-bit key blocks, BLOCK_KEY0..5. The chip itself
+// keeps nothing there (calibration and MAC live in BLOCK1/2); they are taken
+// only by features someone turns on: flash encryption (1-2 blocks) and secure
+// boot (up to 3 digests), which ESP-IDF puts into the FIRST free block. So
+// the wallet key goes into the HIGHEST free block, KEY5 down, and leaves the
+// low ones to them.
+//
+// The block in use is the one with purpose HMAC_UP and read protection. Its
+// number is remembered in NVS ("hw_kblk") so a second HMAC_UP block burned
+// later by someone else cannot replace it; without the hint (older firmware
+// used KEY0) the highest such block is taken.
+// ---------------------------------------------------------------------------
+#define MW_KEY_BLOCKS 6
+#define MW_NVS_KBLK   "hw_kblk"
+
+static int s_kblk = -2;                   // -2 not looked up yet, -1 none
+
+static esp_efuse_block_t key_blk(int i) { return (esp_efuse_block_t)(EFUSE_BLK_KEY0 + i); }
+
+static bool blk_is_wallet_key(int i)
+{
+    const esp_efuse_block_t b = key_blk(i);
+    return !esp_efuse_key_block_unused(b) &&
+           esp_efuse_get_key_purpose(b) == ESP_EFUSE_KEY_PURPOSE_HMAC_UP &&
+           esp_efuse_get_key_dis_read(b);
+}
+
+static void kblk_remember(int i)
+{
+    nvs_handle_t h;
+    if (nvs_open(MW_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_u8(h, MW_NVS_KBLK, (uint8_t)i) == ESP_OK) (void)nvs_commit(h);
+    nvs_close(h);
+}
+
+static int key_block(void)
+{
+    if (s_kblk >= 0 && blk_is_wallet_key(s_kblk)) return s_kblk;
+    nvs_handle_t h;
+    uint8_t v = 0xFF;
+    if (nvs_open(MW_NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, MW_NVS_KBLK, &v) != ESP_OK) v = 0xFF;
+        nvs_close(h);
+    }
+    if (v < MW_KEY_BLOCKS && blk_is_wallet_key(v)) return s_kblk = v;
+    for (int i = MW_KEY_BLOCKS - 1; i >= 0; --i) {
+        if (blk_is_wallet_key(i)) {
+            kblk_remember(i);
+            return s_kblk = i;
+        }
+    }
+    return s_kblk = -1;
+}
+
+static hmac_key_id_t hmac_id(int i) { return (hmac_key_id_t)(HMAC_KEY0 + i); }
+
+extern "C" int mw_secure_key_block(void)
+{
+    return key_block();
+}
+
+extern "C" int mw_secure_key_target_block(void)
+{
+    const int cur = key_block();
+    if (cur >= 0) return cur;
+    for (int i = MW_KEY_BLOCKS - 1; i >= 0; --i) {
+        if (esp_efuse_key_block_unused(key_blk(i))) return i;
+    }
+    return -1;
+}
+
+static const char* purpose_name(esp_efuse_purpose_t p)
+{
+    switch (p) {
+    case ESP_EFUSE_KEY_PURPOSE_USER:                        return "USER";
+    case ESP_EFUSE_KEY_PURPOSE_RESERVED:                    return "RESERVED";
+    case ESP_EFUSE_KEY_PURPOSE_XTS_AES_256_KEY_1:           return "FLASH ENC 256/1";
+    case ESP_EFUSE_KEY_PURPOSE_XTS_AES_256_KEY_2:           return "FLASH ENC 256/2";
+    case ESP_EFUSE_KEY_PURPOSE_XTS_AES_128_KEY:             return "FLASH ENC 128";
+    case ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_ALL:               return "HMAC DOWN ALL";
+    case ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_JTAG:              return "HMAC JTAG";
+    case ESP_EFUSE_KEY_PURPOSE_HMAC_DOWN_DIGITAL_SIGNATURE: return "HMAC DS";
+    case ESP_EFUSE_KEY_PURPOSE_HMAC_UP:                     return "HMAC UP";
+    case ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST0:         return "SECURE BOOT 0";
+    case ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST1:         return "SECURE BOOT 1";
+    case ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST2:         return "SECURE BOOT 2";
+    default:                                                return "OTHER";
+    }
+}
+
+extern "C" mw_err_t mw_secure_key_blocks(mw_key_block_info_t out[MW_SECURE_KEY_BLOCKS])
+{
+    if (!out) return MW_ERR_INVALID_ARG;
+    const int ours = key_block();
+    for (int i = 0; i < MW_KEY_BLOCKS; ++i) {
+        const esp_efuse_block_t b = key_blk(i);
+        out[i].used           = !esp_efuse_key_block_unused(b);
+        out[i].read_protected = esp_efuse_get_key_dis_read(b);
+        out[i].wallet_key     = (i == ours);
+        out[i].purpose        = out[i].used ? purpose_name(esp_efuse_get_key_purpose(b))
+                                            : "free";
+    }
+    return MW_OK;
+}
 
 // ---------------------------------------------------------------------------
 // Internal blob API shared with wallet_store.c (mirrors secure_storage_host.c)
@@ -136,26 +239,17 @@ extern "C" mw_err_t mw_store_blob_erase(const char* key)
 // eFuse key state
 // ---------------------------------------------------------------------------
 
+// TZ 8.1: a block with purpose HMAC_UP AND read protection - without the
+// protection the "hardware" key is just a constant any firmware can dump.
 extern "C" mw_err_t mw_secure_key_status(void)
 {
-    const esp_efuse_block_t blk = MW_EFUSE_BLOCK;
-
-    if (esp_efuse_key_block_unused(blk)) return MW_ERR_NOT_SUPPORTED;   // not burned
-
-    esp_efuse_purpose_t purpose = esp_efuse_get_key_purpose(blk);
-    if (purpose != ESP_EFUSE_KEY_PURPOSE_HMAC_UP) return MW_ERR_NOT_SUPPORTED;
-
-    // TZ 8.1 also demands read protection - without it the "hardware" key is
-    // just a constant that any firmware can dump.
-    if (!esp_efuse_get_key_dis_read(blk)) return MW_ERR_NOT_SUPPORTED;
-
-    return MW_OK;
+    return (key_block() >= 0) ? MW_OK : MW_ERR_NOT_SUPPORTED;
 }
 
 // ###########################################################################
 // #                         !!!  IRREVERSIBLE  !!!                          #
 // #                                                                         #
-// #  This burns eFuse BLOCK_KEY0 and then permanently disables reading it.   #
+// #  This burns an eFuse key block and permanently disables reading it.     #
 // #  eFuse bits can only go 0 -> 1: the key can NEVER be changed, read back  #
 // #  or erased.  Losing it makes every sealed wallet on this device          #
 // #  unrecoverable - the only recovery path is the seed phrase on paper.     #
@@ -176,9 +270,12 @@ extern "C" mw_err_t mw_secure_key_provision(void)
     // Already provisioned correctly -> nothing to do (and nothing CAN be done).
     if (mw_secure_key_status() == MW_OK) return MW_OK;
 
-    // The block must be completely unused; a block burned with a different
+    // The highest completely unused block; a block burned with another
     // purpose cannot be reclaimed.
-    if (!esp_efuse_key_block_unused(MW_EFUSE_BLOCK)) return MW_ERR_NOT_SUPPORTED;
+    const int blk_i = mw_secure_key_target_block();
+    if (blk_i < 0) return MW_ERR_NOT_SUPPORTED;
+    const esp_efuse_block_t blk = key_blk(blk_i);
+    if (!esp_efuse_key_block_unused(blk)) return MW_ERR_NOT_SUPPORTED;
 
     // Two independent TRNG reads, XORed: mw_random_bytes() is the health-tested
     // path (TZ 8.2), esp_fill_random() is the raw hardware source.
@@ -194,17 +291,18 @@ extern "C" mw_err_t mw_secure_key_provision(void)
 
     // esp_efuse_write_key() writes the block, sets the key purpose, write-
     // protects it and - for HMAC_UP - read-protects it.
-    e = esp_efuse_write_key(MW_EFUSE_BLOCK, ESP_EFUSE_KEY_PURPOSE_HMAC_UP,
-                            key, sizeof key);
+    e = esp_efuse_write_key(blk, ESP_EFUSE_KEY_PURPOSE_HMAC_UP, key, sizeof key);
     mw_memzero(key, sizeof key);
     if (e != ESP_OK) return MW_ERR_IO;
 
     // Belt and braces: make read protection explicit even if the IDF version
     // in use does not apply it automatically for this purpose.
-    if (!esp_efuse_get_key_dis_read(MW_EFUSE_BLOCK)) {
-        if (esp_efuse_set_key_dis_read(MW_EFUSE_BLOCK) != ESP_OK) return MW_ERR_IO;
+    if (!esp_efuse_get_key_dis_read(blk)) {
+        if (esp_efuse_set_key_dis_read(blk) != ESP_OK) return MW_ERR_IO;
     }
 
+    kblk_remember(blk_i);
+    s_kblk = -2;                                 // look it up again
     return mw_secure_key_status();
 }
 
@@ -246,35 +344,23 @@ extern "C" mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t ou
 {
     if ((!msg && len) || !out) return MW_ERR_INVALID_ARG;
     if (bound) *bound = false;
-    if (mw_secure_key_status() == MW_OK) {
-        // esp_hmac_calculate() serialises access to the peripheral itself.
-        if (esp_hmac_calculate(MW_HMAC_KEY_ID, (const void*)msg, len, out) != ESP_OK)
-            return MW_ERR_IO;
-        if (bound) *bound = true;
-        return MW_OK;
-    }
-#if MW_SECURE_ALLOW_FALLBACK
-    static const char k_fallback[] = "mw.hw.hmac.fallback (eFuse not provisioned)";
-    mw_hmac_sha256((const uint8_t*)k_fallback, sizeof k_fallback - 1, msg, len, out);
+    const int kb = key_block();
+    if (kb < 0) return MW_ERR_NOT_SUPPORTED;           // no eFuse key: no binding
+    // esp_hmac_calculate() serialises access to the peripheral itself.
+    if (esp_hmac_calculate(hmac_id(kb), (const void*)msg, len, out) != ESP_OK)
+        return MW_ERR_IO;
+    if (bound) *bound = true;
     return MW_OK;
-#else
-    return MW_ERR_NOT_SUPPORTED;
-#endif
 }
 
-// Per-label AES key.
-//
-// When the eFuse HMAC key is provisioned this is the real thing: SHA-256
-// keyed by an unreachable eFuse secret, evaluated in the HMAC peripheral.
-//
-// When it is not, and MW_SECURE_ALLOW_FALLBACK is 1, the "key" is just
-// keccak256(label).  That is only there so a wallet can be created before
-// the eFuse is burned; see the file header.
-//
-// Either way the result is then mixed with the user password key:
+// Per-label AES key: SHA-256 keyed by the unreachable eFuse secret,
+// evaluated in the HMAC peripheral, then mixed with the user password key:
 //     key = HMAC-SHA256(user_key, hw_key || label)
 // so neither the chip alone nor the password alone can open a record.
-static mw_err_t derive_label_key(const char* label, uint8_t out[32])
+//
+// legacy = true: the hardware part of records from the old bring-up mode,
+// keccak256(label) - for OPENING such records only (file header).
+static mw_err_t derive_label_key(const char* label, uint8_t out[32], bool legacy)
 {
     uint8_t hw[32];
     uint8_t msg[32 + 64];
@@ -284,18 +370,13 @@ static mw_err_t derive_label_key(const char* label, uint8_t out[32])
     llen = strlen(label);
     if (llen > 64) return MW_ERR_INVALID_ARG;
 
-    if (mw_secure_key_status() == MW_OK) {
-        esp_err_t e = esp_hmac_calculate(MW_HMAC_KEY_ID,
-                                         (const void*)label, llen, hw);
-        if (e != ESP_OK) return MW_ERR_NOT_SUPPORTED;
-    } else {
-#if MW_SECURE_ALLOW_FALLBACK
-        // Insecure bring-up path.  A constant output for a constant label means
-        // the sealed blob is only as protected as the user password.
+    if (legacy) {
         mw_keccak256((const uint8_t*)label, llen, hw);
-#else
-        return MW_ERR_NOT_SUPPORTED;
-#endif
+    } else {
+        const int kb = key_block();
+        if (kb < 0) return MW_ERR_NOT_SUPPORTED;
+        esp_err_t e = esp_hmac_calculate(hmac_id(kb), (const void*)label, llen, hw);
+        if (e != ESP_OK) return MW_ERR_NOT_SUPPORTED;
     }
 
     if (!g_user_key_set) {
@@ -320,7 +401,7 @@ extern "C" mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
     if (!label || !iv16 || !tag16 || (pt_len && (!pt || !ct)) || ct_cap < pt_len)
         return MW_ERR_INVALID_ARG;
 
-    err = derive_label_key(label, key);
+    err = derive_label_key(label, key, false);
     if (err != MW_OK) { mw_memzero(key, sizeof key); return err; }
 
     mw_random_bytes(iv16, MW_GCM_IV_BYTES);
@@ -330,6 +411,8 @@ extern "C" mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
     return (rc == MW_AES_GCM_OK) ? MW_OK : MW_ERR_INVALID_ARG;
 }
 
+static bool g_last_legacy = false;
+
 extern "C" mw_err_t mw_unseal(const char* label, const uint8_t* ct, size_t ct_len,
                               const uint8_t* iv16, const uint8_t* tag16,
                               uint8_t* pt, size_t pt_cap)
@@ -338,17 +421,35 @@ extern "C" mw_err_t mw_unseal(const char* label, const uint8_t* ct, size_t ct_le
     mw_err_t err;
     int rc;
 
+    g_last_legacy = false;
     if (!label || !iv16 || !tag16 || (ct_len && (!ct || !pt)) || pt_cap < ct_len)
         return MW_ERR_INVALID_ARG;
 
-    err = derive_label_key(label, key);
+    err = derive_label_key(label, key, false);
     if (err != MW_OK) { mw_memzero(key, sizeof key); return err; }
 
     rc = mw_aes256_gcm_decrypt(key, iv16, MW_GCM_IV_BYTES, NULL, 0,
                                ct, ct_len, tag16, pt);
+    if (rc == MW_AES_GCM_BAD_TAG) {
+        // A record from the old bring-up mode? Opened, never written so.
+        err = derive_label_key(label, key, true);
+        if (err == MW_OK &&
+            mw_aes256_gcm_decrypt(key, iv16, MW_GCM_IV_BYTES, NULL, 0,
+                                  ct, ct_len, tag16, pt) == MW_AES_GCM_OK) {
+            g_last_legacy = true;
+            rc = MW_AES_GCM_OK;
+        } else if (ct_len) {
+            mw_memzero(pt, ct_len);
+        }
+    }
     mw_memzero(key, sizeof key);
     if (rc == MW_AES_GCM_BAD_TAG) return MW_ERR_DECRYPT;
     return (rc == MW_AES_GCM_OK) ? MW_OK : MW_ERR_INVALID_ARG;
+}
+
+extern "C" bool mw_secure_last_unseal_legacy(void)
+{
+    return g_last_legacy;
 }
 
 // ---------------------------------------------------------------------------

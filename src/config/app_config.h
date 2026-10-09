@@ -35,8 +35,8 @@
 #define MW_TARGET_FPS            20
 #define MW_MAX_INPUT_LATENCY_MS  100
 
-// TZ 8.1: eFuse block holding the NVS encryption HMAC key.
-#define MW_HMAC_EFUSE_KEY_ID     0
+// TZ 8.1: the eFuse key block of the wallet key is chosen at provisioning
+// (the highest free one, BLOCK_KEY5 down) - see secure_storage.cpp.
 
 // TZ 8.4: no networking is ever compiled in.
 #if defined(MW_ENABLE_WIFI) || defined(MW_ENABLE_BT)

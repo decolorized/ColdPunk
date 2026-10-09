@@ -17,14 +17,15 @@ in (`app_config.h` refuses to build if `MW_ENABLE_WIFI` or `MW_ENABLE_BT` is
 defined), so the only inputs are the USB link to the PC (mwlink) and, on
 ES3C28P, Feather files on a microSD card. What leaves
 it is key images, signed transactions and, only on a request confirmed on the
-device, the address or the private view key.
+device, the address or the private view key (to the PC, or - "View key to SD
+card", ES3C28P - as a text file on the card).
 
 ### 1.1 What an attacker **cannot** do
 
 | Attacker capability | Outcome |
 | --- | --- |
 | Reads the SPI flash off the board (chip-off, flash dumper) | Sees only NVS pages. With flash encryption + NVS encryption enabled, they are ciphertext. Even without flash encryption they see the **sealed** seed blobs: AES-256-GCM under a key that only exists inside the eFuse. |
-| Copies the flash image onto an identical ESP32-S3 | The clone has a different (or unburned) eFuse `BLOCK_KEY0`. `esp_hmac_calculate()` produces a different per-label key, the GCM tag check fails, and `mw_unseal()` returns `MW_ERR_DECRYPT`. No seed is recovered. |
+| Copies the flash image onto an identical ESP32-S3 | The clone has a different (or unburned) eFuse key block. `esp_hmac_calculate()` produces a different per-label key, the GCM tag check fails, and `mw_unseal()` returns `MW_ERR_DECRYPT`. No seed is recovered. |
 | Runs arbitrary firmware on the original chip | Cannot read the eFuse key: it is read-protected and only reachable by the HMAC peripheral. The attacker can still *use* the HMAC peripheral to unseal, so this is only stopped by secure boot — see limitations. |
 | Edits the wallet directory in NVS (swaps records, renumbers ids, flips ciphertext bits) | Fails closed. The sealing label is `mw.seed.v1.<wallet id>`, so moving a record to another id changes the key; any bit flip breaks the 128-bit GCM tag. |
 | Steals the device while it is locked | The session holds no keys: `mw_session_lock()` zeroes `mw_session_t.keys` and the passphrase buffer. Unsealing again requires nothing from the user — but deriving usable keys requires the **passphrase**, which is never stored (TZ 5.2). |
@@ -52,9 +53,10 @@ device, the address or the private view key.
 ## 2. Key hierarchy
 
 ```
-  eFuse BLOCK_KEY0  (32 bytes, purpose HMAC_UP, READ-PROTECTED, WRITE-PROTECTED)
+  eFuse BLOCK_KEYn  (32 bytes, purpose HMAC_UP, READ-PROTECTED, WRITE-PROTECTED;
+                     n = the highest free block at provisioning, see §4)
         |
-        |  esp_hmac_calculate(HMAC_KEY0, label)      <- runs inside the HMAC
+        |  esp_hmac_calculate(HMAC_KEYn, label)      <- runs inside the HMAC
         |  == HMAC-SHA256(efuse_key, label)             peripheral; the key is
         v                                               never in CPU-visible RAM
   per-label AES-256 key  (32 bytes, lives in one stack frame, wiped on exit)
@@ -64,7 +66,8 @@ device, the address or the private view key.
   sealed blob  ->  encrypted NVS  ->  (optionally) encrypted flash
 ```
 
-* **Root key** — `eFuse BLOCK_KEY0`. Burned once (§4), never readable again.
+* **Root key** — an eFuse key block (`BLOCK_KEY5` on a fresh chip). Burned
+  once (§4), never readable again.
   It is also the key ESP-IDF uses to protect the NVS encryption keys when
   `CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0`, so one burn covers both jobs.
 * **Per-label key** — `HMAC(root, label)`. Labels are namespaced strings:
@@ -227,7 +230,7 @@ verification (TZ 4.2).
 ## 4. eFuse provisioning procedure
 
 > ### ⚠ IRREVERSIBLE
-> eFuse bits only ever go 0 → 1. Once `BLOCK_KEY0` is burned and read-protected
+> eFuse bits only ever go 0 → 1. Once the key block is burned and read-protected
 > it can **never** be read, changed or erased. Losing it makes every wallet
 > sealed on that device unrecoverable *from the device* — your seed phrase on
 > paper is the only backup. TZ 8.1: *"the HMAC key is programmed before first
@@ -237,24 +240,52 @@ verification (TZ 4.2).
 > be invoked by a generic settings dispatcher, and the UI must place it behind
 > **two** separate confirmation screens.
 
+### 4.0 Which key block
+
+The ESP32-S3 has six key blocks, `BLOCK_KEY0..5`. The chip keeps nothing of
+its own there (calibration and MAC live in `BLOCK1/2`); they are taken only by
+features someone turns on: flash encryption (1-2 blocks) and secure boot (up to
+3 digests), which ESP-IDF puts into the **first** free block. The wallet key
+therefore goes into the **highest** free block (`BLOCK_KEY5` on a fresh chip)
+and leaves the low ones to them.
+
+The block in use is the one with purpose `HMAC_UP` and read protection; its
+number is kept in NVS (`hw_kblk`), so an `HMAC_UP` block burned later by
+someone else does not replace it. A chip provisioned by older firmware
+(`BLOCK_KEY0`) keeps working. Settings → *eFuse key blocks* shows the state of
+all six blocks (read-only).
+
 ### 4.1 On-device (the normal path)
 
-1. Boot a freshly flashed device. `mw_secure_key_status()` returns
-   `MW_ERR_NOT_SUPPORTED` and the UI shows the first-run provisioning screen.
-2. Confirm screen 1: *"This permanently programs a key into this chip."*
-3. Confirm screen 2: *"This cannot be undone. Continue?"*
+1. The device does not work without the key: right after the unlock gesture,
+   **before the device password**, a chip without it shows the first-start
+   notice and the provisioning screens (naming the block). Declining returns
+   to the game. When no key block is free, the device says so, lists the
+   blocks and does not continue.
+2. Confirm screen 1: *"A random 256-bit HMAC key will be burned into eFuse
+   BLOCK_KEYn ..."*
+3. Confirm screen 2: the typed code.
 4. The firmware calls `mw_secure_key_provision()`, which:
-   * refuses if `BLOCK_KEY0` is already in use for a different purpose;
+   * picks the highest completely unused key block and refuses when there is
+     none;
    * generates 32 bytes by XORing `mw_random_bytes()` (health-tested TRNG path,
      TZ 8.2) with `esp_fill_random()`;
    * refuses to burn an all-zero key;
-   * calls `esp_efuse_write_key(EFUSE_BLK_KEY0, ESP_EFUSE_KEY_PURPOSE_HMAC_UP,
+   * calls `esp_efuse_write_key(EFUSE_BLK_KEYn, ESP_EFUSE_KEY_PURPOSE_HMAC_UP,
      key, 32)`, which write-protects the block and sets the key purpose;
    * explicitly sets read protection if the IDF version did not;
    * re-reads the state and returns `MW_OK` only when purpose ==
      `HMAC_UP` **and** read protection is set.
-5. `mw_secure_key_status()` now returns `MW_OK`. Wallet creation is unblocked —
-   `mw_wallet_create()` returns `MW_ERR_NOT_SUPPORTED` until this point.
+5. `mw_secure_key_status()` now returns `MW_OK`. Without it nothing is sealed:
+   `mw_seal()` and `mw_secure_hw_hmac()` return `MW_ERR_NOT_SUPPORTED` (there is
+   no bring-up fallback in the firmware any more).
+
+Records written by older firmware in its bring-up mode (hardware part
+`keccak256(label)`, a public value) still OPEN: `mw_unseal()` tries that key
+when the eFuse one fails and flags it (`mw_secure_last_unseal_legacy()`). The
+first unlock after provisioning upgrades the password record to the eFuse key,
+and that upgrade re-seals every wallet and key image cache under it. Nothing
+new is ever sealed the old way.
 
 ### 4.2 From the host with `espefuse.py`
 
@@ -269,16 +300,17 @@ pip install esptool
 #    file afterwards - it is never needed again.
 head -c 32 /dev/urandom > hmac_key0.bin
 
-# 2) Inspect the chip first. BLOCK_KEY0 must be empty.
+# 2) Inspect the chip first. Pick the highest empty block (BLOCK_KEY5 on a
+#    fresh chip) - the firmware looks for HMAC_UP in any block.
 espefuse.py --port /dev/ttyACM0 summary
 
 # 3) Burn it with purpose HMAC_UP. --no-read-protect is NOT passed, so the
 #    block is read-protected as part of the same operation.
-espefuse.py --port /dev/ttyACM0 burn_key BLOCK_KEY0 hmac_key0.bin HMAC_UP
+espefuse.py --port /dev/ttyACM0 burn_key BLOCK_KEY5 hmac_key0.bin HMAC_UP
 
-# 4) Verify: KEY_PURPOSE_0 must read HMAC_UP and BLOCK_KEY0 must show
+# 4) Verify: KEY_PURPOSE_5 must read HMAC_UP and BLOCK_KEY5 must show
 #    "read protected" and "write protected".
-espefuse.py --port /dev/ttyACM0 summary | grep -A2 -E 'KEY_PURPOSE_0|BLOCK_KEY0'
+espefuse.py --port /dev/ttyACM0 summary | grep -A2 -E 'KEY_PURPOSE_5|BLOCK_KEY5'
 
 # 5) Destroy the key material on the host.
 shred -u hmac_key0.bin
@@ -308,7 +340,7 @@ For NVS encryption keyed from the same eFuse block (TZ 8.1), the build needs:
 ```
 CONFIG_NVS_ENCRYPTION=y
 CONFIG_NVS_SEC_PROVIDER_HMAC=y
-CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0        # matches MW_HMAC_EFUSE_KEY_ID
+CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=5        # the block the firmware burned (Settings -> eFuse key blocks)
 CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES=... # unchanged
 ```
 
@@ -322,8 +354,8 @@ nvs_key,  data, nvs_keys, ,        4K, encrypted
 ```
 
 `CONFIG_NVS_SEC_PROVIDER_HMAC` is the scheme that works **without** flash
-encryption — it derives the NVS keys from `HMAC_KEY0`, which is precisely the
-key §4 burns. Prefer it here.
+encryption — it derives the NVS keys from the HMAC key block, which is
+precisely the key §4 burns. Prefer it here.
 
 ---
 
@@ -406,11 +438,29 @@ registered, assume plaintext NVS.
 
 ### 6.3 No secure boot by default
 
-Nothing stops an attacker with USB access from flashing their own firmware,
-which can then call `esp_hmac_calculate()` and unseal every wallet blob. The
-eFuse key protects against *cloning the flash to another chip*, not against
-*running code on this chip*. Enable Secure Boot v2 (§4.2) if you need that, and
-be aware it is equally irreversible and will lock you out of plain reflashing.
+Every wallet record is sealed under a key that needs BOTH the device
+password (through the password KDF) and the chip's eFuse HMAC key. The eFuse
+key cannot be read out, so a dump of the flash cannot be attacked on a PC.
+
+Nothing stops an attacker with the device and USB access from flashing their
+own firmware, though. That firmware can call the HMAC peripheral directly, so
+the chip becomes a password-guessing oracle without the firmware's attempt
+counter and back-off: every guess costs one run of the password KDF on the
+chip (200 000 PBKDF2-HMAC-SHA256 rounds plus 9 eFuse HMAC steps). The firmware
+itself already runs the PBKDF2 on the SHA accelerator (after a self-test, see
+`mw_pbkdf2_sha256_hw()`), so an attacker gains no speed there.
+
+What follows for the user:
+
+* the password is the barrier against a stolen device: new passwords must have
+  at least 8 characters (`MW_DEVICE_PW_MIN_NEW`), and digits-only, one repeated
+  character or a plain run (`abcdefgh`) draws a warning;
+* whoever knows the device password opens every wallet that has no
+  passphrase - the passphrase (§3) is the second factor.
+
+Enable Secure Boot v2 and flash encryption (§4.2) to close the oracle. Both are
+irreversible and lock you out of plain reflashing; the firmware does not turn
+them on by itself.
 
 ### 6.4 No anti-tamper
 
@@ -448,11 +498,13 @@ and are not mitigated here.
 
 * **What leaves the device.** Key image exports and signed transaction sets
   (sealed with the wallet's view key, like wallet2 does), the address, and -
-  only on a PC request confirmed on the device with a typed number - the
+  only on a PC request confirmed on the device (Yes / No) - the
   private view key. The private spend key, the seed and the passphrase have no
   code path to the USB link at all; the view key JSON is built in
   `wallet_ops.c` from the view scalar only, and a host test checks the spend
-  key never appears in it.
+  key never appears in it. The same holds for the SD text file of "View key
+  to SD card" (`mw_ops_viewonly_text`, written only after a warning on the
+  device; host test `test_viewonly_text`).
 * **Nothing without confirmation.** Every key image export and every
   transaction is confirmed on the device screen. The link only stores files
   and requests in RAM; the crypto task processes them in the wallet menu.

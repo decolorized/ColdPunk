@@ -265,6 +265,35 @@ MW_TEST(test_seal_unseal_roundtrip)
     }
 }
 
+// Records of the old bring-up mode (hardware part = keccak(label)) still
+// open, are reported as legacy, and a re-seal moves them to the eFuse key.
+MW_TEST(test_unseal_legacy_record)
+{
+    uint8_t pt[48], ct[48], back[48], iv[16], tag[16];
+    fresh_store();
+    for (size_t i = 0; i < sizeof pt; i++) pt[i] = (uint8_t)(3u * i + 1u);
+
+    CHECK_EQ_INT(mw_host_seal_legacy("mw.legacy", pt, sizeof pt, iv, tag, ct, sizeof ct), MW_OK);
+    CHECK_EQ_INT(mw_unseal("mw.legacy", ct, sizeof ct, iv, tag, back, sizeof back), MW_OK);
+    CHECK(mw_secure_last_unseal_legacy());
+    CHECK_EQ_MEM(back, pt, sizeof pt);
+    // Still bound to the password: another user key does not open it.
+    {
+        uint8_t other[32];
+        memset(other, 0x5a, sizeof other);
+        CHECK_EQ_INT(mw_secure_user_key_set(other), MW_OK);
+        CHECK_EQ_INT(mw_unseal("mw.legacy", ct, sizeof ct, iv, tag, back, sizeof back),
+                     MW_ERR_DECRYPT);
+        CHECK(!mw_secure_last_unseal_legacy());
+        CHECK_EQ_INT(mw_secure_user_key_set(TEST_USER_KEY), MW_OK);
+    }
+    // Re-sealed: now under the (emulated) eFuse key.
+    CHECK_EQ_INT(mw_seal("mw.legacy", pt, sizeof pt, iv, tag, ct, sizeof ct), MW_OK);
+    CHECK_EQ_INT(mw_unseal("mw.legacy", ct, sizeof ct, iv, tag, back, sizeof back), MW_OK);
+    CHECK(!mw_secure_last_unseal_legacy());
+    CHECK_EQ_MEM(back, pt, sizeof pt);
+}
+
 MW_TEST(test_seal_requires_provisioned_key)
 {
     uint8_t pt[16] = {0}, ct[16], iv[16], tag[16];
@@ -1204,6 +1233,7 @@ int main(void)
     RUN_TEST(test_aes_gcm_inplace_and_long);
 
     RUN_TEST(test_seal_unseal_roundtrip);
+    RUN_TEST(test_unseal_legacy_record);
     RUN_TEST(test_seal_requires_provisioned_key);
 
     RUN_TEST(test_wallet_create_and_read_back);

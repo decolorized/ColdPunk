@@ -39,9 +39,25 @@ keyboard_type_t mw_settings_default_keyboard(void);
 // ---------------- eFuse-backed sealing -------------------------------------
 // Returns MW_OK if the HMAC key is present and read-protected.
 mw_err_t mw_secure_key_status(void);
-// One-shot provisioning: burns a TRNG key into HMAC_KEY0 with purpose
-// HMAC_UP and read-protects it. IRREVERSIBLE (TZ 8.1).
+// One-shot provisioning: burns a TRNG key into the highest free key block
+// (BLOCK_KEY5 down) with purpose HMAC_UP and read-protects it.
+// IRREVERSIBLE (TZ 8.1). MW_ERR_NOT_SUPPORTED when no key block is free.
 mw_err_t mw_secure_key_provision(void);
+// Key block (0..5) holding the wallet key, or -1.
+int      mw_secure_key_block(void);
+// Block mw_secure_key_provision() would burn (the one in use when there is
+// one), or -1 when every key block is taken.
+int      mw_secure_key_target_block(void);
+
+#define MW_SECURE_KEY_BLOCKS 6
+typedef struct {
+    bool        used;            // some bit of the block is burned
+    bool        read_protected;
+    bool        wallet_key;      // the block this firmware uses
+    const char* purpose;         // "free", "HMAC UP", "FLASH ENC 128", ...
+} mw_key_block_info_t;
+// State of BLOCK_KEY0..5, for the read-only Settings page.
+mw_err_t mw_secure_key_blocks(mw_key_block_info_t out[MW_SECURE_KEY_BLOCKS]);
 
 // Raw HMAC of `msg` under the eFuse key (device) / the emulated root key
 // (host), for binding the device-password derivation to the chip
@@ -52,6 +68,8 @@ mw_err_t mw_secure_key_provision(void);
 //                   i.e. no binding at all (security.md §4)
 // MW_ERR_NOT_SUPPORTED when neither is available.
 mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t out[32], bool* bound);
+// (Device firmware: without the eFuse key it is MW_ERR_NOT_SUPPORTED; the
+// public-constant fallback above exists only in the host emulation.)
 
 // ---------------- user password key (task2 item 1) --------------------------
 // Every sealed blob is encrypted under a key that mixes the eFuse HMAC output
@@ -73,6 +91,15 @@ mw_err_t mw_seal(const char* label, const uint8_t* pt, size_t pt_len,
 mw_err_t mw_unseal(const char* label, const uint8_t* ct, size_t ct_len,
                    const uint8_t* iv16, const uint8_t* tag16,
                    uint8_t* pt, size_t pt_cap);
+// True when the last mw_unseal() succeeded only with the hardware part of
+// the old bring-up mode (keccak256(label) instead of the eFuse HMAC): such a
+// record still opens and is re-sealed under the eFuse key by the next re-key.
+bool     mw_secure_last_unseal_legacy(void);
+#ifdef MW_HOST_BUILD
+// Host tests only: seals the way the old bring-up mode did.
+mw_err_t mw_host_seal_legacy(const char* label, const uint8_t* pt, size_t pt_len,
+                             uint8_t* iv16, uint8_t* tag16, uint8_t* ct, size_t ct_cap);
+#endif
 
 #ifdef __cplusplus
 }
