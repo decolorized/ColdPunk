@@ -438,11 +438,38 @@ bool     mw_display_is_mono(void);
 void     mw_display_flush(void);
 
 // --- SD extras -------------------------------------------------------------
-// TZ 3.2: FAT32, LFN, files up to 64 KB.  Every path handed to the SD API is
+// FAT32, LFN, files up to 256 KB.  Every path handed to the SD API is
 // bounded by these two limits.
 #define MW_SD_PATH_MAX   128
 #define MW_SD_NAME_MAX   64
-#define MW_SD_FILE_MAX   65536
+// Same ceiling as the USB link (MW_TRANSFER_MAX_FILE): a large Feather outputs
+// export must fit either way.
+#define MW_SD_FILE_MAX   (256u * 1024u)
+
+// One regular file of a directory, for the SD file browser.
+#define MW_SD_ENTRY_NAME 96              // longer names are skipped, not cut
+typedef struct {
+    char     name[MW_SD_ENTRY_NAME];
+    uint32_t size;
+    int64_t  mtime;                      // unix seconds as the FAT entry says; 0 = none
+} mw_sd_entry_t;
+
+// Regular files of `dir` (no directories, no hidden names). Names that do
+// not fit MW_SD_ENTRY_NAME are skipped, so every returned name opens.
+mw_err_t mw_sd_list_files(const char* dir, mw_sd_entry_t* out, int max, int* count);
+// The first `cap` bytes of a file (fewer for a short file).
+mw_err_t mw_sd_read_head(const char* path, uint8_t* buf, size_t cap, size_t* len);
+bool     mw_sd_exists(const char* path);
+// Sets the FAT modification time (the device has no clock of its own).
+mw_err_t mw_sd_set_mtime(const char* path, int64_t unix_time);
+// Fresh mount for one piece of work: whatever was mounted before is released
+// first, so a card swapped while the device ran is picked up. MW_OK when the
+// card can be used.
+mw_err_t mw_sd_ensure(void);
+// Writes every cached sector (FAT, directory, data) to the card and unmounts
+// it. Called right after each write and when the SD screens are left, so the
+// card can be pulled out at any time without losing data.
+void     mw_sd_release(void);
 
 // --- host-build extras -----------------------------------------------------
 #ifdef MW_HOST_BUILD

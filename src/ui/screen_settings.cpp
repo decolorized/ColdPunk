@@ -46,6 +46,7 @@
 #include "../wallet/session.h"
 #include "../crypto/memzero.h"
 #include "../hal/touch_map.h"
+#include "../hal/display_drivers.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -667,15 +668,18 @@ void mw_screen_settings_run(void) {
             break;
 
         case SET_FORMAT:
-            if (!mw_sd_present()) {
+            // Fresh mount: the card may have been swapped since boot.
+            if (mw_sd_ensure() != MW_OK) {
                 mw_ui_message(T(STR_ERR_GENERIC), T(STR_NO_SD));
             } else if (mw_ui_confirm_code(T(STR_SETTINGS_FORMAT_SD),
                                           TX(XSTR_FORMAT_SD_Q))) {
-                const mw_err_t e = mw_sd_format();
+                const mw_err_t e = (mw_sd_ensure() == MW_OK) ? mw_sd_format() : MW_ERR_IO;
+                mw_sd_release();          // flush and unmount before the message
                 MW_LOGI("settings", "SD format -> %s", mw_err_str(e));
                 mw_ui_message(e == MW_OK ? T(STR_SUCCESS) : T(STR_ERR_GENERIC),
                               e == MW_OK ? T(STR_SUCCESS) : mw_err_str(e));
             }
+            mw_sd_release();
             break;
 
         case SET_LANG: {

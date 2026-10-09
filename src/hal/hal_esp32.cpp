@@ -355,8 +355,13 @@ mw_err_t mw_hal_init(void)
 
     // --- 5. SD (optional: the slot is usually empty at boot) --------------
     if (s_caps.has_sd) {
+        // Probe only: the card is mounted again for each use and released
+        // right after it (mw_sd_ensure / mw_sd_release), so it can be swapped
+        // while the device runs.
         e = mw_sd_init();
         if (e != MW_OK) MW_LOG("SD: no card at boot (%d).", (int)e);
+        else            MW_LOG("SD: card present.");
+        mw_sd_release();
     }
 
     s_hal_ready = true;

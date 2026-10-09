@@ -14,7 +14,8 @@ device with a balance you cannot afford to lose.
 
 The device is an **air-gapped signer**. It never has a network stack compiled
 in (`app_config.h` refuses to build if `MW_ENABLE_WIFI` or `MW_ENABLE_BT` is
-defined), so the only input is the USB link to the PC (mwlink). What leaves
+defined), so the only inputs are the USB link to the PC (mwlink) and, on
+ES3C28P, Feather files on a microSD card. What leaves
 it is key images, signed transactions and, only on a request confirmed on the
 device, the address or the private view key.
 

@@ -39,22 +39,22 @@
 #define TOUCH_I2C_HZ     400000UL
 
 // ===== SD Card =====
-// На этой плате SD-карта подключена через SDIO, а не SPI.
-// Проект использует SPI-режим SD, поэтому HAS_SD = 0.
-// Если позже добавите SDIO-драйвер — раскомментируйте пины ниже.
-#define HAS_SD           0
+// The card slot is wired for SDIO (SD_MMC), not SPI. 4-bit bus; the driver
+// falls back to 1-bit (CLK, CMD, D0) when the 4-bit mount fails.
+#define HAS_SD           1
+#define MW_SD_SDMMC      1
+#define SD_CLK           38
+#define SD_CMD           40
+#define SD_D0            39
+#define SD_D1            41
+#define SD_D2            48
+#define SD_D3            47
+// SPI-mode pins are not used on this board.
 #define SD_CS            -1
 #define SD_MISO          -1
 #define SD_MOSI          -1
 #define SD_SCK           -1
 #define SD_DETECT        -1
-// SDIO pins (если скетч поддерживает SDIO):
-// #define SD_CLK        38
-// #define SD_CMD        40
-// #define SD_D0         39
-// #define SD_D1         41
-// #define SD_D2         48
-// #define SD_D3         47
 
 // ===== Camera =====
 #define HAS_CAMERA       0

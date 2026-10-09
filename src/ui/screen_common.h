@@ -163,6 +163,14 @@ typedef enum {
     XSTR_SEED_CAKE,
     XSTR_PP_REQUIRED,
     XSTR_PP_OPEN_CAKE,
+    XSTR_WL_SD,
+    XSTR_SD_TITLE,
+    XSTR_SD_NO_CARD,
+    XSTR_SD_EMPTY,
+    XSTR_SD_SAVED,
+    XSTR_SD_OUTPUTS,
+    XSTR_SD_UNSIGNED,
+    XSTR_SD_DONE,
     // end v6
 
     XSTR_COUNT
@@ -409,6 +417,18 @@ mw_err_t mw_screen_passphrase_open_run(const char* wallet_name, char* out,
 // second confirmation, double entry with comparison, buffers wiped on every
 // exit path.
 mw_err_t mw_screen_passphrase_run(char* out, size_t out_cap);
+
+// --- screen_sd.cpp ---
+// One file of the SD card list: name line and a detail line.
+typedef struct {
+    const char* icon;      // LV_SYMBOL_* of the file type
+    const char* name;
+    const char* detail;    // type . size . date . done
+    bool        done;      // a result for this file is already on the card
+} mw_sd_row_t;
+// The chosen row, or -1 (Back).
+int mw_screen_sd_files_run(const char* title, const mw_sd_row_t* rows, int count,
+                           int initial);
 
 // --- screen_tx.cpp ---
 bool mw_screen_tx_run(const mw_tx_summary_t* s, uint64_t unlock_time);

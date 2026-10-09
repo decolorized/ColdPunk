@@ -450,6 +450,14 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_SEED_CAKE] = "Фраза зашифрована passphrase\n(формат Cake Wallet / Cupcake).\nНа следующем шаге введите\nэту passphrase.",
     [XSTR_PP_REQUIRED] = "Для этой фразы passphrase\nобязательна.",
     [XSTR_PP_OPEN_CAKE] = "Кошелёк Cake / Cupcake.\nВведите passphrase:\nбез неё он не откроется.",
+    [XSTR_WL_SD] = "Файлы на SD-карте",
+    [XSTR_SD_TITLE] = "SD-карта",
+    [XSTR_SD_NO_CARD] = "Карта не найдена.\nВставьте microSD (FAT32)\nи повторите.",
+    [XSTR_SD_EMPTY] = "В корне карты нет файлов\nFeather: outputs или\nнеподписанных транзакций.",
+    [XSTR_SD_SAVED] = "Записано на карту:\n%s",
+    [XSTR_SD_OUTPUTS] = "Outputs -> key images",
+    [XSTR_SD_UNSIGNED] = "Неподписанная транзакция",
+    [XSTR_SD_DONE] = "обработан",
     // end v6 RU
 };
 
@@ -734,6 +742,14 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_SEED_CAKE] = "The phrase is encrypted with a\npassphrase (Cake Wallet / Cupcake).\nEnter that passphrase\nin the next step.",
     [XSTR_PP_REQUIRED] = "This phrase needs\nits passphrase.",
     [XSTR_PP_OPEN_CAKE] = "Cake / Cupcake wallet.\nEnter the passphrase:\nit does not open without it.",
+    [XSTR_WL_SD] = "SD card files",
+    [XSTR_SD_TITLE] = "SD card",
+    [XSTR_SD_NO_CARD] = "No card found.\nInsert a microSD card (FAT32)\nand try again.",
+    [XSTR_SD_EMPTY] = "No Feather files in the card\nroot: outputs exports or\nunsigned transactions.",
+    [XSTR_SD_SAVED] = "Saved to the card:\n%s",
+    [XSTR_SD_OUTPUTS] = "Outputs -> key images",
+    [XSTR_SD_UNSIGNED] = "Unsigned transaction",
+    [XSTR_SD_DONE] = "done",
     // end v6 EN
 };
 

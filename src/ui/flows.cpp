@@ -51,6 +51,8 @@
 #include "../monero/tx.h"
 #include "../transfer/transfer.h"
 #include "../transfer/link.h"
+#include "../transfer/sd_files.h"
+#include "../hal/display_drivers.h"
 #include "../wallet/device_auth.h"
 #include "../wallet/file_store.h"
 #include "../wallet/ki_cache.h"
@@ -61,6 +63,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(__has_include)
 #  if __has_include(<esp_heap_caps.h>)
@@ -864,6 +867,20 @@ static void ops_progress(void* user, const char* stage, uint32_t done, uint32_t 
 // ===========================================================================
 //  Files from the PC (task 3, algorithm steps 2-10)
 // ===========================================================================
+// Where a result goes: the USB link outbox (files from the PC) or the SD card
+// (wallet menu -> SD card files). An SD sink names the file it wrote.
+typedef struct result_sink {
+    mw_err_t (*put)(struct result_sink* s, int kind, const uint8_t* data, size_t len);
+    void*       ctx;
+    const char* saved_as;     // set by the SD sink after a successful write
+} result_sink_t;
+
+static mw_err_t link_sink_put(result_sink_t* s, int kind, const uint8_t* data, size_t len) {
+    MW_UNUSED(s);
+    return mw_link_outbox_put((mw_file_kind_id_t)kind, data, len);
+}
+static result_sink_t s_link_sink = { link_sink_put, NULL, NULL };
+
 // The key image cache is full: the result is valid, but the device can no
 // longer track some outputs (a later transaction spending them is refused).
 static void cache_full_warning(void) {
@@ -876,7 +893,7 @@ static void cache_full_warning(void) {
 }
 
 static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t len,
-                           uint8_t* out) {
+                           uint8_t* out, result_sink_t* sink) {
     mw_ops_error_t er;
     mw_ki_export_info_t info;
     size_t plain_len = 0;
@@ -907,17 +924,19 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
     mw_ui_progress_close();
     if (e != MW_OK) { show_refusal(TX(XSTR_KI_REFUSED), &er); return; }
 
-    e = mw_link_outbox_put(MW_FILE_KIND_KEYIMAGES, out, out_len);
+    e = sink->put(sink, MW_FILE_KIND_KEYIMAGES, out, out_len);
     mw_memzero(out, out_len);
     if (e != MW_OK) { ui_err(e); return; }
-    MW_LOGI("file", "key images ready for the PC: %u records, %u bytes (cache: %u)",
+    MW_LOGI("file", "key images ready: %u records, %u bytes (cache: %u)",
             (unsigned)info.count, (unsigned)out_len, (unsigned)mw_ki_cache_count());
-    snprintf(body, sizeof(body), TX(XSTR_KI_DONE), (unsigned)info.count);
-    mw_ui_message(T(STR_SUCCESS), body);    cache_full_warning();
+    if (sink->saved_as) snprintf(body, sizeof(body), TX(XSTR_SD_SAVED), sink->saved_as);
+    else                snprintf(body, sizeof(body), TX(XSTR_KI_DONE), (unsigned)info.count);
+    mw_ui_message(T(STR_SUCCESS), body);
+    cache_full_warning();
 }
 
 static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t len,
-                            uint8_t* out) {
+                            uint8_t* out, result_sink_t* sink) {
     mw_ops_error_t er;
     mw_tx_review_t* rv = (mw_tx_review_t*)big_alloc(sizeof(mw_tx_review_t));
     mw_sign_session_t* s = (mw_sign_session_t*)big_alloc(sizeof(mw_sign_session_t));
@@ -988,11 +1007,17 @@ static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t
         e = mw_ops_unsigned_sign(keys, s, out, MW_FLOW_FILE_CAP, &out_len, &cb, &er);
         mw_ui_progress_close();
         if (e != MW_OK) { show_refusal(TX(XSTR_TX_REFUSED), &er); goto done; }
-        e = mw_link_outbox_put(MW_FILE_KIND_SIGNED_TX, out, out_len);
+        e = sink->put(sink, MW_FILE_KIND_SIGNED_TX, out, out_len);
         mw_memzero(out, out_len);
         if (e != MW_OK) { ui_err(e); goto done; }
-        MW_LOGI("file", "signed transaction set ready for the PC (%u bytes)", (unsigned)out_len);
-        mw_ui_message(T(STR_SUCCESS), TX(XSTR_TX_DONE));
+        MW_LOGI("file", "signed transaction set ready (%u bytes)", (unsigned)out_len);
+        if (sink->saved_as) {
+            char body[160];
+            snprintf(body, sizeof(body), TX(XSTR_SD_SAVED), sink->saved_as);
+            mw_ui_message(T(STR_SUCCESS), body);
+        } else {
+            mw_ui_message(T(STR_SUCCESS), TX(XSTR_TX_DONE));
+        }
         cache_full_warning();
     }
 
@@ -1020,9 +1045,9 @@ static void handle_file(const mw_account_keys_t* keys, int kind) {
         mw_link_inbox_clear((mw_file_kind_id_t)kind);
         ui_err(e);
     } else if (kind == MW_FILE_KIND_OUTPUTS) {
-        handle_outputs(keys, file, len, out);
+        handle_outputs(keys, file, len, out, &s_link_sink);
     } else if (kind == MW_FILE_KIND_UNSIGNED_TX) {
-        handle_unsigned(keys, file, len, out);
+        handle_unsigned(keys, file, len, out, &s_link_sink);
     }
     big_free(file, MW_FLOW_FILE_CAP);
     big_free(out, MW_FLOW_FILE_CAP);
@@ -1075,6 +1100,181 @@ static void handle_request(const mw_account_keys_t* keys, uint8_t req) {
     }
     mw_memzero(json, sizeof(json));
     link_state(MW_LINK_STATE_WALLET);
+}
+
+// ===========================================================================
+//  SD card files (wallet menu)
+// ===========================================================================
+// The card root is scanned for the Feather files the device can process
+// (outputs exports, unsigned transaction sets), newest first by the FAT date
+// the PC set, or by the time in the name when the card has no date. The
+// result is written next to its source with the source's date; a source that
+// already has its result on the card is marked as processed.
+#define MW_SD_LIST_MAX 64
+
+typedef struct {
+    const mw_sd_entry_t* in;
+    mw_sdf_kind_t        kind;
+    char                 name[MW_SD_ENTRY_NAME];
+} sd_job_t;
+
+static mw_err_t sd_sink_put(result_sink_t* s, int kind, const uint8_t* data, size_t len) {
+    MW_UNUSED(kind);
+    sd_job_t* j = (sd_job_t*)s->ctx;
+    mw_err_t e = mw_sd_write_file(j->name, data, len);
+    if (e != MW_OK) return e;
+    // The device has no clock: the result gets the date of its source.
+    const int64_t t = mw_sdf_sort_time(j->in);
+    if (t > 0 && mw_sd_set_mtime(j->name, t) != MW_OK)
+        MW_LOGI("sd", "could not set the date of the result");
+    // Everything cached goes to the card now: it may be pulled out right after.
+    mw_sd_release();
+    s->saved_as = j->name;
+    MW_LOGI("sd", "result written to the card (%u bytes)", (unsigned)len);
+    return MW_OK;
+}
+
+// The help file in the card root, written once per card.
+static void sd_readme_ensure(void) {
+    if (mw_sd_exists(mw_sdf_readme_name)) return;
+    const mw_err_t e = mw_sd_write_file(mw_sdf_readme_name,
+                                        (const uint8_t*)mw_sdf_readme_text,
+                                        strlen(mw_sdf_readme_text));
+    mw_sd_release();                      // flush at once; the caller remounts
+    MW_LOGI("sd", "%s written to the card: %s", mw_sdf_readme_name, mw_err_str(e));
+}
+
+static void sd_process(const mw_account_keys_t* keys, const mw_sd_entry_t* in,
+                       mw_sdf_kind_t kind) {
+    sd_job_t job;
+    memset(&job, 0, sizeof(job));
+    job.in = in;
+    job.kind = kind;
+    mw_err_t e = mw_sdf_result_name(kind, in->name, job.name, sizeof(job.name));
+    if (e != MW_OK) { ui_err(e); return; }
+
+    uint8_t* file = (uint8_t*)big_alloc(MW_FLOW_FILE_CAP);
+    uint8_t* out  = (uint8_t*)big_alloc(MW_FLOW_FILE_CAP);
+    if (!file || !out) {
+        big_free(file, MW_FLOW_FILE_CAP);
+        big_free(out, MW_FLOW_FILE_CAP);
+        ui_err(MW_ERR_MEMORY);
+        return;
+    }
+    size_t len = 0;
+    link_state(MW_LINK_STATE_BUSY);        // the PC must not push files meanwhile
+    mw_ui_progress(TX(XSTR_PROCESSING), 0, NULL);
+    e = mw_sd_read_file(in->name, file, MW_FLOW_FILE_CAP, &len);
+    mw_ui_progress_close();
+    if (e != MW_OK) {
+        ui_err(e);
+    } else {
+        result_sink_t sink = { sd_sink_put, &job, NULL };
+        MW_LOGI("sd", "%s from the card (%u bytes)",
+                kind == MW_SDF_OUTPUTS ? "outputs export" : "unsigned transaction",
+                (unsigned)len);
+        mw_hal_crumb_set(kind == MW_SDF_UNSIGNED ? MW_CRUMB_OP_SIGN : MW_CRUMB_OP_KEYIMAGES,
+                         MW_CRUMB_STAGE_LOAD);
+        if (kind == MW_SDF_OUTPUTS) handle_outputs(keys, file, len, out, &sink);
+        else                        handle_unsigned(keys, file, len, out, &sink);
+        mw_hal_crumb_clear();
+    }
+    mw_memzero(file, len);
+    big_free(file, MW_FLOW_FILE_CAP);
+    big_free(out, MW_FLOW_FILE_CAP);
+    mw_link_bump_seq();
+    link_state(MW_LINK_STATE_WALLET);
+}
+
+static void sd_format_date(int64_t t, char* out, size_t cap) {
+    if (t <= 0) { snprintf(out, cap, "-"); return; }
+    time_t tt = (time_t)t;
+    struct tm tm;
+    gmtime_r(&tt, &tm);          // the FAT date is the PC's local time, shown as is
+    snprintf(out, cap, "%04d-%02d-%02d %02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
+             tm.tm_mday, tm.tm_hour, tm.tm_min);
+}
+
+static void sd_files_menu(const mw_account_keys_t* keys) {
+    if (mw_sd_ensure() != MW_OK) {
+        MW_LOGI("sd", "no card");
+        mw_ui_message(TX(XSTR_SD_TITLE), TX(XSTR_SD_NO_CARD));
+        return;
+    }
+    sd_readme_ensure();
+
+    mw_sd_entry_t* all  = (mw_sd_entry_t*)big_alloc(sizeof(mw_sd_entry_t) * MW_SD_LIST_MAX);
+    mw_sd_row_t*   rows = (mw_sd_row_t*)big_alloc(sizeof(mw_sd_row_t) * MW_SD_LIST_MAX);
+    mw_sdf_kind_t* kind = (mw_sdf_kind_t*)big_alloc(sizeof(mw_sdf_kind_t) * MW_SD_LIST_MAX);
+    char (*detail)[96]  = (char (*)[96])big_alloc(96u * MW_SD_LIST_MAX);
+    if (!all || !rows || !kind || !detail) {
+        ui_err(MW_ERR_MEMORY);
+        goto out;
+    }
+
+    {
+        int focus = 0;
+        for (;;) {
+            if (mw_sd_ensure() != MW_OK) {
+                mw_ui_message(TX(XSTR_SD_TITLE), TX(XSTR_SD_NO_CARD));
+                break;
+            }
+            int found = 0;
+            if (mw_sd_list_files("/", all, MW_SD_LIST_MAX, &found) != MW_OK) {
+                ui_err(MW_ERR_IO);
+                break;
+            }
+            // Keep only what the device can process.
+            int n = 0;
+            for (int i = 0; i < found; i++) {
+                if (all[i].size == 0 || all[i].size > MW_TRANSFER_MAX_FILE) continue;
+                uint8_t head[MW_SDF_HEAD_LEN];
+                size_t  hl = 0;
+                if (mw_sd_read_head(all[i].name, head, sizeof(head), &hl) != MW_OK) continue;
+                if (mw_sdf_kind(head, hl) == MW_SDF_NONE) continue;
+                if (n != i) all[n] = all[i];
+                n++;
+            }
+            mw_sdf_sort(all, n);
+            MW_LOGI("sd", "%d of %d files in the card root can be processed", n, found);
+            if (n == 0) {
+                mw_ui_message(TX(XSTR_SD_TITLE), TX(XSTR_SD_EMPTY));
+                break;
+            }
+            for (int i = 0; i < n; i++) {
+                uint8_t head[MW_SDF_HEAD_LEN];
+                size_t  hl = 0;
+                (void)mw_sd_read_head(all[i].name, head, sizeof(head), &hl);
+                kind[i] = mw_sdf_kind(head, hl);
+                char res[MW_SD_ENTRY_NAME];
+                const bool done = mw_sdf_result_name(kind[i], all[i].name, res, sizeof(res)) == MW_OK &&
+                                  mw_sd_exists(res);
+                char date[24];
+                sd_format_date(mw_sdf_sort_time(&all[i]), date, sizeof(date));
+                const uint32_t kb = (all[i].size + 1023u) / 1024u;
+                snprintf(detail[i], 96, "%s | %u KB | %s%s%s",
+                         kind[i] == MW_SDF_OUTPUTS ? TX(XSTR_SD_OUTPUTS) : TX(XSTR_SD_UNSIGNED),
+                         (unsigned)kb, date, done ? " | " : "", done ? TX(XSTR_SD_DONE) : "");
+                rows[i].icon   = kind[i] == MW_SDF_OUTPUTS ? LV_SYMBOL_REFRESH : LV_SYMBOL_EDIT;
+                rows[i].name   = all[i].name;
+                rows[i].detail = detail[i];
+                rows[i].done   = done;
+            }
+            if (focus >= n) focus = n - 1;
+            const int r = mw_screen_sd_files_run(TX(XSTR_SD_TITLE), rows, n, focus);
+            if (r < 0 || lock_requested()) break;
+            focus = r;
+            sd_process(keys, &all[r], kind[r]);
+            if (lock_requested()) break;
+        }
+    }
+
+out:
+    mw_sd_release();                      // nothing stays mounted outside this menu
+    big_free(all, sizeof(mw_sd_entry_t) * MW_SD_LIST_MAX);
+    big_free(rows, sizeof(mw_sd_row_t) * MW_SD_LIST_MAX);
+    big_free(kind, sizeof(mw_sdf_kind_t) * MW_SD_LIST_MAX);
+    big_free(detail, 96u * MW_SD_LIST_MAX);
 }
 
 // Anything the PC queued since the last look. true when something was done.
@@ -1143,7 +1343,9 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
             s_open.name, variant ? "with passphrase" : "no passphrase",
             (unsigned)mw_ki_cache_count());
 
-    enum { WA_ADDR = 0, WA_ADDR_QR, WA_VK, WA_VK_QR, WA_RENAME, WA_DELETE, WA_COUNT };
+    enum { WA_ADDR = 0, WA_ADDR_QR, WA_VK, WA_VK_QR, WA_SD, WA_RENAME, WA_DELETE, WA_COUNT };
+    // SD card files only on boards with a card slot.
+    const bool with_sd = mw_hal_caps()->has_sd;
     int focus = 0;
     for (;;) {
         if (lock_requested()) break;
@@ -1151,15 +1353,28 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         if (handle_pending(keys)) continue;
         if (lock_requested()) break;
 
-        const char* items[WA_COUNT] = {
+        const char* all_items[WA_COUNT] = {
             TX(XSTR_WL_ADDR_TEXT), TX(XSTR_WL_ADDR_QR), TX(XSTR_WL_VK_TEXT),
-            TX(XSTR_WL_VK_QR), TX(XSTR_WL_RENAME), T(STR_WALLET_DELETE)
+            TX(XSTR_WL_VK_QR), TX(XSTR_WL_SD), TX(XSTR_WL_RENAME), T(STR_WALLET_DELETE)
         };
-        const char* icons[WA_COUNT] = {
+        const char* all_icons[WA_COUNT] = {
             LV_SYMBOL_HOME, LV_SYMBOL_IMAGE, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_IMAGE,
-            LV_SYMBOL_EDIT, LV_SYMBOL_TRASH
+            LV_SYMBOL_SD_CARD, LV_SYMBOL_EDIT, LV_SYMBOL_TRASH
         };
-        const bool danger[WA_COUNT] = { false, false, false, false, false, true };
+        // Menu position -> action, skipping what this board does not have.
+        const char* items[WA_COUNT];
+        const char* icons[WA_COUNT];
+        bool        danger[WA_COUNT];
+        int         action[WA_COUNT];
+        int         shown = 0;
+        for (int a = 0; a < WA_COUNT; a++) {
+            if (a == WA_SD && !with_sd) continue;
+            items[shown]  = all_items[a];
+            icons[shown]  = all_icons[a];
+            danger[shown] = (a == WA_DELETE);
+            action[shown] = a;
+            shown++;
+        }
         char sub[96];
         snprintf(sub, sizeof(sub), "%s%s\n%s",
                  variant ? TX(XSTR_WL_VARIANT_PP) : TX(XSTR_WL_VARIANT_BASE),
@@ -1173,7 +1388,7 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         m.items = items;
         m.icons = icons;
         m.danger = danger;
-        m.count = WA_COUNT;
+        m.count = shown;
         m.initial = focus;
         m.back = true;
         m.back_label = TX(XSTR_WL_CLOSE);
@@ -1184,11 +1399,12 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         if (r == MW_MENU_WAKE) continue;
         if (r == MW_MENU_BACK) break;
         focus = r;
-        switch (r) {
+        switch ((r >= 0 && r < shown) ? action[r] : -1) {
         case WA_ADDR:    show_address_text(keys); break;
         case WA_ADDR_QR: show_address_qr(keys); break;
         case WA_VK:      show_view_key(keys, false); break;
         case WA_VK_QR:   show_view_key(keys, true); break;
+        case WA_SD:      sd_files_menu(keys); break;
         case WA_RENAME:  rename_wallet(id); break;
         case WA_DELETE:
             if (delete_wallet(id)) goto closed;

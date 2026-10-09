@@ -21,6 +21,7 @@ well.
 
 ## Contents
 
+- [Key advantages](#key-advantages)
 - [How it works](#how-it-works)
 - [Features](#features)
 - [Supported boards](#supported-boards)
@@ -35,6 +36,61 @@ well.
 - [Documentation](#documentation)
 - [Related projects](#related-projects)
 - [License](#license)
+
+---
+
+## Key advantages
+
+### The whole transaction is signed on the device, in one pass
+
+ColdPunk takes Feather's standard *unsigned transaction* file and returns a
+complete *signed transaction*. Every CLSAG ring signature and the
+Bulletproofs+ range proof for all outputs are computed **on the device**. The
+PC takes no part in building the signature: it only delivers the file and
+collects the result, over USB or as a plain file.
+
+Ledger and Trezor sign Monero differently. The host wallet drives the device
+through a long interactive protocol and keeps part of the intermediate state
+on the PC:
+
+- **Ledger.** The Monero app runs a host-driven sequence of APDU commands
+  (open, stealth, output keys, blind, prehash, MLSAG, close). Its own
+  specification says the device "is not capable of holding the entire
+  transaction or building the required proofs in RAM" ([app-monero
+  spec](https://github.com/LedgerHQ/app-monero/blob/master/doc/developer/blue-app-commands.rst)),
+  and intermediate values are offloaded to the desktop client
+  ([Ledger LSB-007](https://donjon.ledger.com/lsb/007/)).
+- **Trezor.** The protocol needs 14 host–device round trips for a 2-input,
+  2-output transaction and 392 for 128 inputs. The device offloads encrypted
+  state to the host, and Bulletproofs for 4 or more outputs cannot be generated
+  on the Trezor, so their vector work is offloaded to the host in blinded form
+  ([Klinec, Matyáš: IACR ePrint 2020/281](https://eprint.iacr.org/2020/281.pdf)).
+
+With ColdPunk the PC only ever sees the unsigned file and the finished result.
+No special support inside `wallet2` is needed, and signing works fully
+air-gapped. What you approve on the device screen (amounts, fee, change and
+every full destination address) is exactly what gets signed.
+
+### The first Monero signer on ESP32-S3
+
+As far as we could find (October 2026), ColdPunk is the first open-source
+firmware that signs complete Monero transactions (CLSAG + Bulletproofs+) on an
+**ESP32-S3**:
+
+- other ESP32 wallets either do not support Monero
+  ([Colibri](https://github.com/xtools-at/colibri),
+  [LeekWallet](https://github.com/0xOucan/LeekWallet)) or only derive Monero
+  addresses ([HexWallet](https://github.com/blueokanna/HexWallet), where Monero
+  signing is "not implemented");
+- other open-source Monero offline signers such as
+  [MoneroSigner](https://ccs.getmonero.org/proposals/MoneroSigner.html) run on
+  a Raspberry Pi Zero, a Linux single-board computer, not a microcontroller.
+
+The result is a Monero cold wallet that runs on inexpensive, widely available
+ESP32-S3 display boards, with no secure-element vendor SDK and no NDA.
+
+If you know of an earlier project, please open an issue, and we will correct
+this section.
 
 ---
 
@@ -96,6 +152,9 @@ explicit confirmation on the device screen. The PC program is only a courier.
 - Address and private view key shown as text on the device.
 - PC requests for the address or the view-only data (address + private view
   key + restore height) with a plain Yes / No on the device.
+- **SD card exchange** (ES3C28P): the wallet menu lists the Feather files in
+  the card root (newest first). Pick one to sign it or to make key images; the
+  result is written next to it with the same date.
 
 **Device**
 
@@ -133,8 +192,8 @@ The board is chosen at compile time in [`board_config.h`](board_config.h)
 | `MW_BOARD_SSD1306_NO_SD` | `esp32s3_ssd1306_no_sd.h` | SSD1306 128×64 mono | buttons | |
 | `MW_BOARD_CAM_QR` | `esp32s3_cam_qr.h` | ST7789 240×320 | CST816S touch | board with an OV2640 camera (camera not used) |
 
-The SD card slot is not used at the moment, whatever the board has; all
-exchange with the PC goes over USB.
+**SD card:** supported on ES3C28P (SDIO, 4-bit with 1-bit fallback). On the
+other boards the slot is not used yet, and all exchange with the PC goes over USB.
 
 `DISPLAY_WIDTH` × `DISPLAY_HEIGHT` in a board header is the **physical** panel
 size at rotation 0. The logical size after `DISPLAY_ROTATION` is read from the
@@ -234,6 +293,23 @@ details are in [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md).
    *Sign*. Do not power off while Bulletproofs+ is computed.
 3. The signed transaction comes back; review and broadcast it on the PC.
 
+**Over the SD card (ES3C28P):**
+
+1. Copy the Feather file (`…_outputs` or `…_unsigned_monero_tx`) into the
+   **root** of a FAT32 microSD card and insert it into the device.
+2. Open the wallet → **SD card files**. Only files the device can process are
+   listed, newest first (by the date the PC set, or by the time in the file
+   name). Each row shows the type, size and date; processed files are marked
+   *done*.
+3. Pick a file and confirm on the device, exactly as over USB.
+4. The result (`…_keyImages` or `…_signed_monero_tx`) is written next to the
+   source with the source's date. Import it in Feather.
+
+On the first use the device writes `ColdPunk_readme.txt` with these steps to
+the card. Files up to 256 KB. Every write is flushed and the card unmounted
+right after it, and the card is mounted afresh each time the list opens, so it
+can be pulled out and swapped at any time except during the write itself.
+
 **View-only wallet on the PC:** in MoneroPunkSigner, *Restore wallet from keys
 → ColdPunk*, then answer *Yes* on the device. Address, view key, restore height
 and wallet name are filled in.
@@ -326,9 +402,9 @@ src/
   monero/             keys, mnemonics, polyseed, addresses, key images, CLSAG,
                       Bulletproofs+, transaction parsing and signing, file formats
   wallet/             device password, sealed wallet store, session, key image cache
-  transfer/           mwlink protocol (link.c), USB HID/CDC transport
-                      (SD transfer code is present but currently unused)
-  hal/                display, touch, buttons, SD, logging, host stubs
+  transfer/           mwlink protocol (link.c), USB HID/CDC transport,
+                      SD card file browser logic (sd_files.c)
+  hal/                display, touch, buttons, SD (SPI and SDIO), logging, host stubs
   ui/                 LVGL screens, keyboards, flows, i18n, Minesweeper
 tools/
   docs/               design, security, protocol, user guide, testing
