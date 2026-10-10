@@ -162,14 +162,16 @@ explicit confirmation on the device screen. The PC program is only a courier.
 **Device**
 
 - Disguised as **Minesweeper** at power-on and after every lock.
-- **Device password** (8–64 characters; weak ones draw a warning): 200 000
+- **Device password** (always 8–64 characters; weak ones draw a warning): 200 000
   PBKDF2-HMAC-SHA256 rounds on the SHA accelerator, with the chip's eFuse HMAC
   key mixed in between and at the end. The attempt
   counter is written before each check, and failed attempts back off
   exponentially (2 s … 10 min, kept across reboots).
-- **Users with their own passwords** (up to 32, 64 wallets each): each
-  password opens only its own wallets, nothing on the device lists the users
-  or their number, and a user can only be deleted with its own password. Made
+- **Accounts with their own passwords** (up to 32, 64 wallets each, each
+  with a name you can change): each password opens only its own wallets,
+  nothing on the device lists the accounts or their number (always 32
+  same-size slot files), and an account can only be deleted with its own
+  password. Made
   for showing only part of the funds under coercion; what a flash dump still
   shows is in [`tools/docs/security.md`](tools/docs/security.md) §4a.
 - **USB is enabled only after the correct password.**
@@ -433,8 +435,9 @@ On Linux, give your user access to the HID device with the udev rule from
 - **Atomic password change**, with interrupted changes recovered on the next
   unlock.
 - **Users are unlinkable without their passwords**: one sealed directory file
-  per user, named after that user's key, among random decoy files of the same
-  size; no per-user data in NVS; one device-wide attempt counter.
+  per user, named after that user's key, among decoy files of the same size
+  (32 slot files in all); no per-user data in NVS; one device-wide attempt
+  counter.
 
 Known limitations (details in [`tools/docs/security.md`](tools/docs/security.md)):
 no secure boot or flash encryption by default; NVS encryption is limited under

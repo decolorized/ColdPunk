@@ -33,10 +33,14 @@ typedef struct {
 #define MW_PP_NONE     1   // created without a passphrase: never ask
 #define MW_PP_SET      2   // created with one: ask, verify, empty = base wallet
 
+// Name of a user (account), kept in its sealed directory.
+#define MW_ACCOUNT_NAME_LEN 16          // bytes with the NUL
+
 typedef struct {
     wallet_entry_t wallets[MAX_WALLETS];
     uint32_t       count;
     uint32_t       active_wallet_id;
+    char           account[MW_ACCOUNT_NAME_LEN];
 } wallet_store_t;
 
 mw_err_t mw_wallet_store_init(void);
@@ -121,10 +125,12 @@ const wallet_entry_t* mw_wallet_get(uint32_t id);
 mw_err_t mw_wallet_store_count(uint32_t* count);
 
 // ---------------- users (multi-user, v9) -------------------------------------
-#define MW_USER_FILES_MIN  4
-#define MW_USER_DECOYS_MAX 11
-// Directory files a device may hold: every user plus the most decoys.
-#define MW_USER_FILES_MAX  (MW_USERS_MAX + MW_USER_DECOYS_MAX)
+// The device always holds exactly MW_USERS_MAX directory files ("slots"):
+// one per user, the rest decoys of the same size. A decoy carries a mark
+// only this chip can compute (eFuse HMAC), so the firmware can reuse it for
+// a new user while a flash dump shows MW_USERS_MAX random files whatever
+// the number of users.
+#define MW_USER_FILES_MAX  MW_USERS_MAX
 
 // Every user's directory is one sealed file in the file store, named
 //   "u" + 24 hex digits of HMAC(user key, "mw.user.dir.v1")
@@ -152,16 +158,27 @@ mw_err_t mw_wallet_store_user_probe(const uint8_t key[32], uint8_t* info,
                                     uint8_t new_key[32]);
 // Marks the logged-in user's directory as the first user's (see probe()).
 mw_err_t mw_wallet_store_mark_primary(void);
-// Creates an empty directory for `key`. MW_ERR_EXISTS when it has one.
-mw_err_t mw_wallet_store_user_create(const uint8_t key[32]);
+// Creates an empty directory for `key` named `name` (NULL or "": "Account")
+// in place of a decoy. MW_ERR_EXISTS when `key` has one, MW_ERR_TOO_MANY
+// when every slot is a user.
+mw_err_t mw_wallet_store_user_create(const uint8_t key[32], const char* name);
 // Removes every wallet, key image cache and the directory of the user that
 // is logged in. The key stays installed; the caller forgets it.
 mw_err_t mw_wallet_store_user_destroy(void);
 // Directory files on the device (users + decoys); -1 on an I/O error.
 int      mw_wallet_store_user_files(void);
-// Keeps at least MW_USER_FILES_MIN directory-like files on the device: when
-// there are fewer, random decoys are added up to a random 4..11.
+// Brings the number of directory files back to MW_USER_FILES_MAX: adds
+// decoys when there are fewer (first start, a deleted user), drops decoys
+// when there are more (a cut between creating a user and dropping a decoy).
 mw_err_t mw_wallet_store_decoys_ensure(void);
+
+// Whether a slot is free for another user (a decoy is left).
+bool     mw_wallet_store_slot_free(void);
+
+// The logged-in user's account name ("" when none) and its rename: 1..15
+// bytes, no control characters.
+mw_err_t mw_wallet_store_account_name(char* out, size_t cap);
+mw_err_t mw_wallet_store_account_rename(const char* name);
 // Whether anything of a user is stored (a directory or decoy file, or the
 // old NVS directory): a password record missing next to it means damage.
 bool     mw_wallet_store_any_data(void);

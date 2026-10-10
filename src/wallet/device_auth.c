@@ -579,7 +579,7 @@ mw_err_t mw_device_auth_set(const char* password) {
     if (e == MW_OK) e = mw_secure_user_key_set(key);
     if (e == MW_OK) {
         mw_wallet_store_close();
-        (void)mw_wallet_store_user_create(key);    // MW_ERR_EXISTS cannot happen
+        (void)mw_wallet_store_user_create(key, "Main");   // MW_ERR_EXISTS cannot happen
         (void)mw_wallet_store_mark_primary();
         (void)mw_wallet_store_decoys_ensure();
         g_session_primary = true;
@@ -926,23 +926,20 @@ mw_err_t mw_device_auth_change(const char* old_password, const char* new_passwor
     return e;
 }
 
-mw_err_t mw_device_auth_add_user(const char* password) {
+mw_err_t mw_device_auth_add_user(const char* password, const char* name) {
     mw_err_t e = ensure_loaded();
     if (e != MW_OK) return e;
     if (!mw_secure_user_key_present()) return MW_ERR_NOT_SUPPORTED;
     if (!users_possible()) return MW_ERR_NOT_SUPPORTED;
-    if (!password_ok(password) || strlen(password) < MW_DEVICE_PW_MIN_NEW)
-        return MW_ERR_INVALID_ARG;
+    if (!password_ok(password)) return MW_ERR_INVALID_ARG;
     if (mw_device_auth_lockout_ms() > 0) return MW_ERR_ABORTED;
-    const int files = mw_wallet_store_user_files();
-    if (files < 0) return MW_ERR_IO;
-    if (files >= MW_USER_FILES_MAX) return MW_ERR_TOO_MANY;
+    if (!mw_wallet_store_slot_free()) return MW_ERR_TOO_MANY;
 
     uint8_t key[32];
     prog_stage(MW_AUTH_STAGE_NEW, g_rec.cur.rounds);
     e = key_for_new(password, key, NULL);
     prog_finish();
-    if (e == MW_OK) e = mw_wallet_store_user_create(key);
+    if (e == MW_OK) e = mw_wallet_store_user_create(key, name);
     mw_memzero(key, sizeof key);
     if (e == MW_OK) MW_LOGI("auth", "user added");
     return e;

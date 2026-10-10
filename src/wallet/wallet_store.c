@@ -107,7 +107,7 @@ mw_err_t mw_store_blob_erase(const char* key);
 //   plaintext = header[64] || MAX_WALLETS records of DIR_REC bytes
 //   header    [0..3] "MWUD" [4] version [5] count [6] flags
 //             [8..11] active id [12..15] next id [16..47] the other key of an
-//             interrupted password change
+//             interrupted password change [48..63] account name (NUL-ended)
 //   record    the 140 bytes of the NVS record, then ki_gen[0], ki_gen[1]
 // The file has the same size whatever it holds, like the decoys.
 #define DIR_PREFIX     "u"
@@ -320,6 +320,8 @@ static void dir_serialize(const wallet_store_t* s, uint32_t next_id, uint8_t fla
     put_u32(pt + 8, s->active_wallet_id);
     put_u32(pt + 12, next_id);
     if (flags & (DIR_F_FROM | DIR_F_SUPER)) memcpy(pt + 16, other, 32);
+    memcpy(pt + 48, s->account, MW_ACCOUNT_NAME_LEN);
+    pt[48 + MW_ACCOUNT_NAME_LEN - 1] = 0;
     for (i = 0; i < s->count && i < MAX_WALLETS; i++) {
         const wallet_entry_t* w = &s->wallets[i];
         uint8_t* r = pt + DIR_HDR + i * DIR_REC;
@@ -353,6 +355,8 @@ static mw_err_t dir_deserialize(wallet_store_t* s, uint32_t* next_id, uint8_t* f
     *next_id = get_u32(pt + 12);
     if (*next_id == 0) *next_id = 1;
     memcpy(other, pt + 16, 32);
+    memcpy(s->account, pt + 48, MW_ACCOUNT_NAME_LEN);
+    s->account[MW_ACCOUNT_NAME_LEN - 1] = 0;
     for (i = 0; i < count; i++) {
         wallet_entry_t* w = &s->wallets[i];
         const uint8_t* r = pt + DIR_HDR + i * DIR_REC;
@@ -1180,24 +1184,147 @@ mw_err_t mw_wallet_store_mark_primary(void)
     return persist();
 }
 
-mw_err_t mw_wallet_store_user_create(const uint8_t key[32])
+// ---- slots and decoys --------------------------------------------------
+// A decoy is DIR_FILE_LEN random bytes whose bytes 16..31 (where a real
+// directory has its GCM tag) are HMAC(eFuse key, "mw.decoy.v1" || bytes
+// 0..15). Without the chip it is as random as a sealed directory.
+static mw_err_t decoy_tag(const uint8_t iv[16], uint8_t tag[16])
 {
-    key_save_t ks;
+    uint8_t msg[11 + 16], mac[32];
+    bool bound = false;
+    memcpy(msg, "mw.decoy.v1", 11);
+    memcpy(msg + 11, iv, 16);
+    mw_err_t e = mw_secure_hw_hmac(msg, sizeof msg, mac, &bound);
+    if (e == MW_OK) memcpy(tag, mac, 16);
+    mw_memzero(mac, sizeof mac);
+    return e;
+}
+
+static mw_err_t decoy_write(uint8_t* f)
+{
+    uint8_t id[12];
     char name[MW_FSTORE_NAME_MAX + 1];
     size_t len = 0;
+    mw_err_t e;
+    do {
+        mw_random_bytes(id, sizeof id);
+        hex_name(id, sizeof id, DIR_PREFIX, name, sizeof name);
+    } while (mw_fstore_size(name, &len) == MW_OK);
+    mw_random_bytes(f, DIR_FILE_LEN);
+    e = decoy_tag(f, f + 16);
+    if (e == MW_OK) e = mw_fstore_write(name, f, DIR_FILE_LEN);
+    return e;
+}
+
+static bool is_decoy(const char* name, uint8_t* f)
+{
+    size_t len = 0;
+    uint8_t tag[16];
+    if (mw_fstore_read(name, f, DIR_FILE_LEN, &len) != MW_OK || len != DIR_FILE_LEN) return false;
+    if (decoy_tag(f, tag) != MW_OK) return false;
+    return mw_ct_equal(tag, f + 16, 16) != 0;
+}
+
+// Names of the directory files, and how many of them are decoys (the first
+// `*decoys` entries of `names` after the call). -1 on an I/O error.
+static int slots_scan(char (*names)[MW_FSTORE_NAME_MAX + 1], int max, int* decoys)
+{
+    const int n = mw_fstore_list(DIR_PREFIX, names, max);
+    *decoys = 0;
+    if (n < 0) return -1;
+    uint8_t* f = (uint8_t*)dir_alloc(DIR_FILE_LEN);
+    if (!f) return -1;
+    const int m = n < max ? n : max;
+    for (int i = 0; i < m; i++) {
+        if (!is_decoy(names[i], f)) continue;
+        if (i != *decoys) {
+            char t[MW_FSTORE_NAME_MAX + 1];
+            memcpy(t, names[*decoys], sizeof t);
+            memcpy(names[*decoys], names[i], sizeof t);
+            memcpy(names[i], t, sizeof t);
+        }
+        (*decoys)++;
+    }
+    dir_free(f, DIR_FILE_LEN);
+    return n;
+}
+
+#define SLOT_SCAN_MAX (MW_USER_FILES_MAX + 16)
+static char g_slot_names[SLOT_SCAN_MAX][MW_FSTORE_NAME_MAX + 1];
+
+static mw_err_t name_check(const char* name, size_t cap)
+{
+    size_t i;
+    bool vis = false;
+    if (!name) return MW_ERR_INVALID_ARG;
+    for (i = 0; name[i]; i++) {
+        const unsigned char c = (unsigned char)name[i];
+        if (c < 0x20u || c == 0x7fu) return MW_ERR_INVALID_ARG;
+        if (c != ' ') vis = true;
+    }
+    if (i == 0 || i >= cap || !vis) return MW_ERR_INVALID_ARG;
+    return MW_OK;
+}
+
+mw_err_t mw_wallet_store_user_create(const uint8_t key[32], const char* name)
+{
+    key_save_t ks;
+    char fname[MW_FSTORE_NAME_MAX + 1];
+    size_t len = 0;
     uint8_t zero[32];
+    int decoys = 0;
     if (!key) return MW_ERR_INVALID_ARG;
+    if (name && name[0] && name_check(name, MW_ACCOUNT_NAME_LEN) != MW_OK)
+        return MW_ERR_INVALID_ARG;
+    const int n = slots_scan(g_slot_names, SLOT_SCAN_MAX, &decoys);
+    if (n < 0) return MW_ERR_IO;
+    // A slot: a decoy to give up, or room below the slot count (first start).
+    if (decoys == 0 && n >= MW_USER_FILES_MAX) return MW_ERR_TOO_MANY;
     memset(zero, 0, sizeof zero);
     wallet_store_t* s = scratch_alloc();
     if (!s) return MW_ERR_MEMORY;
     memset(s, 0, sizeof *s);
+    snprintf(s->account, sizeof s->account, "%s", (name && name[0]) ? name : "Account");
     key_push(&ks, key);
-    mw_err_t e = dir_name(name);
-    if (e == MW_OK && mw_fstore_size(name, &len) == MW_OK) e = MW_ERR_EXISTS;
+    mw_err_t e = dir_name(fname);
+    if (e == MW_OK && mw_fstore_size(fname, &len) == MW_OK) e = MW_ERR_EXISTS;
     if (e == MW_OK) e = dir_write(s, 1, 0, zero);
     key_pop(&ks);
     scratch_free(s);
+    // The directory first, then the decoy goes: a cut in between leaves one
+    // file too many, which decoys_ensure() drops.
+    if (e == MW_OK && decoys > 0) {
+        uint8_t r = 0;
+        mw_random_bytes(&r, 1);
+        (void)mw_fstore_remove(g_slot_names[r % decoys]);
+    }
     return e;
+}
+
+bool mw_wallet_store_slot_free(void)
+{
+    int decoys = 0;
+    const int n = slots_scan(g_slot_names, SLOT_SCAN_MAX, &decoys);
+    return n >= 0 && (decoys > 0 || n < MW_USER_FILES_MAX);
+}
+
+mw_err_t mw_wallet_store_account_name(char* out, size_t cap)
+{
+    if (!out || !cap) return MW_ERR_INVALID_ARG;
+    out[0] = 0;
+    mw_err_t e = ensure_loaded();
+    if (e == MW_OK) snprintf(out, cap, "%s", g_store.account);
+    return e;
+}
+
+mw_err_t mw_wallet_store_account_rename(const char* name)
+{
+    mw_err_t e = name_check(name, MW_ACCOUNT_NAME_LEN);
+    if (e != MW_OK) return e;
+    if ((e = ensure_loaded()) != MW_OK) return e;
+    memset(g_store.account, 0, sizeof g_store.account);
+    snprintf(g_store.account, sizeof g_store.account, "%s", name);
+    return persist();
 }
 
 mw_err_t mw_wallet_store_user_destroy(void)
@@ -1209,6 +1336,7 @@ mw_err_t mw_wallet_store_user_destroy(void)
         (void)mw_ki_cache_erase_wallet(g_store.wallets[i].id);
     err = dir_remove();
     mw_wallet_store_close();
+    if (err == MW_OK) (void)mw_wallet_store_decoys_ensure();   // the slot is a decoy again
     return err;
 }
 
@@ -1219,25 +1347,20 @@ int mw_wallet_store_user_files(void)
 
 mw_err_t mw_wallet_store_decoys_ensure(void)
 {
-    const int n = mw_wallet_store_user_files();
+    int decoys = 0;
+    int n = mw_wallet_store_user_files();
     if (n < 0) return MW_ERR_IO;
-    if (n >= MW_USER_FILES_MIN) return MW_OK;
-    uint8_t r = 0;
-    mw_random_bytes(&r, 1);
-    const int target = MW_USER_FILES_MIN + (int)(r % (MW_USER_DECOYS_MAX - MW_USER_FILES_MIN + 1));
+    if (n == MW_USER_FILES_MAX) return MW_OK;
+    mw_err_t e = MW_OK;
+    if (n > MW_USER_FILES_MAX) {
+        n = slots_scan(g_slot_names, SLOT_SCAN_MAX, &decoys);
+        for (int i = 0; i < decoys && n > MW_USER_FILES_MAX; i++, n--)
+            e = mw_fstore_remove(g_slot_names[i]);
+        return e;
+    }
     uint8_t* f = (uint8_t*)dir_alloc(DIR_FILE_LEN);
     if (!f) return MW_ERR_MEMORY;
-    mw_err_t e = MW_OK;
-    for (int k = n; k < target && e == MW_OK; k++) {
-        uint8_t id[12];
-        char name[MW_FSTORE_NAME_MAX + 1];
-        size_t len = 0;
-        mw_random_bytes(id, sizeof id);
-        hex_name(id, sizeof id, DIR_PREFIX, name, sizeof name);
-        if (mw_fstore_size(name, &len) == MW_OK) { k--; continue; }
-        mw_random_bytes(f, DIR_FILE_LEN);
-        e = mw_fstore_write(name, f, DIR_FILE_LEN);
-    }
+    for (; n < MW_USER_FILES_MAX && e == MW_OK; n++) e = decoy_write(f);
     dir_free(f, DIR_FILE_LEN);
     return e;
 }
@@ -1294,6 +1417,7 @@ mw_err_t mw_wallet_store_migrate_legacy(void)
         old->wallets[i].ki_gen[0] = old->wallets[i].ki_gen[1] = 0;
         mw_ki_cache_migrate_legacy(old->wallets[i].id, old->wallets[i].ki_gen);
     }
+    snprintf(old->account, sizeof old->account, "Main");
     e = dir_write(old, next, DIR_F_PRIMARY, zero);
     if (e == MW_OK) e = mw_store_blob_erase(MW_WALLETS_BLOB_KEY);
     if (e == MW_OK) {

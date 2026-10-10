@@ -1690,9 +1690,13 @@ static void main_menu(void) {
         if (lock_requested()) return;
         const char* items[3] = { T(STR_MAIN_WALLETS), T(STR_MAIN_SETTINGS), TX(XSTR_MAIN_LOCK) };
         const char* icons[3] = { LV_SYMBOL_LIST, LV_SYMBOL_SETTINGS, LV_SYMBOL_POWER };
+        // The account's name under the title (only this account's own).
+        static char account[MW_ACCOUNT_NAME_LEN];
+        if (mw_wallet_store_account_name(account, sizeof(account)) != MW_OK) account[0] = 0;
         mw_menu_t m;
         memset(&m, 0, sizeof(m));
         m.title = TX(XSTR_APP_NAME);
+        m.subtitle = account[0] ? account : NULL;
         m.items = items;
         m.icons = icons;
         m.count = 3;

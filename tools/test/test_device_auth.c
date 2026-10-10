@@ -65,6 +65,7 @@ MW_TEST(test_set_rules_and_verify)
 {
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("abc"), MW_ERR_INVALID_ARG);        // too short
+    CHECK_EQ_INT(mw_device_auth_set("1234567"), MW_ERR_INVALID_ARG);    // 8 at least, always
     {
         char too_long[MW_DEVICE_PW_MAX + 2];
         memset(too_long, 'x', sizeof too_long);
@@ -369,7 +370,7 @@ MW_TEST(test_change_rekey_error_not_wrong_password)
     uint32_t id = 0;
 
     fresh();
-    CHECK_EQ_INT(mw_device_auth_set("good-pw"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_set("good-pw1"), MW_OK);
     CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
     memset(seed, 0x33, sizeof seed);
     CHECK_EQ_INT(mw_wallet_create("C", MW_SEED_MONERO_LEGACY, seed, 32, 0, &id), MW_OK);
@@ -382,7 +383,7 @@ MW_TEST(test_change_rekey_error_not_wrong_password)
     CHECK_EQ_INT(mw_wallet_store_save(&st), MW_OK);
     CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
 
-    const mw_err_t e = mw_device_auth_change("good-pw", "new-pw-1");
+    const mw_err_t e = mw_device_auth_change("good-pw1", "new-pw-1");
     CHECK(e != MW_OK);
     CHECK(e != MW_ERR_DECRYPT);
     CHECK_EQ_INT(e, MW_ERR_FORMAT);
@@ -392,7 +393,7 @@ MW_TEST(test_change_rekey_error_not_wrong_password)
     mw_device_auth_forget();
     CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
     CHECK_EQ_INT(mw_device_auth_verify("new-pw-1"), MW_ERR_DECRYPT);
-    CHECK_EQ_INT(mw_device_auth_verify("good-pw"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_verify("good-pw1"), MW_OK);
     mw_memzero(&st, sizeof st);
 }
 
@@ -608,7 +609,7 @@ MW_TEST(test_damaged_record_not_overwritten)
 {
     mw_seckey_t spend;
     fresh();
-    CHECK_EQ_INT(mw_device_auth_set("keep-me"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_set("keep-me1"), MW_OK);
     (void)make_wallet(&spend);
 
     // Garbage record.
@@ -617,14 +618,14 @@ MW_TEST(test_damaged_record_not_overwritten)
     reboot();
     CHECK_EQ_INT(mw_device_auth_state(), MW_AUTH_CORRUPT);
     CHECK(mw_device_auth_is_set());
-    CHECK(mw_device_auth_set("new-one") != MW_OK);
+    CHECK(mw_device_auth_set("new-one1") != MW_OK);
 
     // Record gone altogether, wallets still there.
     CHECK_EQ_INT(mw_store_blob_erase("devauth"), MW_OK);
     reboot();
     CHECK_EQ_INT(mw_device_auth_state(), MW_AUTH_CORRUPT);
     CHECK(mw_device_auth_is_set());
-    CHECK_EQ_INT(mw_device_auth_set("new-one"), MW_ERR_FORMAT);
+    CHECK_EQ_INT(mw_device_auth_set("new-one1"), MW_ERR_FORMAT);
     CHECK(read_blob("devauth", (uint8_t[8]){0}, 8) < 0);   // nothing written
 }
 

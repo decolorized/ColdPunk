@@ -387,11 +387,17 @@ password costs one KDF run however many users exist.
 | Store | Contents | What it tells |
 | :--- | :--- | :--- |
 | NVS `devauth` | salt, rounds, the first user's verifier, attempt counter | that the device has a password |
-| FAT `u…` files | one per user, plus 3..10 random **decoys** made when the first user is created (and topped up when fewer than 4 files remain); all the same size (9 824 bytes), random-looking without the key | the number of users + decoys, not the number of users |
+| FAT `u…` files | always exactly 32 (`MW_USERS_MAX`) "slots": one per user, the rest **decoys**; all 9 824 bytes, random-looking without the key | nothing about the number of users |
 | FAT `k…` files | key image caches, named by `HMAC(K, id, variant)` | how many wallets (of all users together) have a key image cache, and their sizes |
 
-So a dump bounds the user count (files minus 3..10 decoys) but does not
-fix it. The cache files leak the total count of wallets that were synced; a
+A decoy carries a mark only this chip can compute: its bytes 16..31 (where
+a directory has its GCM tag) are `HMAC(eFuse key, "mw.decoy.v1" || bytes
+0..15)`. The firmware uses it to give a decoy's slot to a new user (the new
+directory is written first, then one decoy removed) and to put a decoy back
+when a user is deleted, so the count never changes. Without the chip the mark
+is as random as a GCM tag. Someone who runs their own firmware on this chip
+(no secure boot, §6.3) can ask the HMAC peripheral and tell decoys from
+directories, i.e. count the users — but still opens none of them. The cache files leak the total count of wallets that were synced; a
 user whose wallets never synced key images on this device leaves no cache
 file.
 
@@ -401,7 +407,7 @@ something. Two dumps taken at different times, or a close look at the FAT
 allocation order in one dump, can therefore single out directories that were
 in use. A user that is not touched between two dumps looks like a decoy.
 
-**Deleting a user** (Settings → *Delete this user*) needs that user's own
+**Deleting a user** (Settings → *Delete this account*) needs that user's own
 password: its wallets, caches and directory are removed (overwritten, then
 deleted; see the caveat in §5). Deleting the first user keeps the record —
 the other users depend on its salt — and replaces the verifier with random
@@ -415,23 +421,24 @@ row without any failure (a password re-check inside a session never lowers
 it), and above 6 it imposes the same doubling delay. Someone who knows one
 user's password therefore cannot guess at another's indefinitely by logging
 in between guesses: the delay keeps doubling, and each forgiven failure
-costs ten clean unlocks (ten key derivations). *Add user* and
+costs ten clean unlocks (ten key derivations). *Add account* and
 *change password* refuse a password some user already has
 (`MW_ERR_EXISTS`); that answer reveals as much as a successful login, so it
-is counted as a failed attempt too. A full device (`MW_USER_FILES_MAX` = 43
-directory files) refuses *Add user*; filling it shows users + decoys, the
-same as a flash dump.
+is counted as a failed attempt too. A full device (`MW_USER_FILES_MAX` = 32
+directory files, no decoy left) refuses *Add account*; filling it shows how
+many slots were free, i.e. the number of users.
 
 **Not hidden.** That the device supports several users (the Settings items
-are always there). Whether the password just typed belongs to the first user
+are always there; each account has a name, seen only by that account).
+Whether the password just typed belongs to the first user
 or to another one may be told from a few milliseconds of timing (the second
 needs a file read). Settings, the touch calibration and the eFuse key are
 shared.
 
-**Limits.** At least 32 users (`MW_USERS_MAX`; the real cap counts
-directory files, `MW_USER_FILES_MAX` = 43, so it is 33..40 depending on the
-decoys), 64 wallets each (`MAX_WALLETS`). The directories take about 420 KB
-of the 3.9 MB `storage` partition; NVS holds nothing per user.
+**Limits.** 32 users (`MW_USERS_MAX`, the slot count), 64 wallets each
+(`MAX_WALLETS`). The slots take about 315 KB of the 3.9 MB `storage`
+partition; NVS holds nothing per user. Every password, the first one
+included, is 8..64 characters.
 
 **Power loss.** A file is replaced as write `.tmp` → old file to `.bak` →
 `.tmp` to the name → drop `.bak`; the next access puts a lone `.bak` back. A

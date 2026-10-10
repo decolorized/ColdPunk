@@ -35,8 +35,10 @@
 extern "C" {
 #endif
 
-#define MW_DEVICE_PW_MIN      4      // still opens: passwords set before v7
-#define MW_DEVICE_PW_MIN_NEW  8      // a password being set or changed now
+// Every password that is set, changed or added: 8..64 characters. (A shorter
+// one set by firmware before v7 still opens: unlocking applies no length rule.)
+#define MW_DEVICE_PW_MIN      8
+#define MW_DEVICE_PW_MIN_NEW  MW_DEVICE_PW_MIN
 #define MW_DEVICE_PW_MAX      64
 #ifndef MW_DEVICE_PW_ROUNDS
 #define MW_DEVICE_PW_ROUNDS   200000u
@@ -119,7 +121,8 @@ mw_err_t mw_device_auth_change(const char* old_password, const char* new_passwor
 // ---- users (v9, see device_auth.c) ----------------------------------------
 // Adds a user with its own password while someone is logged in; the new
 // user's wallets are only reachable with that password, and nothing shows
-// that it exists. Rules as for a new password (8..64).
+// that it exists. Rules as for a new password (8..64). `name`: the account
+// name (1..15 bytes; NULL or "" gives "Account").
 //   MW_ERR_EXISTS        the password is taken (the first user's or another);
 //                        counted as a failed attempt, since it tells as much
 //                        as a login guess
@@ -127,7 +130,7 @@ mw_err_t mw_device_auth_change(const char* old_password, const char* new_passwor
 //   MW_ERR_TOO_MANY      no room for another user
 //   MW_ERR_NOT_SUPPORTED nobody logged in, or the record is not settled
 //                        (version 2, bound to the chip, no change pending)
-mw_err_t mw_device_auth_add_user(const char* password);
+mw_err_t mw_device_auth_add_user(const char* password, const char* name);
 // Deletes the logged-in user after re-checking its password: its wallets,
 // key image caches and directory. The first user's record stays (the other
 // users need its parameters) with a verifier no password matches. Logs out.

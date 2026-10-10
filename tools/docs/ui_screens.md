@@ -883,3 +883,9 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - Change password re-checks the old password against the logged-in user only; another user's password is "wrong" there and never switches users.
 - Password screen: Cancel asks "Back to the start screen?" with **Back** and **Factory reset** (the latter behind the confirmation code) — the way out when no password opens anything any more.
 - The wallet list takes up to 64 wallets (`MW_MENU_MAX` 72); it scrolls.
+
+### 13.1 Accounts (v9, second step)
+- The Settings rows are now **Account name: <name>** (rename, 1..15 characters), **Add account** and **Delete this account**; the texts say "account" instead of "user".
+- Add account asks for the account's name first, then its password twice.
+- The main menu shows the logged-in account's name under the title.
+- Every new password (first setup, change, new account) needs 8..64 characters.

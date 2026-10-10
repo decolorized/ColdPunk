@@ -44,6 +44,7 @@
 #include "../config/app_config.h"
 #include "../transfer/transfer.h"
 #include "../wallet/device_auth.h"
+#include "../wallet/wallet_store.h"
 #include "../wallet/session.h"
 #include "../crypto/memzero.h"
 #include "../hal/touch_map.h"
@@ -55,8 +56,11 @@
 enum {
     SET_BACK = 0, SET_KB, SET_LAYOUT, SET_BRIGHT, SET_AUTOLOCK, SET_CALIB,
     SET_FORMAT, SET_LANG, SET_NET, SET_DEBUG, SET_PASSWORD, SET_ABOUT,
-    SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE
+    SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE, SET_ACCOUNT
 };
+
+// The logged-in account's name, read on the crypto task before each build.
+static char s_account[MW_ACCOUNT_NAME_LEN];
 
 typedef struct {
     mw_page_t     page;
@@ -170,6 +174,7 @@ static void settings_build(void* arg) {
         c->s.debug_log ? TX(XSTR_ON) : TX(XSTR_OFF), SET_DEBUG);
 
     add(LV_SYMBOL_CHARGE,   TX(XSTR_PW_CHANGE), NULL, SET_PASSWORD);
+    add(LV_SYMBOL_EDIT,     TX(XSTR_ACCOUNT_NAME), s_account, SET_ACCOUNT);
     add(LV_SYMBOL_PLUS,     TX(XSTR_USER_ADD), NULL, SET_USER_ADD);
     add(LV_SYMBOL_CLOSE,    TX(XSTR_USER_DELETE), NULL, SET_USER_DELETE);
 
@@ -632,6 +637,27 @@ static bool lockout_note(void) {
     return true;
 }
 
+// Asks for an account name until it fits (1..15 bytes). False on cancel.
+static bool ask_account_name(char* out, size_t cap) {
+    for (;;) {
+        mw_memzero(out, cap);
+        if (ask_password(TX(XSTR_ACCOUNT_NAME), out, cap) != MW_OK) return false;
+        const size_t n = strlen(out);
+        bool vis = false;
+        for (size_t i = 0; i < n; i++) if (out[i] != ' ') vis = true;
+        if (n >= 1 && n < MW_ACCOUNT_NAME_LEN && vis) return true;
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_ACCOUNT_RULES));
+    }
+}
+
+static void rename_account(void) {
+    char name[MW_ACCOUNT_NAME_LEN + 8];
+    if (!ask_account_name(name, sizeof(name))) return;
+    const mw_err_t e = mw_wallet_store_account_rename(name);
+    if (e == MW_OK) mw_ui_message_timeout(T(STR_MAIN_SETTINGS), TX(XSTR_SETTINGS_SAVED), 1500);
+    else            mw_ui_message(T(STR_ERR_GENERIC), mw_err_str(e));
+}
+
 static void add_user(void) {
     char pw[MW_DEVICE_PW_MAX + 1];
     char again[MW_DEVICE_PW_MAX + 1];
@@ -644,10 +670,13 @@ static void add_user(void) {
     if (lockout_note()) return;
     if (!mw_ui_confirm(TX(XSTR_USER_ADD), TX(XSTR_USER_ADD_HINT), TX(XSTR_OK), T(STR_CANCEL)))
         return;
+    char name[MW_ACCOUNT_NAME_LEN + 8];
+    memset(name, 0, sizeof(name));
+    if (!ask_account_name(name, sizeof(name))) return;
     if (ask_new_password(pw, again, sizeof(pw))) {
         mw_ui_progress(TX(XSTR_USER_ADD), 0, TX(XSTR_PW_STAGE_NEW));
         mw_flow_auth_progress_on(TX(XSTR_USER_ADD));
-        const mw_err_t e = mw_device_auth_add_user(pw);
+        const mw_err_t e = mw_device_auth_add_user(pw, name);
         mw_flow_auth_progress_off();
         mw_ui_progress_close();
         if (e == MW_OK) {
@@ -695,6 +724,8 @@ void mw_screen_settings_run(void) {
     s_set.s = *mw_ui_settings();
 
     for (;;) {
+        if (mw_wallet_store_account_name(s_account, sizeof(s_account)) != MW_OK)
+            s_account[0] = 0;
         const int32_t action = mw_ui_modal_call(settings_build, &s_set);
         bool dirty = false;
 
@@ -838,6 +869,10 @@ void mw_screen_settings_run(void) {
 
         case SET_USER_ADD:
             add_user();
+            break;
+
+        case SET_ACCOUNT:
+            rename_account();
             break;
 
         case SET_USER_DELETE:

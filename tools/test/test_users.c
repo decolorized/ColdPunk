@@ -107,11 +107,11 @@ MW_TEST(test_users_are_isolated)
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
     const int files0 = user_files_same_size();
-    CHECK(files0 >= 4 && files0 <= 11);
+    CHECK_EQ_INT(files0, MW_USER_FILES_MAX);       // every slot, from the start
     make_wallet("Alpha", 0x11, &sa);
     CHECK(mw_device_auth_users_possible());
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
-    CHECK_EQ_INT(user_files_same_size(), files0 + 1);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
+    CHECK_EQ_INT(user_files_same_size(), files0);  // a decoy gave way
     // The adding user stays logged in and still sees only its own wallet.
     expect_only("Alpha", &sa);
 
@@ -127,29 +127,29 @@ MW_TEST(test_users_are_isolated)
     expect_only("Beta", &sb);
     CHECK_EQ_INT(login("nobody-password"), MW_ERR_DECRYPT);
     CHECK(!mw_secure_user_key_present());
-    CHECK_EQ_INT(user_files_same_size(), files0 + 1);
+    CHECK_EQ_INT(user_files_same_size(), files0);
 }
 
 MW_TEST(test_add_user_rules)
 {
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
-    CHECK_EQ_INT(mw_device_auth_add_user("first-password"), MW_ERR_EXISTS);
+    CHECK_EQ_INT(mw_device_auth_add_user("first-password", NULL), MW_ERR_EXISTS);
     CHECK_EQ_INT(mw_device_auth_failed_attempts(), 1);     // costs a guess
-    CHECK_EQ_INT(mw_device_auth_add_user("short"), MW_ERR_INVALID_ARG);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_ERR_EXISTS);
-    CHECK_EQ_INT(mw_device_auth_add_user("x-password-1"), MW_OK);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_ERR_EXISTS);
+    CHECK_EQ_INT(mw_device_auth_add_user("short", NULL), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_ERR_EXISTS);
+    CHECK_EQ_INT(mw_device_auth_add_user("x-password-1", NULL), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_ERR_EXISTS);
     CHECK(mw_device_auth_lockout_ms() > 0);                // three guesses
-    CHECK_EQ_INT(mw_device_auth_add_user("y-password"), MW_ERR_ABORTED);
+    CHECK_EQ_INT(mw_device_auth_add_user("y-password", NULL), MW_ERR_ABORTED);
     // From the other user too: the taken password is refused either way.
     CHECK_EQ_INT(login("second-password"), MW_OK);
-    CHECK_EQ_INT(mw_device_auth_add_user("first-password"), MW_ERR_EXISTS);
-    CHECK_EQ_INT(mw_device_auth_add_user("third-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("first-password", NULL), MW_ERR_EXISTS);
+    CHECK_EQ_INT(mw_device_auth_add_user("third-password", NULL), MW_OK);
     CHECK_EQ_INT(login("third-password"), MW_OK);
     mw_device_auth_forget();
-    CHECK_EQ_INT(mw_device_auth_add_user("fourth-password"), MW_ERR_NOT_SUPPORTED);
+    CHECK_EQ_INT(mw_device_auth_add_user("fourth-password", NULL), MW_ERR_NOT_SUPPORTED);
 }
 
 MW_TEST(test_user_limit)
@@ -161,11 +161,11 @@ MW_TEST(test_user_limit)
     mw_err_t e = MW_OK;
     for (int i = 0; i < 64 && e == MW_OK; i++) {
         snprintf(pw, sizeof pw, "user-password-%02d", i);
-        e = mw_device_auth_add_user(pw);
+        e = mw_device_auth_add_user(pw, NULL);
         if (e == MW_OK) added++;
     }
     CHECK_EQ_INT(e, MW_ERR_TOO_MANY);
-    CHECK(added + 1 >= MW_USERS_MAX);              // the first user counts too
+    CHECK_EQ_INT(added + 1, MW_USERS_MAX);         // the first user counts too
     CHECK_EQ_INT(user_files_same_size(), MW_USER_FILES_MAX);
     CHECK_EQ_INT(login("user-password-00"), MW_OK);
 }
@@ -176,7 +176,7 @@ MW_TEST(test_delete_other_user)
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
     make_wallet("Alpha", 0x11, &sa);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
     const int files = user_files_same_size();
     CHECK_EQ_INT(login("second-password"), MW_OK);
     make_wallet("Beta", 0x22, NULL);
@@ -186,7 +186,7 @@ MW_TEST(test_delete_other_user)
     mw_host_advance_ms(mw_device_auth_lockout_ms() + 1u);
     CHECK_EQ_INT(mw_device_auth_delete_user("second-password"), MW_OK);
     CHECK(!mw_secure_user_key_present());
-    CHECK_EQ_INT(user_files_same_size(), files - 1);
+    CHECK_EQ_INT(user_files_same_size(), files);   // its slot is a decoy again
     CHECK_EQ_INT(login("second-password"), MW_ERR_DECRYPT);
     CHECK_EQ_INT(login("first-password"), MW_OK);
     expect_only("Alpha", &sa);
@@ -198,7 +198,7 @@ MW_TEST(test_delete_first_user)
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
     make_wallet("Alpha", 0x11, NULL);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
     CHECK_EQ_INT(login("second-password"), MW_OK);
     make_wallet("Beta", 0x22, &sb);
     CHECK_EQ_INT(login("first-password"), MW_OK);
@@ -208,7 +208,7 @@ MW_TEST(test_delete_first_user)
     CHECK_EQ_INT(login("second-password"), MW_OK);
     expect_only("Beta", &sb);
     // The device keeps working for the remaining user.
-    CHECK_EQ_INT(mw_device_auth_add_user("third-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("third-password", NULL), MW_OK);
     CHECK_EQ_INT(login("third-password"), MW_OK);
     CHECK_EQ_INT((int)wallet_count(), 0);
 }
@@ -219,7 +219,7 @@ MW_TEST(test_change_other_user_password)
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
     make_wallet("Alpha", 0x11, &sa);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
     CHECK_EQ_INT(login("second-password"), MW_OK);
     const uint32_t id = make_wallet("Beta", 0x22, &sb);
 
@@ -260,7 +260,7 @@ MW_TEST(test_first_user_change_keeps_others)
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
     make_wallet("Alpha", 0x11, &sa);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
     CHECK_EQ_INT(login("second-password"), MW_OK);
     make_wallet("Beta", 0x22, &sb);
     CHECK_EQ_INT(login("first-password"), MW_OK);
@@ -282,7 +282,7 @@ MW_TEST(test_other_user_change_interrupted)
     for (int which = 0; which < 2; ++which) {
         fresh();
         CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
-        CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+        CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
         CHECK_EQ_INT(login("second-password"), MW_OK);
         make_wallet("Beta", 0x22, &sb);
         const int files = user_files_same_size();
@@ -348,7 +348,7 @@ MW_TEST(test_legacy_directory_migrated)
     CHECK(mw_store_blob_read("wallets", file, sizeof file, &len) != MW_OK);
     CHECK(mw_store_blob_read(gk, file, sizeof file, &len) != MW_OK);
     CHECK(mw_fstore_size(legacy, &len) != MW_OK);
-    CHECK(user_files_same_size() >= 4);
+    CHECK_EQ_INT(user_files_same_size(), MW_USER_FILES_MAX);
     CHECK_EQ_INT(mw_ki_cache_open(id, 0, &k), MW_OK);
     CHECK_EQ_INT((int)mw_ki_cache_count(), 1);
     CHECK(!mw_ki_cache_rolled_back());
@@ -362,7 +362,7 @@ MW_TEST(test_shared_attempt_counter)
 {
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
     mw_device_auth_forget();
     CHECK_EQ_INT(mw_device_auth_verify("guess-1"), MW_ERR_DECRYPT);
     CHECK_EQ_INT(mw_device_auth_verify("guess-2"), MW_ERR_DECRYPT);
@@ -401,7 +401,7 @@ MW_TEST(test_directory_bak_recovered)
     mw_seckey_t sb;
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
-    CHECK_EQ_INT(mw_device_auth_add_user("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", NULL), MW_OK);
     CHECK_EQ_INT(login("second-password"), MW_OK);
     make_wallet("Beta", 0x22, &sb);
     mw_device_auth_forget();
@@ -490,6 +490,37 @@ MW_TEST(test_guess_login_recheck_cycle_slows_down)
     CHECK(mw_device_auth_lockout_ms() >= 2u * d1 - 1000u);  // and doubling
 }
 
+// Every account has a name of its own; only that account sees it.
+MW_TEST(test_account_names)
+{
+    char name[MW_ACCOUNT_NAME_LEN];
+    fresh();
+    CHECK_EQ_INT(mw_device_auth_set("first-password"), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_account_name(name, sizeof name), MW_OK);
+    CHECK_EQ_STR(name, "Main");
+    CHECK_EQ_INT(mw_device_auth_add_user("second-password", "Savings"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_add_user("third-password", "0123456789abcdef"), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_wallet_store_account_name(name, sizeof name), MW_OK);
+    CHECK_EQ_STR(name, "Main");
+    CHECK_EQ_INT(mw_wallet_store_account_rename("Daily"), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_account_rename(""), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_wallet_store_account_rename("   "), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_wallet_store_account_rename("0123456789abcdef"), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(login("second-password"), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_account_name(name, sizeof name), MW_OK);
+    CHECK_EQ_STR(name, "Savings");
+    // The name follows a password change.
+    CHECK_EQ_INT(mw_device_auth_change("second-password", "second-new-pw"), MW_OK);
+    reboot();
+    CHECK_EQ_INT(mw_device_auth_verify("first-password"), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_account_name(name, sizeof name), MW_OK);
+    CHECK_EQ_STR(name, "Daily");
+    CHECK_EQ_INT(login("second-new-pw"), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_account_name(name, sizeof name), MW_OK);
+    CHECK_EQ_STR(name, "Savings");
+    CHECK_EQ_INT(mw_device_auth_add_user("1234567", NULL), MW_ERR_INVALID_ARG);  // 8 at least
+}
+
 int main(void)
 {
     RUN_TEST(test_users_are_isolated);
@@ -507,6 +538,7 @@ int main(void)
     RUN_TEST(test_first_user_change_leftover);
     RUN_TEST(test_guessing_between_logins_slows_down);
     RUN_TEST(test_guess_login_recheck_cycle_slows_down);
+    RUN_TEST(test_account_names);
     mw_host_store_reset();
     return mw_test_summary();
 }

@@ -222,7 +222,7 @@ void  mw_session_lock(void);   // wipes keys and every scratch buffer
 | :--- | :--- | :--- |
 | NVS `devauth` | запись пароля: соль и раунды (общие для всех пользователей), verifier первого пользователя, счётчик попыток | `wallet/device_auth.c` |
 | NVS `settings`, `hw_kblk` | настройки устройства, номер блока eFuse | `wallet/secure_storage.cpp` |
-| FAT `u<24 hex>` | каталог пользователя: до 64 записей кошельков и поколения кэшей key images, запечатан ключом пользователя; рядом 3..10 файлов-пустышек того же размера | `wallet/wallet_store.c` |
+| FAT `u<24 hex>` | ровно 32 файла: каталоги пользователей (имя аккаунта, до 64 записей кошельков, поколения кэшей key images; запечатаны ключом пользователя) и пустышки того же размера с меткой от eFuse | `wallet/wallet_store.c` |
 | FAT `k<24 hex>` | кэш key images кошелька (вариант без / с passphrase), имя — `HMAC(ключ пользователя, id, вариант)` | `wallet/ki_cache.c` |
 
 Имена файлов пользователя вычисляются из его ключа (`mw_secure_user_mac`),
