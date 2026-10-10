@@ -35,14 +35,39 @@ void path_for(const char* name, char* out, size_t cap, const char* suffix) {
     snprintf(out, cap, "/%s%s", name, suffix ? suffix : "");
 }
 
+// A replace is: write "<name>.tmp", rename "<name>" to "<name>.bak", rename
+// the .tmp to "<name>", remove the .bak. A power cut leaves either the old
+// file, or the old one as .bak (put back here), never nothing.
+void recover(const char* name) {
+    char p[48], bak[56], tmp[56];
+    path_for(name, p, sizeof p, nullptr);
+    path_for(name, bak, sizeof bak, ".bak");
+    path_for(name, tmp, sizeof tmp, ".tmp");
+    if (!FFat.exists(p) && FFat.exists(bak)) FFat.rename(bak, p);
+    if (FFat.exists(p)) {
+        if (FFat.exists(bak)) FFat.remove(bak);
+        if (FFat.exists(tmp)) FFat.remove(tmp);
+    }
+}
+
 }  // namespace
+
+// secure_storage.cpp: 1 exists, 0 does not, -1 NVS error.
+extern "C" int mw_store_blob_exists(const char* key);
 
 extern "C" mw_err_t mw_fstore_init(void) {
     if (g_ready) return MW_OK;
-    // formatOnFail = true: the partition is blank on a freshly flashed board.
-    if (!FFat.begin(true, kBase, 4, kPartition)) {
-        MW_LOGE("fstore", "FFat mount failed (partition '%s')", kPartition);
-        return MW_ERR_IO;
+    if (!FFat.begin(false, kBase, 4, kPartition)) {
+        // Blank on a freshly flashed board: formatted then. With a password
+        // record the partition holds the users' wallets - never format it
+        // behind their back (a factory reset does that).
+        // Only a definite "no record" counts as a fresh board.
+        const bool has_record = mw_store_blob_exists("devauth") != 0;
+        if (has_record || !FFat.begin(true, kBase, 4, kPartition)) {
+            MW_LOGE("fstore", "FFat mount failed (partition '%s')%s", kPartition,
+                    has_record ? "; not formatted: it holds the wallets" : "");
+            return MW_ERR_IO;
+        }
     }
     g_ready = true;
     MW_LOGI("fstore", "FFat mounted: %u KiB free",
@@ -59,6 +84,7 @@ extern "C" mw_err_t mw_fstore_write(const char* name, const uint8_t* data, size_
     path_for(name, p, sizeof p, nullptr);
     path_for(name, tmp, sizeof tmp, ".tmp");
 
+    recover(name);                                // a lone .bak is the file
     File f = FFat.open(tmp, FILE_WRITE);
     if (!f) return MW_ERR_IO;
     size_t done = 0;
@@ -69,14 +95,23 @@ extern "C" mw_err_t mw_fstore_write(const char* name, const uint8_t* data, size_
     }
     f.close();
     if (done != len) { FFat.remove(tmp); return MW_ERR_IO; }
-    if (FFat.exists(p)) FFat.remove(p);
-    if (!FFat.rename(tmp, p)) { FFat.remove(tmp); return MW_ERR_IO; }
+    char bak[56];
+    path_for(name, bak, sizeof bak, ".bak");
+    if (FFat.exists(bak)) FFat.remove(bak);
+    if (FFat.exists(p) && !FFat.rename(p, bak)) { FFat.remove(tmp); return MW_ERR_IO; }
+    if (!FFat.rename(tmp, p)) {
+        FFat.rename(bak, p);                      // put the old one back
+        FFat.remove(tmp);
+        return MW_ERR_IO;
+    }
+    FFat.remove(bak);
     return MW_OK;
 }
 
 extern "C" mw_err_t mw_fstore_size(const char* name, size_t* len) {
     if (!name_ok(name) || !len) return MW_ERR_INVALID_ARG;
     if (!g_ready && mw_fstore_init() != MW_OK) return MW_ERR_IO;
+    recover(name);
     char p[48];
     path_for(name, p, sizeof p, nullptr);
     if (!FFat.exists(p)) return MW_ERR_IO;
@@ -90,6 +125,7 @@ extern "C" mw_err_t mw_fstore_size(const char* name, size_t* len) {
 extern "C" mw_err_t mw_fstore_read(const char* name, uint8_t* buf, size_t cap, size_t* len) {
     if (!name_ok(name) || !buf || !len) return MW_ERR_INVALID_ARG;
     if (!g_ready && mw_fstore_init() != MW_OK) return MW_ERR_IO;
+    recover(name);
     char p[48];
     path_for(name, p, sizeof p, nullptr);
     if (!FFat.exists(p)) return MW_ERR_IO;
@@ -112,6 +148,7 @@ extern "C" mw_err_t mw_fstore_read(const char* name, uint8_t* buf, size_t cap, s
 extern "C" mw_err_t mw_fstore_remove(const char* name) {
     if (!name_ok(name)) return MW_ERR_INVALID_ARG;
     if (!g_ready && mw_fstore_init() != MW_OK) return MW_ERR_IO;
+    recover(name);
     char p[48];
     path_for(name, p, sizeof p, nullptr);
     if (!FFat.exists(p)) return MW_OK;
@@ -134,28 +171,63 @@ extern "C" mw_err_t mw_fstore_remove(const char* name) {
     return FFat.remove(p) ? MW_OK : MW_ERR_IO;
 }
 
-extern "C" mw_err_t mw_fstore_wipe_all(void) {
-    if (!g_ready && mw_fstore_init() != MW_OK) return MW_ERR_IO;
-    // Collect the names first: removing while iterating confuses the FAT
-    // directory walk.
-    char names[64][MW_FSTORE_NAME_MAX + 1];
+extern "C" int mw_fstore_list(const char* prefix, char (*names)[MW_FSTORE_NAME_MAX + 1],
+                              int max) {
+    if (!prefix) return -1;
+    if (!g_ready && mw_fstore_init() != MW_OK) return -1;
+    const size_t pl = strlen(prefix);
     int n = 0;
     File root = FFat.open("/");
-    if (root) {
-        File f = root.openNextFile();
-        while (f && n < 64) {
-            const char* nm = f.name();
-            if (nm && *nm == '/') nm++;
-            if (nm && name_ok(nm)) {
-                snprintf(names[n], sizeof names[n], "%s", nm);
-                n++;
-            }
-            f.close();
-            f = root.openNextFile();
+    if (!root) return -1;
+    File f = root.openNextFile();
+    while (f) {
+        const char* nm = f.name();
+        if (nm && *nm == '/') nm++;
+        if (nm && name_ok(nm) && strncmp(nm, prefix, pl) == 0 &&
+            !strstr(nm, ".tmp") && !strstr(nm, ".bak")) {
+            if (names && n < max) snprintf(names[n], MW_FSTORE_NAME_MAX + 1, "%s", nm);
+            n++;
         }
-        root.close();
+        f.close();
+        f = root.openNextFile();
     }
-    for (int i = 0; i < n; i++) (void)mw_fstore_remove(names[i]);
+    root.close();
+    return n;
+}
+
+extern "C" mw_err_t mw_fstore_wipe_all(void) {
+    if (!g_ready && mw_fstore_init() != MW_OK) return MW_ERR_IO;
+    // Collect the names first (removing while iterating confuses the FAT
+    // directory walk), in rounds until nothing is left.
+    static char names[64][MW_FSTORE_NAME_MAX + 1];
+    for (int round = 0; round < 64; round++) {
+        int n = 0;
+        File root = FFat.open("/");
+        if (root) {
+            File f = root.openNextFile();
+            while (f && n < 64) {
+                const char* nm = f.name();
+                if (nm && *nm == '/') nm++;
+                if (nm && *nm) {
+                    snprintf(names[n], sizeof names[n], "%s", nm);
+                    n++;
+                }
+                f.close();
+                f = root.openNextFile();
+            }
+            root.close();
+        }
+        if (n == 0) break;
+        for (int i = 0; i < n; i++) {
+            if (name_ok(names[i])) {
+                (void)mw_fstore_remove(names[i]);
+            } else {
+                char p[48];
+                snprintf(p, sizeof p, "/%s", names[i]);
+                FFat.remove(p);              // a stray .tmp or foreign file
+            }
+        }
+    }
     return MW_OK;
 }
 

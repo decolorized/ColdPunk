@@ -30,6 +30,7 @@ const char* mw_err_str(mw_err_t err)
        log rather than showing up as "unknown error". */
     case MW_KB_BACK:            return "back to previous word";
     case MW_KB_RESTART:         return "restart phrase entry";
+    case MW_ERR_EXISTS:         return "already exists";
     }
     return "unknown error";
 }

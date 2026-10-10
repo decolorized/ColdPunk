@@ -11,6 +11,7 @@
 #include "monero/address.h"
 #include "monero/mnemonic.h"
 #include "wallet/device_auth.h"
+#include "wallet/file_store.h"
 #include "wallet/secure_storage.h"
 #include "wallet/wallet_store.h"
 #include "hal/hal.h"
@@ -189,6 +190,9 @@ MW_TEST(test_erase_and_reset)
     CHECK_EQ_INT(mw_device_auth_set("erase-me-1"), MW_OK);
     CHECK(mw_device_auth_is_set());
     CHECK_EQ_INT(mw_device_auth_erase(), MW_OK);
+    // The record alone gone, with user files left: damaged, not "no password".
+    CHECK(mw_device_auth_state() == MW_AUTH_CORRUPT);
+    CHECK_EQ_INT(mw_fstore_wipe_all(), MW_OK);      // the rest of a factory reset
     CHECK(!mw_device_auth_is_set());
     CHECK(!mw_secure_user_key_present());
     CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
@@ -403,6 +407,7 @@ MW_TEST(test_erase_clears_pending)
 
     // A factory reset must not let a pending retry resurrect the record.
     CHECK_EQ_INT(mw_device_auth_erase(), MW_OK);
+    CHECK_EQ_INT(mw_fstore_wipe_all(), MW_OK);
     CHECK(!mw_device_auth_save_pending());
     mw_device_auth_forget();
     CHECK_EQ_INT(stored_fails(), -1);
@@ -512,21 +517,47 @@ MW_TEST(test_change_interrupted_after_rekey)
 
 // Power lost after the pending record was written but before the wallet
 // directory was re-sealed (it is still under the old key).
+// Every user directory / decoy file, to put the file store back as it was.
+#define SNAP_MAX 48
+static char    g_snap_names[SNAP_MAX][MW_FSTORE_NAME_MAX + 1];
+static uint8_t g_snap_data[SNAP_MAX][12 * 1024];
+static size_t  g_snap_len[SNAP_MAX];
+static int     g_snap_n;
+
+static void files_snapshot(void)
+{
+    g_snap_n = mw_fstore_list("u", g_snap_names, SNAP_MAX);
+    for (int i = 0; i < g_snap_n; i++) {
+        CHECK_EQ_INT(mw_fstore_read(g_snap_names[i], g_snap_data[i], sizeof g_snap_data[i],
+                                    &g_snap_len[i]), MW_OK);
+    }
+}
+
+static void files_restore(void)
+{
+    static char now[SNAP_MAX][MW_FSTORE_NAME_MAX + 1];
+    const int n = mw_fstore_list("u", now, SNAP_MAX);
+    for (int i = 0; i < n; i++) (void)mw_fstore_remove(now[i]);
+    for (int i = 0; i < g_snap_n; i++)
+        CHECK_EQ_INT(mw_fstore_write(g_snap_names[i], g_snap_data[i], g_snap_len[i]), MW_OK);
+}
+
+// Power lost after the pending record was written but before the wallet
+// directory was re-sealed (it is still under the old key).
 MW_TEST(test_change_interrupted_before_rekey)
 {
-    static uint8_t wallets_old[16384];
     mw_seckey_t spend;
     for (int which = 0; which < 2; ++which) {
         fresh();
         CHECK_EQ_INT(mw_device_auth_set("old-pass"), MW_OK);
         const uint32_t id = make_wallet(&spend);
-        const int wl = read_blob("wallets", wallets_old, sizeof wallets_old);
-        CHECK(wl > 0);
+        files_snapshot();
+        CHECK(g_snap_n >= 4);
 
         mw_host_store_fail_writes_after("devauth", 3, 1);   // final write lost
         CHECK_EQ_INT(mw_device_auth_change("old-pass", "new-pass"), MW_OK);
         // ... and the re-sealed directory never reached storage either.
-        CHECK_EQ_INT(mw_store_blob_write("wallets", wallets_old, (size_t)wl), MW_OK);
+        files_restore();
 
         reboot();
         CHECK_EQ_INT(mw_device_auth_verify(which ? "new-pass" : "old-pass"), MW_OK);
@@ -534,6 +565,7 @@ MW_TEST(test_change_interrupted_before_rekey)
         reboot();
         CHECK_EQ_INT(mw_device_auth_verify("new-pass"), MW_OK);
         expect_wallet(id, &spend);
+        CHECK_EQ_INT(mw_device_auth_verify("old-pass"), MW_ERR_DECRYPT);
     }
 }
 

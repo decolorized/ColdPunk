@@ -23,6 +23,9 @@ typedef struct {
     // task 3 item 5: MW_PP_* - whether a passphrase variant exists. The check
     // value itself lives inside the sealed record, never in the directory.
     uint8_t  pp_state;
+    // Generation of the key image cache file of each passphrase variant
+    // (anti-rollback, ki_cache.c); kept in the sealed user directory.
+    uint32_t ki_gen[2];
 } wallet_entry_t;
 
 // wallet_entry_t.pp_state
@@ -114,19 +117,79 @@ mw_err_t mw_wallet_rename(uint32_t id, const char* name);
 mw_err_t mw_wallet_set_active(uint32_t id);
 const wallet_entry_t* mw_wallet_get(uint32_t id);
 
-// task2 item 1 (device password change): re-seals every record from the user
-// key `old_key` to `new_key`. Installs `old_key` to unseal and leaves
-// `new_key` installed on success; on failure nothing is persisted and the
-// in-memory directory is reloaded from storage, so the records stay under
-// `old_key`.
-// Number of wallets in the directory. Needs no password (the directory
-// itself is not sealed); MW_ERR_FORMAT when it cannot be interpreted.
+// Number of wallets of the user that is logged in.
 mw_err_t mw_wallet_store_count(uint32_t* count);
 
-// Re-seals every wallet from old_key to new_key. Idempotent: a record that
-// already opens under new_key is skipped, so a change interrupted by a power
-// loss can simply be run again (device_auth.c).
+// ---------------- users (multi-user, v9) -------------------------------------
+#define MW_USER_FILES_MIN  4
+#define MW_USER_DECOYS_MAX 11
+// Directory files a device may hold: every user plus the most decoys.
+#define MW_USER_FILES_MAX  (MW_USERS_MAX + MW_USER_DECOYS_MAX)
+
+// Every user's directory is one sealed file in the file store, named
+//   "u" + 24 hex digits of HMAC(user key, "mw.user.dir.v1")
+// and sealed under that user's key: without the password a directory is
+// indistinguishable from the random decoy files kept next to them, so the
+// number of users cannot be read from the device.
+//
+// The functions below that take a `key` work on that user without disturbing
+// the one that is logged in (the installed key is restored).
+
+// Drops the in-RAM directory (lock, user switch). The next access loads the
+// directory of whichever user key is installed then.
+void     mw_wallet_store_close(void);
+
+// MW_OK when `key` has a directory. *info (may be NULL) gets
+//   MW_USER_SUPERSEDED  the directory belongs to an interrupted password
+//                       change and the new key (copied to new_key, may be
+//                       NULL) is the one to use;
+//   MW_USER_PRIMARY     it is the first user's directory.
+// MW_ERR_DECRYPT when there is none (or it does not open); other codes are
+// storage faults (memory, I/O).
+#define MW_USER_SUPERSEDED 0x01
+#define MW_USER_PRIMARY    0x02
+mw_err_t mw_wallet_store_user_probe(const uint8_t key[32], uint8_t* info,
+                                    uint8_t new_key[32]);
+// Marks the logged-in user's directory as the first user's (see probe()).
+mw_err_t mw_wallet_store_mark_primary(void);
+// Creates an empty directory for `key`. MW_ERR_EXISTS when it has one.
+mw_err_t mw_wallet_store_user_create(const uint8_t key[32]);
+// Removes every wallet, key image cache and the directory of the user that
+// is logged in. The key stays installed; the caller forgets it.
+mw_err_t mw_wallet_store_user_destroy(void);
+// Directory files on the device (users + decoys); -1 on an I/O error.
+int      mw_wallet_store_user_files(void);
+// Keeps at least MW_USER_FILES_MIN directory-like files on the device: when
+// there are fewer, random decoys are added up to a random 4..11.
+mw_err_t mw_wallet_store_decoys_ensure(void);
+// Whether anything of a user is stored (a directory or decoy file, or the
+// old NVS directory): a password record missing next to it means damage.
+bool     mw_wallet_store_any_data(void);
+
+// One-off move of a directory kept by firmware before v9 (NVS blob
+// "wallets", key image caches under the old names) to the user that is
+// logged in. MW_OK when there was nothing to move.
+mw_err_t mw_wallet_store_migrate_legacy(void);
+
+// Finishes an interrupted password change of the logged-in user (its
+// directory says so). MW_OK when there was nothing to finish.
+mw_err_t mw_wallet_store_resume(void);
+
+// Re-seals the logged-in user's wallets, key image caches and directory from
+// old_key to new_key (password change). Crash-safe: once the directory under
+// new_key is written the change is committed, and an interruption after that
+// is finished at the next login with either password (resume()/probe()).
+// Before that point a failure leaves everything under old_key. Leaves
+// new_key installed on success, old_key on failure.
 mw_err_t mw_wallet_store_rekey(const uint8_t old_key[32], const uint8_t new_key[32]);
+// Whether the last rekey() reached its commit point. When it returns an
+// error with this true, nothing was rolled back: the change stays pending
+// and the next login finishes it (new_key is installed).
+bool     mw_wallet_store_rekey_committed(void);
+
+// Key image cache generation of a wallet variant (ki_cache.c).
+uint32_t mw_wallet_ki_gen(uint32_t id, uint8_t variant);
+mw_err_t mw_wallet_ki_gen_set(uint32_t id, uint8_t variant, uint32_t gen);
 
 #ifdef __cplusplus
 }

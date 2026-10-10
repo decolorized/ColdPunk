@@ -321,7 +321,21 @@ static bool device_auth(void) {
         MW_LOGI("auth", "waiting for the device password");
         for (;;) {
             if (mw_device_auth_lockout_ms()) { auth_report(MW_ERR_ABORTED); continue; }
-            if (ask_text(TX(XSTR_PW_ENTER), pw, sizeof(pw)) != MW_OK) break;
+            if (ask_text(TX(XSTR_PW_ENTER), pw, sizeof(pw)) != MW_OK) {
+                // Cancelled: back to the game, or - the only way out when
+                // no password opens anything any more (every user deleted)
+                // - a factory reset.
+                if (!mw_ui_confirm(TX(XSTR_PW_TITLE), TX(XSTR_LOCK_RESET_Q),
+                                   T(STR_BACK), T(STR_SETTINGS_RESET)) &&
+                    !mw_ui_lock_requested() &&
+                    mw_ui_confirm_code(T(STR_SETTINGS_RESET), T(STR_RESET_CONFIRM))) {
+                    MW_LOGE("auth", "factory reset from the password screen");
+                    (void)mw_device_auth_erase();
+                    (void)mw_fstore_wipe_all();
+                    mw_factory_reset();             // never returns
+                }
+                break;
+            }
             const uint8_t fails_before = mw_device_auth_failed_attempts();
             mw_ui_progress(TX(XSTR_PW_TITLE), 0, TX(XSTR_PW_STAGE_CHECK));
             mw_flow_auth_progress_on(TX(XSTR_PW_TITLE));
@@ -1606,16 +1620,18 @@ static void wallets_menu(void) {
     int focus = 0;
     for (;;) {
         if (lock_requested()) return;
-        static wallet_store_t store;
-        uint32_t ids[MAX_WALLETS];
-        char     labels[MAX_WALLETS][WALLET_NAME_LEN + 8];
-        const char* items[MAX_WALLETS + 2];
-        const char* icons[MAX_WALLETS + 2];
+        // Off the crypto task stack: up to 64 wallets (the directory copy in
+        // PSRAM, the short lists static).
+        static uint32_t ids[MAX_WALLETS];
+        static char     labels[MAX_WALLETS][WALLET_NAME_LEN + 8];
+        static const char* items[MAX_WALLETS + 2];
+        static const char* icons[MAX_WALLETS + 2];
         int n = 0;
 
-        if (mw_wallet_store_load(&store) == MW_OK) {
-            for (uint32_t i = 0; i < store.count && n < MAX_WALLETS; i++) {
-                const wallet_entry_t* w = &store.wallets[i];
+        wallet_store_t* store = (wallet_store_t*)big_alloc(sizeof(wallet_store_t));
+        if (store && mw_wallet_store_load(store) == MW_OK) {
+            for (uint32_t i = 0; i < store->count && n < MAX_WALLETS; i++) {
+                const wallet_entry_t* w = &store->wallets[i];
                 if (w->is_hidden) continue;
                 snprintf(labels[n], sizeof(labels[n]), "%s%s", w->name,
                          (mw_wallet_pp_state(w->id) != MW_PP_NONE) ? "  *" : "");
@@ -1625,7 +1641,7 @@ static void wallets_menu(void) {
                 n++;
             }
         }
-        mw_memzero(&store, sizeof(store));
+        big_free(store, sizeof(wallet_store_t));
         const int n_wallets = n;
         items[n] = T(STR_WALLET_CREATE); icons[n] = LV_SYMBOL_PLUS;     n++;
         items[n] = T(STR_WALLET_IMPORT); icons[n] = LV_SYMBOL_DOWNLOAD; n++;
@@ -1642,6 +1658,8 @@ static void wallets_menu(void) {
         m.back = true;
         m.with_status = true;
         const int r = mw_ui_menu_run(&m);
+        // The names stay in RAM no longer than the list is on screen.
+        mw_memzero(labels, sizeof(labels));
         if (r < 0) return;
         focus = r;
 

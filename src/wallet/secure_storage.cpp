@@ -222,6 +222,22 @@ extern "C" mw_err_t mw_store_blob_read(const char* key, void* out, size_t cap, s
     return MW_OK;
 }
 
+// 1 when the key exists, 0 when NVS says it does not, -1 on any other error.
+extern "C" int mw_store_blob_exists(const char* key)
+{
+    nvs_handle_t h;
+    size_t len = 0;
+    if (!key) return -1;
+    esp_err_t e = nvs_open(MW_NVS_NAMESPACE, NVS_READONLY, &h);
+    if (e == ESP_ERR_NVS_NOT_FOUND) return 0;          // namespace never written
+    if (e != ESP_OK) return -1;
+    e = nvs_get_blob(h, key, NULL, &len);
+    nvs_close(h);
+    if (e == ESP_OK) return 1;
+    if (e == ESP_ERR_NVS_NOT_FOUND) return 0;
+    return -1;
+}
+
 extern "C" mw_err_t mw_store_blob_erase(const char* key)
 {
     nvs_handle_t h;
@@ -333,6 +349,29 @@ extern "C" void mw_secure_user_key_clear(void)
 extern "C" bool mw_secure_user_key_present(void)
 {
     return g_user_key_set;
+}
+
+// HMAC-SHA256(user key, label || data): names of the user's files.
+extern "C" mw_err_t mw_secure_user_mac(const char* label, const uint8_t* data, size_t len,
+                                       uint8_t out[32])
+{
+    uint8_t msg[96];
+    const size_t ll = label ? strlen(label) : 0;
+    if (!label || !out || (!data && len) || ll + len > sizeof msg) return MW_ERR_INVALID_ARG;
+    if (!g_user_key_set) return MW_ERR_NOT_SUPPORTED;
+    memcpy(msg, label, ll);
+    if (len) memcpy(msg + ll, data, len);
+    mw_hmac_sha256(g_user_key, sizeof g_user_key, msg, ll + len, out);
+    mw_memzero(msg, sizeof msg);
+    return MW_OK;
+}
+
+extern "C" mw_err_t mw_secure_user_key_copy(uint8_t out[32])
+{
+    if (!out) return MW_ERR_INVALID_ARG;
+    if (!g_user_key_set) return MW_ERR_NOT_SUPPORTED;
+    memcpy(out, g_user_key, 32);
+    return MW_OK;
 }
 
 // ---------------------------------------------------------------------------

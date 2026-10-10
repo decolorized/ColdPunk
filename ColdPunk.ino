@@ -87,11 +87,10 @@ static void link_info_provider(mw_link_info_t* out, void* ctx) {
     // Wallet names and counts are only reported once the device is unlocked:
     // the locked device is "just a game".
     if (out->unlocked) {
-        static wallet_store_t store;    // ~1.5 KB, keep off the link task stack
-        if (mw_wallet_store_load(&store) == MW_OK) {
-            out->wallet_count = (uint8_t)(store.count > 255 ? 255 : store.count);
+        uint32_t count = 0;
+        if (mw_wallet_store_count(&count) == MW_OK) {
+            out->wallet_count = (uint8_t)(count > 255 ? 255 : count);
         }
-        memset(&store, 0, sizeof(store));
         mw_shell_info(out->wallet_name, sizeof(out->wallet_name), &out->pp_variant,
                       &out->network);
     }

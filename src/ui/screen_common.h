@@ -179,6 +179,10 @@ typedef enum {
     XSTR_PW_WEAK,
     // end v6
 
+    // v9: users
+    XSTR_USER_ADD, XSTR_USER_DELETE, XSTR_USER_ADD_HINT, XSTR_USER_ADDED,
+    XSTR_USER_FULL, XSTR_USER_DEL_WARN, XSTR_USER_DELETED, XSTR_PW_TAKEN,
+    XSTR_USER_NA, XSTR_LOCK_RESET_Q,
     XSTR_COUNT
 } mw_xstr_id_t;
 
@@ -365,7 +369,7 @@ uint32_t mw_ui_wake_seq(void);
 // ---- generic menu page (screen_menu.cpp) -----------------------------------
 #define MW_MENU_BACK  (-1)
 #define MW_MENU_WAKE  (-2)
-#define MW_MENU_MAX   12
+#define MW_MENU_MAX   72     // the wallet list: MAX_WALLETS + 2
 
 typedef struct {
     const char*        title;

@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -280,6 +281,29 @@ void mw_secure_user_key_clear(void)
 bool mw_secure_user_key_present(void)
 {
     return g_user_key_set != 0;
+}
+
+// HMAC-SHA256(user key, label || data): names of the user's files.
+mw_err_t mw_secure_user_mac(const char* label, const uint8_t* data, size_t len,
+                                       uint8_t out[32])
+{
+    uint8_t msg[96];
+    const size_t ll = label ? strlen(label) : 0;
+    if (!label || !out || (!data && len) || ll + len > sizeof msg) return MW_ERR_INVALID_ARG;
+    if (!g_user_key_set) return MW_ERR_NOT_SUPPORTED;
+    memcpy(msg, label, ll);
+    if (len) memcpy(msg + ll, data, len);
+    mw_hmac_sha256(g_user_key, sizeof g_user_key, msg, ll + len, out);
+    mw_memzero(msg, sizeof msg);
+    return MW_OK;
+}
+
+mw_err_t mw_secure_user_key_copy(uint8_t out[32])
+{
+    if (!out) return MW_ERR_INVALID_ARG;
+    if (!g_user_key_set) return MW_ERR_NOT_SUPPORTED;
+    memcpy(out, g_user_key, 32);
+    return MW_OK;
 }
 
 // Mirrors secure_storage.cpp: the emulated root key when "provisioned",
@@ -552,6 +576,27 @@ static void fstore_path(const char* name, char* out, size_t cap)
     snprintf(out, cap, "%s/fs_%s", g_dir, name);
 }
 
+static int host_exists(const char* p)
+{
+    struct stat st;
+    return stat(p, &st) == 0;
+}
+
+// Same replace protocol as file_store_esp32.cpp: .tmp, old -> .bak, .tmp ->
+// name, drop .bak; a cut leaves the old file or its .bak (put back here).
+static void fstore_recover(const char* name)
+{
+    char p[640], bak[660], tmp[660];
+    fstore_path(name, p, sizeof p);
+    snprintf(bak, sizeof bak, "%s.bak", p);
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    if (!host_exists(p) && host_exists(bak)) (void)rename(bak, p);
+    if (host_exists(p)) {
+        (void)remove(bak);
+        (void)remove(tmp);
+    }
+}
+
 mw_err_t mw_fstore_init(void) { return ensure_dir() == 0 ? MW_OK : MW_ERR_IO; }
 bool     mw_fstore_ready(void) { return true; }
 
@@ -561,14 +606,26 @@ mw_err_t mw_fstore_write(const char* name, const uint8_t* data, size_t len)
     FILE* f;
     if (!fstore_name_ok(name) || (!data && len)) return MW_ERR_INVALID_ARG;
     if (ensure_dir() != 0) return MW_ERR_IO;
+    fstore_recover(name);                // a lone .bak is the file
     fstore_path(name, p, sizeof p);
     snprintf(tmp, sizeof tmp, "%s.tmp", p);
     f = fopen(tmp, "wb");
     if (!f) return MW_ERR_IO;
     if (len && fwrite(data, 1, len, f) != len) { fclose(f); remove(tmp); return MW_ERR_IO; }
     if (fclose(f) != 0) { remove(tmp); return MW_ERR_IO; }
-    (void)remove(p);                     // rename() does not replace on Windows
-    if (rename(tmp, p) != 0) { remove(tmp); return MW_ERR_IO; }
+    {
+        // rename() does not replace on Windows: the old file steps aside.
+        char bak[660];
+        snprintf(bak, sizeof bak, "%s.bak", p);
+        (void)remove(bak);
+        if (host_exists(p) && rename(p, bak) != 0) { remove(tmp); return MW_ERR_IO; }
+        if (rename(tmp, p) != 0) {
+            (void)rename(bak, p);
+            remove(tmp);
+            return MW_ERR_IO;
+        }
+        (void)remove(bak);
+    }
     return MW_OK;
 }
 
@@ -577,6 +634,7 @@ mw_err_t mw_fstore_size(const char* name, size_t* len)
     char p[640];
     struct stat st;
     if (!fstore_name_ok(name) || !len) return MW_ERR_INVALID_ARG;
+    fstore_recover(name);
     fstore_path(name, p, sizeof p);
     if (stat(p, &st) != 0) return MW_ERR_IO;
     *len = (size_t)st.st_size;
@@ -589,6 +647,7 @@ mw_err_t mw_fstore_read(const char* name, uint8_t* buf, size_t cap, size_t* len)
     FILE* f;
     size_t n;
     if (!fstore_name_ok(name) || !buf || !len) return MW_ERR_INVALID_ARG;
+    fstore_recover(name);
     fstore_path(name, p, sizeof p);
     f = fopen(p, "rb");
     if (!f) return MW_ERR_IO;
@@ -622,16 +681,49 @@ mw_err_t mw_fstore_remove(const char* name)
     return remove(p) == 0 ? MW_OK : MW_ERR_IO;
 }
 
+int mw_fstore_list(const char* prefix, char (*names)[MW_FSTORE_NAME_MAX + 1], int max)
+{
+    DIR* d;
+    struct dirent* de;
+    int n = 0;
+    size_t pl;
+    if (!prefix) return -1;
+    if (ensure_dir() != 0) return -1;
+    pl = strlen(prefix);
+    d = opendir(g_dir);
+    if (!d) return -1;
+    while ((de = readdir(d)) != NULL) {
+        const char* nm = de->d_name;
+        if (strncmp(nm, "fs_", 3) != 0) continue;
+        nm += 3;
+        if (!fstore_name_ok(nm) || strncmp(nm, prefix, pl) != 0) continue;
+        if (strstr(nm, ".tmp") || strstr(nm, ".bak")) continue;
+        if (names && n < max) snprintf(names[n], MW_FSTORE_NAME_MAX + 1, "%s", nm);
+        n++;
+    }
+    closedir(d);
+    return n;
+}
+
 mw_err_t mw_fstore_wipe_all(void)
 {
-    // The host has no directory listing helper that works on every libc;
-    // the only producer of files is ki_cache.c, whose names are known.
-    char name[MW_FSTORE_NAME_MAX + 1];
-    for (unsigned id = 0; id < 256; id++) {
-        for (unsigned v = 0; v < 2; v++) {
-            snprintf(name, sizeof name, "ki_%08x_%u.bin", id, v);
-            (void)mw_fstore_remove(name);
+    // Every file of the store, .tmp and .bak leftovers included.
+    for (int round = 0; round < 64; round++) {
+        DIR* d;
+        struct dirent* de;
+        char p[1024];
+        int n = 0;
+        if (ensure_dir() != 0) return MW_ERR_IO;
+        d = opendir(g_dir);
+        if (!d) return MW_ERR_IO;
+        while ((de = readdir(d)) != NULL) {
+            if (strncmp(de->d_name, "fs_", 3) != 0) continue;
+            snprintf(p, sizeof p, "%s/%s", g_dir, de->d_name);
+            (void)remove(p);
+            n++;
         }
+        closedir(d);
+        if (n == 0) break;
     }
     return MW_OK;
 }

@@ -76,16 +76,25 @@ mw_err_t mw_ki_cache_put(const mw_ki_entry_t* e);
 void     mw_ki_cache_mark_spent(const mw_keyimage_t* image);
 mw_err_t mw_ki_cache_save(void);
 
+// Name of a cache file under the installed user key ("" without a key);
+// `cap` >= 26.
+void     mw_ki_cache_file_name(uint32_t wallet_id, uint8_t variant, char* out, size_t cap);
+
 // Removes both variants of a wallet (wallet deletion).
 mw_err_t mw_ki_cache_erase_wallet(uint32_t wallet_id);
 
-// Device password change: re-seals both cache files of a wallet from the
-// user key `old_key` to `new_key` (the seal key mixes in the password). A
-// file that cannot be re-sealed is removed - the cache is rebuilt by the
-// next key image export - so a password change never fails because of it.
-// Leaves `new_key` installed.
-void     mw_ki_cache_rekey(uint32_t wallet_id, const uint8_t old_key[32],
-                           const uint8_t new_key[32]);
+// Password change: moves both cache files of a wallet from the user key
+// `old_key` (its file names and seal) to `new_key`. Idempotent: a file
+// already moved is left alone. A file that cannot be moved is removed - the
+// cache is rebuilt by the next key image export - so a password change never
+// fails because of it. Leaves `new_key` installed.
+void     mw_ki_cache_move(uint32_t wallet_id, const uint8_t old_key[32],
+                          const uint8_t new_key[32]);
+
+// v9 migration of the logged-in user: renames the files of firmware before
+// v9 ("ki_<id>_<v>.bin") to the per-user names and moves their NVS
+// generations ("kig<id><v>") into `gen` (the directory record).
+void     mw_ki_cache_migrate_legacy(uint32_t wallet_id, uint32_t gen[2]);
 
 #ifdef __cplusplus
 }

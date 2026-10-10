@@ -55,7 +55,7 @@
 enum {
     SET_BACK = 0, SET_KB, SET_LAYOUT, SET_BRIGHT, SET_AUTOLOCK, SET_CALIB,
     SET_FORMAT, SET_LANG, SET_NET, SET_DEBUG, SET_PASSWORD, SET_ABOUT,
-    SET_EFUSE, SET_RESET, SET_TOUCH_TEST
+    SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE
 };
 
 typedef struct {
@@ -66,7 +66,7 @@ typedef struct {
 static set_ctx_t s_set;
 
 // Row index -> SET_* action. Filled by settings_build() on every rebuild.
-#define SET_MAX_ROWS 16
+#define SET_MAX_ROWS 20
 static int s_set_actions[SET_MAX_ROWS];
 static int s_set_count = 0;
 
@@ -170,6 +170,8 @@ static void settings_build(void* arg) {
         c->s.debug_log ? TX(XSTR_ON) : TX(XSTR_OFF), SET_DEBUG);
 
     add(LV_SYMBOL_CHARGE,   TX(XSTR_PW_CHANGE), NULL, SET_PASSWORD);
+    add(LV_SYMBOL_PLUS,     TX(XSTR_USER_ADD), NULL, SET_USER_ADD);
+    add(LV_SYMBOL_CLOSE,    TX(XSTR_USER_DELETE), NULL, SET_USER_DELETE);
 
     add(LV_SYMBOL_FILE,     TX(XSTR_SETTINGS_ABOUT), NULL, SET_ABOUT);
 
@@ -520,6 +522,12 @@ static void show_auth_error(mw_err_t e) {
         mw_ui_message(T(STR_ERR_GENERIC), msg);
     } else if (e == MW_ERR_INVALID_ARG) {
         mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_EMPTY));
+    } else if (e == MW_ERR_EXISTS) {
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_TAKEN));
+    } else if (e == MW_ERR_TOO_MANY) {
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_USER_FULL));
+    } else if (e == MW_ERR_NOT_SUPPORTED) {
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_USER_NA));
     } else {
         MW_LOGE("settings", "device password check failed: %s", mw_err_str(e));
         mw_ui_message(T(STR_ERR_GENERIC), mw_err_str(e));
@@ -580,7 +588,8 @@ static void change_password(void) {
 
         mw_ui_progress(TX(XSTR_PW_CHECKING), 0, TX(XSTR_PW_STAGE_CHECK));
         mw_flow_auth_progress_on(TX(XSTR_PW_CHECKING));
-        mw_err_t e = mw_device_auth_verify(old_pw);
+        // Checks this user's password; never logs another user in.
+        mw_err_t e = mw_device_auth_check(old_pw);
         mw_flow_auth_progress_off();
         mw_ui_progress_close();
         if (e != MW_OK) {
@@ -608,6 +617,77 @@ static void change_password(void) {
     mw_memzero(new_pw, sizeof(new_pw));
     mw_memzero(again, sizeof(again));
     mw_session_wipe_input();
+}
+
+// ---------------------------------------------------------------------------
+//  Users (v9): each user has its own password and sees only its own wallets.
+//  Adding happens from inside a session; the new user types its password.
+// ---------------------------------------------------------------------------
+static bool lockout_note(void) {
+    const uint32_t wait_ms = mw_device_auth_lockout_ms();
+    if (!wait_ms) return false;
+    char msg[64];
+    snprintf(msg, sizeof(msg), TX(XSTR_PW_LOCKED), (int)((wait_ms + 999u) / 1000u));
+    mw_ui_message_timeout(T(STR_ERR_GENERIC), msg, wait_ms);
+    return true;
+}
+
+static void add_user(void) {
+    char pw[MW_DEVICE_PW_MAX + 1];
+    char again[MW_DEVICE_PW_MAX + 1];
+    memset(pw, 0, sizeof(pw));
+    memset(again, 0, sizeof(again));
+    if (!mw_device_auth_users_possible()) {
+        mw_ui_message(TX(XSTR_USER_ADD), TX(XSTR_USER_NA));
+        return;
+    }
+    if (lockout_note()) return;
+    if (!mw_ui_confirm(TX(XSTR_USER_ADD), TX(XSTR_USER_ADD_HINT), TX(XSTR_OK), T(STR_CANCEL)))
+        return;
+    if (ask_new_password(pw, again, sizeof(pw))) {
+        mw_ui_progress(TX(XSTR_USER_ADD), 0, TX(XSTR_PW_STAGE_NEW));
+        mw_flow_auth_progress_on(TX(XSTR_USER_ADD));
+        const mw_err_t e = mw_device_auth_add_user(pw);
+        mw_flow_auth_progress_off();
+        mw_ui_progress_close();
+        if (e == MW_OK) {
+            MW_LOGI("settings", "user added");
+            mw_ui_message(T(STR_SUCCESS), TX(XSTR_USER_ADDED));
+        } else {
+            show_auth_error(e);
+        }
+    }
+    mw_memzero(pw, sizeof(pw));
+    mw_memzero(again, sizeof(again));
+    mw_session_wipe_input();
+}
+
+// true when the user is gone (the shell locks the device).
+static bool delete_user(void) {
+    char pw[MW_DEVICE_PW_MAX + 1];
+    memset(pw, 0, sizeof(pw));
+    bool gone = false;
+    if (lockout_note()) return false;
+    if (!mw_ui_confirm(TX(XSTR_USER_DELETE), TX(XSTR_USER_DEL_WARN), TX(XSTR_YES), TX(XSTR_NO)))
+        return false;
+    if (!mw_ui_confirm_code(TX(XSTR_USER_DELETE), T(STR_RESET_CONFIRM))) return false;
+    if (ask_password(TX(XSTR_PW_ENTER), pw, sizeof(pw)) == MW_OK) {
+        mw_ui_progress(TX(XSTR_USER_DELETE), 0, TX(XSTR_PW_STAGE_CHECK));
+        mw_flow_auth_progress_on(TX(XSTR_USER_DELETE));
+        const mw_err_t e = mw_device_auth_delete_user(pw);
+        mw_flow_auth_progress_off();
+        mw_ui_progress_close();
+        if (e == MW_OK) {
+            MW_LOGI("settings", "user deleted");
+            mw_ui_message(T(STR_SUCCESS), TX(XSTR_USER_DELETED));
+            gone = true;
+        } else {
+            show_auth_error(e);
+        }
+    }
+    mw_memzero(pw, sizeof(pw));
+    mw_session_wipe_input();
+    return gone;
 }
 
 // ---------------------------------------------------------------------------
@@ -754,6 +834,17 @@ void mw_screen_settings_run(void) {
 
         case SET_PASSWORD:
             change_password();
+            break;
+
+        case SET_USER_ADD:
+            add_user();
+            break;
+
+        case SET_USER_DELETE:
+            if (delete_user()) {
+                mw_ui_lock_request();    // back to the game; nobody is logged in
+                return;
+            }
             break;
 
         case SET_ABOUT: {

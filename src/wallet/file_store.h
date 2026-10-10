@@ -27,6 +27,11 @@ mw_err_t mw_fstore_read(const char* name, uint8_t* buf, size_t cap, size_t* len)
 // Overwrites the content with zeros before removing it (best effort on flash
 // with wear levelling; see docs/security.md).
 mw_err_t mw_fstore_remove(const char* name);
+// Names (without the directory) of the files whose name starts with
+// `prefix`, at most `max` of them, into names[i][MW_FSTORE_NAME_MAX + 1].
+// Returns how many there are in total (may exceed `max`); -1 on an I/O error.
+// `names` may be NULL to only count.
+int      mw_fstore_list(const char* prefix, char (*names)[MW_FSTORE_NAME_MAX + 1], int max);
 // Factory reset: removes every file this module created.
 mw_err_t mw_fstore_wipe_all(void);
 

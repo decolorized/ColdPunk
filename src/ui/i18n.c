@@ -473,6 +473,17 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_SD_VK_NONE] = "У этого кошелька нет\nprivate view key.",
     [XSTR_PW_WEAK] = "Слабый пароль: только цифры\nили одинаковые символы.\nУстройство в чужих руках\nподберёт его. Оставить?",
     // end v6 RU
+    // v9 RU
+    [XSTR_USER_ADD]      = "Добавить пользователя",
+    [XSTR_USER_DELETE]   = "Удалить этого пользователя",
+    [XSTR_USER_ADD_HINT] = "У нового пользователя свой\nпароль и свои кошельки.\nНа устройстве не видно,\nсколько пользователей есть.",
+    [XSTR_USER_ADDED]    = "Пользователь добавлен.\nЗаблокируйте устройство и\nвведите его пароль.",
+    [XSTR_USER_FULL]     = "Нет места для ещё одного\nпользователя.",
+    [XSTR_USER_DEL_WARN] = "Удалить этого пользователя\nи все его кошельки? Другие\nпользователи останутся. Если\nдругих нет, поможет только\nсброс к заводским.",
+    [XSTR_USER_DELETED]  = "Пользователь удалён.",
+    [XSTR_PW_TAKEN]      = "Этот пароль нельзя\nиспользовать. Выберите\nдругой.",
+    [XSTR_USER_NA]       = "Сейчас недоступно:\nзаблокируйте и снова\nразблокируйте устройство.",
+    [XSTR_LOCK_RESET_Q]  = "Вернуться к началу?\nСброс к заводским стирает\nвсех пользователей и\nвсе кошельки.",
 };
 
 static const char* const X_EN[XSTR_COUNT] = {
@@ -779,6 +790,17 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_SD_VK_NONE] = "This wallet has no\nprivate view key.",
     [XSTR_PW_WEAK] = "Weak password: digits only or\none repeated character. A stolen\ndevice can guess it.\nKeep it anyway?",
     // end v6 EN
+    // v9 EN
+    [XSTR_USER_ADD]      = "Add user",
+    [XSTR_USER_DELETE]   = "Delete this user",
+    [XSTR_USER_ADD_HINT] = "The new user gets its own\npassword and its own wallets.\nNothing on the device shows\nhow many users there are.",
+    [XSTR_USER_ADDED]    = "User added.\nLock the device and enter\nits password to open it.",
+    [XSTR_USER_FULL]     = "No room for another user.",
+    [XSTR_USER_DEL_WARN] = "Delete this user and all of\nits wallets? Other users stay.\nIf there is no other user,\nonly a factory reset helps.",
+    [XSTR_USER_DELETED]  = "User deleted.",
+    [XSTR_PW_TAKEN]      = "This password cannot be\nused. Choose another one.",
+    [XSTR_USER_NA]       = "Not available right now:\nlock and unlock the device.",
+    [XSTR_LOCK_RESET_Q]  = "Back to the start screen?\nA factory reset erases every\nuser and every wallet.",
 };
 
 /* ------------------------------------------------------------------ */

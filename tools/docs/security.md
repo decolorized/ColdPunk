@@ -28,10 +28,10 @@ card", ES3C28P and Touch-LCD-2 - as a text file on the card).
 
 | Attacker capability | Outcome |
 | --- | --- |
-| Reads the SPI flash off the board (chip-off, flash dumper) | Sees only NVS pages. With flash encryption + NVS encryption enabled, they are ciphertext. Even without flash encryption they see the **sealed** seed blobs: AES-256-GCM under a key that only exists inside the eFuse. |
+| Reads the SPI flash off the board (chip-off, flash dumper) | Sees NVS pages and the files of the `storage` partition (user directories, decoys, key image caches; §4a). With flash encryption + NVS encryption enabled, they are ciphertext. Even without flash encryption they see the **sealed** seed blobs: AES-256-GCM under a key that only exists inside the eFuse. |
 | Copies the flash image onto an identical ESP32-S3 | The clone has a different (or unburned) eFuse key block. `esp_hmac_calculate()` produces a different per-label key, the GCM tag check fails, and `mw_unseal()` returns `MW_ERR_DECRYPT`. No seed is recovered. |
 | Runs arbitrary firmware on the original chip | Cannot read the eFuse key: it is read-protected and only reachable by the HMAC peripheral. The attacker can still *use* the HMAC peripheral to unseal, so this is only stopped by secure boot — see limitations. |
-| Edits the wallet directory in NVS (swaps records, renumbers ids, flips ciphertext bits) | Fails closed. The sealing label is `mw.seed.v1.<wallet id>`, so moving a record to another id changes the key; any bit flip breaks the 128-bit GCM tag. |
+| Edits a wallet directory (swaps records, renumbers ids, flips ciphertext bits) | Fails closed: since v9 the whole directory is one AES-GCM-sealed file per user. The sealing label is `mw.seed.v1.<wallet id>`, so moving a record to another id changes the key; any bit flip breaks the 128-bit GCM tag. |
 | Steals the device while it is locked | The session holds no keys: `mw_session_lock()` zeroes `mw_session_t.keys` and the passphrase buffer. Unsealing again requires nothing from the user — but deriving usable keys requires the **passphrase**, which is never stored (TZ 5.2). |
 | Observes the device on a network | There is no network. |
 | Recovers a deleted wallet's seed from the directory blob | `mw_wallet_delete()` overwrites the record (random, random, zero — each committed) before dropping the slot. |
@@ -363,6 +363,93 @@ precisely the key §4 burns. Prefer it here.
 
 ---
 
+## 4a. Users and plausible deniability (v9)
+
+**Goal.** One owner keeps several sets of wallets behind different
+passwords, so that under coercion they can open the device with one password
+and show only part of their funds. Nothing on the device, and as far as
+possible nothing in a flash dump, may show that other users exist or how many.
+
+**Key per user.** Every password goes through the same KDF (§ device
+password, `device_password.md`) with the **device-wide** salt and round count
+from the `devauth` record. The result is that user's key `K`. Seeds, key
+image caches and the user's directory are sealed with
+`HMAC(K, eFuse-HMAC(label))`, so one user's key opens nothing of another.
+
+**Who is a user.** The record's verifier belongs to the first user only. Any
+other password is a user exactly when a directory file named
+`"u" + hex(HMAC(K, "mw.user.dir.v1"))[0..24]` exists in the file store and
+opens under `K`. There is no list of users and no per-user entry in NVS. A
+password costs one KDF run however many users exist.
+
+**What a flash dump shows.**
+
+| Store | Contents | What it tells |
+| :--- | :--- | :--- |
+| NVS `devauth` | salt, rounds, the first user's verifier, attempt counter | that the device has a password |
+| FAT `u…` files | one per user, plus 3..10 random **decoys** made when the first user is created (and topped up when fewer than 4 files remain); all the same size (9 824 bytes), random-looking without the key | the number of users + decoys, not the number of users |
+| FAT `k…` files | key image caches, named by `HMAC(K, id, variant)` | how many wallets (of all users together) have a key image cache, and their sizes |
+
+So a dump bounds the user count (files minus 3..10 decoys) but does not
+fix it. The cache files leak the total count of wallets that were synced; a
+user whose wallets never synced key images on this device leaves no cache
+file.
+
+**Decoys over time.** Decoys are written once and never change; a user's
+directory is rewritten (new IV, new FAT clusters) whenever that user changes
+something. Two dumps taken at different times, or a close look at the FAT
+allocation order in one dump, can therefore single out directories that were
+in use. A user that is not touched between two dumps looks like a decoy.
+
+**Deleting a user** (Settings → *Delete this user*) needs that user's own
+password: its wallets, caches and directory are removed (overwritten, then
+deleted; see the caveat in §5). Deleting the first user keeps the record —
+the other users depend on its salt — and replaces the verifier with random
+bytes. The factory reset erases every user.
+
+**Guessing.** The failed-attempt counter and its delay are device-wide: a
+wrong password counts the same whoever's it was meant to be. A successful
+unlock clears that counter, but not a second, lifetime counter
+(`fails_total` in the record): it drops by one only after ten unlocks in a
+row without any failure (a password re-check inside a session never lowers
+it), and above 6 it imposes the same doubling delay. Someone who knows one
+user's password therefore cannot guess at another's indefinitely by logging
+in between guesses: the delay keeps doubling, and each forgiven failure
+costs ten clean unlocks (ten key derivations). *Add user* and
+*change password* refuse a password some user already has
+(`MW_ERR_EXISTS`); that answer reveals as much as a successful login, so it
+is counted as a failed attempt too. A full device (`MW_USER_FILES_MAX` = 43
+directory files) refuses *Add user*; filling it shows users + decoys, the
+same as a flash dump.
+
+**Not hidden.** That the device supports several users (the Settings items
+are always there). Whether the password just typed belongs to the first user
+or to another one may be told from a few milliseconds of timing (the second
+needs a file read). Settings, the touch calibration and the eFuse key are
+shared.
+
+**Limits.** At least 32 users (`MW_USERS_MAX`; the real cap counts
+directory files, `MW_USER_FILES_MAX` = 43, so it is 33..40 depending on the
+decoys), 64 wallets each (`MAX_WALLETS`). The directories take about 420 KB
+of the 3.9 MB `storage` partition; NVS holds nothing per user.
+
+**Power loss.** A file is replaced as write `.tmp` → old file to `.bak` →
+`.tmp` to the name → drop `.bak`; the next access puts a lone `.bak` back. A
+directory that exists but cannot be read is an error, never an empty user
+(nothing is written over it), and a password change past its commit point
+is never rolled back — it stays pending until a login finishes it. A
+password change has its own commit point (`device_password.md`). The
+`storage` partition is formatted only when it does not mount **and** there is
+no password record (a fresh board); otherwise the device reports the I/O
+error instead of wiping the users.
+
+**Factory reset without a password.** Cancel on the password screen offers
+a factory reset (behind the confirmation code) — the only way out once no
+password opens anything. Anyone holding the device can wipe it this way, as
+they could by re-flashing it.
+
+---
+
 ## 5. Wipe policy
 
 | Buffer | Wiped by | When |
@@ -375,7 +462,8 @@ precisely the key §4 burns. Prefer it here.
 | AES round keys, GHASH state | `mw_aes256_gcm_*` | Before returning |
 | Imported raw key material | `mw_wallet_create_from_keys()` | Single `done:` cleanup path — the 64-byte payload and the derived comparison scalar |
 | Deleted wallet record | `mw_wallet_delete()` | Random / random / zero, each pass committed, then the slot is dropped (TZ 7.2) |
-| Everything | `mw_factory_reset()` (HAL) | Erases the NVS partition and reboots |
+| A user | `mw_device_auth_delete_user()` | Its wallets, key image caches and directory file (zeroed, then removed) |
+| Everything | `mw_factory_reset()` (HAL) + `mw_fstore_wipe_all()` | Erases the NVS partition and every file of the `storage` partition, then reboots |
 
 All wiping goes through `mw_memzero()`, which the compiler is not allowed to
 optimise away.

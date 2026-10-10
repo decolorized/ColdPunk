@@ -135,7 +135,7 @@ explicit confirmation on the device screen. The PC program is only a courier.
   the passphrase (polyseed "encrypted" flag). Detected automatically from the
   phrase. New wallets are always created in the Feather format.
 - Import from raw keys (spend + view) and **view-only** wallets.
-- Several wallets per device; Mainnet, Testnet and Stagenet.
+- Up to 64 wallets per user; Mainnet, Testnet and Stagenet.
 
 **Operations**
 
@@ -147,8 +147,8 @@ explicit confirmation on the device screen. The PC program is only a courier.
   the wallet (substitution protection).
 - A **key image cache** remembers which outputs the device has seen. It is
   bound to the wallet and protected against rollback (generation counter in
-  NVS), and the device warns about inputs already spent by an earlier
-  signature.
+  the sealed user directory), and the device warns about inputs already spent
+  by an earlier signature.
 - Address and private view key shown as text on the device.
 - PC requests for the address or the view-only data (address + private view
   key + restore height) with a plain Yes / No on the device.
@@ -167,6 +167,11 @@ explicit confirmation on the device screen. The PC program is only a courier.
   key mixed in between and at the end. The attempt
   counter is written before each check, and failed attempts back off
   exponentially (2 s … 10 min, kept across reboots).
+- **Users with their own passwords** (up to 32, 64 wallets each): each
+  password opens only its own wallets, nothing on the device lists the users
+  or their number, and a user can only be deleted with its own password. Made
+  for showing only part of the funds under coercion; what a flash dump still
+  shows is in [`tools/docs/security.md`](tools/docs/security.md) §4a.
 - **USB is enabled only after the correct password.**
 - Autolock (default 5 minutes): keys and passphrase are wiped from memory.
 - LVGL 9 user interface in **English**. Touch screens, and
@@ -245,7 +250,7 @@ libraries above, copy `lv_conf.h` next to the `lvgl` library folder, and set:
 | PSRAM | OPI PSRAM |
 | Flash Size | 16MB (8MB also fits) |
 | Partition Scheme | Custom (`partitions.csv`) |
-| Erase All Flash Before Sketch Upload | **Disabled** (NVS holds the wallets) |
+| Erase All Flash Before Sketch Upload | **Disabled** (NVS and the `storage` partition hold the wallets) |
 | Core Debug Level | None |
 
 Do **not** install `Adafruit TinyUSB`: TinyUSB ships with the ESP32 core. Full
@@ -427,6 +432,9 @@ On Linux, give your user access to the HID device with the udev rule from
   scratchpad, transaction secrets after signing, and the session on lock.
 - **Atomic password change**, with interrupted changes recovered on the next
   unlock.
+- **Users are unlinkable without their passwords**: one sealed directory file
+  per user, named after that user's key, among random decoy files of the same
+  size; no per-user data in NVS; one device-wide attempt counter.
 
 Known limitations (details in [`tools/docs/security.md`](tools/docs/security.md)):
 no secure boot or flash encryption by default; NVS encryption is limited under

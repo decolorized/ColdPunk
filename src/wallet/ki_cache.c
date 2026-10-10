@@ -8,17 +8,22 @@
 //                  count(u32 LE) || count * entry
 //     entry     := out_pub(32) || image(32) || major(u32) || minor(u32) || flags(1)
 //
+// File name (v9): "k" + 24 hex digits of HMAC(user key, "mw.ki.file" || id ||
+// variant), so the caches of different users neither collide nor can be told
+// apart without the password.
+//
 // Rollback (audit round 1): every save bumps `generation` and records it in
-// NVS ("kig<id><variant>"), a different store from the FAT file. A file whose
-// generation is BELOW the recorded one is an old copy put back - it would
-// hide SPENT flags - and is refused: the cache starts empty (the next key
-// image export rebuilds it) and mw_ki_cache_rolled_back() reports it. Files
-// written before this check (generation 0, nothing in NVS) are accepted.
-// Both stores are on the same flash, so this stops a file swap, not an
-// attacker who rewrites the whole flash image.
+// the user's sealed directory (wallet_entry_t.ki_gen; NVS "kig<id><variant>"
+// before v9). A file whose generation is BELOW the recorded one is an old
+// copy put back - it would hide SPENT flags - and is refused: the cache
+// starts empty (the next key image export rebuilds it) and
+// mw_ki_cache_rolled_back() reports it. Files written before this check
+// (generation 0) are accepted. This stops a file swap, not an attacker who
+// puts back the whole flash image.
 #include "ki_cache.h"
 #include "file_store.h"
 #include "secure_storage.h"
+#include "wallet_store.h"
 
 #include "../crypto/hash.h"
 #include "../crypto/memzero.h"
@@ -76,7 +81,30 @@ static void ki_free(void* p, size_t n)
     free(p);
 }
 
+// Name of the file under the installed user key ("" without a key).
 static void file_name(uint32_t id, uint8_t variant, char* out, size_t cap)
+{
+    static const char hx[] = "0123456789abcdef";
+    uint8_t d[5] = { (uint8_t)id, (uint8_t)(id >> 8), (uint8_t)(id >> 16),
+                     (uint8_t)(id >> 24), variant };
+    uint8_t mac[32];
+    out[0] = '\0';
+    if (cap < 26 || mw_secure_user_mac("mw.ki.file", d, sizeof d, mac) != MW_OK) return;
+    out[0] = 'k';
+    for (int i = 0; i < 12; i++) {
+        out[1 + 2 * i] = hx[mac[i] >> 4];
+        out[2 + 2 * i] = hx[mac[i] & 15];
+    }
+    out[25] = '\0';
+    mw_memzero(mac, sizeof mac);
+}
+
+void mw_ki_cache_file_name(uint32_t wallet_id, uint8_t variant, char* out, size_t cap)
+{
+    if (out && cap) file_name(wallet_id, variant, out, cap);
+}
+
+static void legacy_file_name(uint32_t id, uint8_t variant, char* out, size_t cap)
 {
     snprintf(out, cap, "ki_%08lx_%u.bin", (unsigned long)id, (unsigned)variant);
 }
@@ -86,30 +114,21 @@ static void seal_label(uint32_t id, uint8_t variant, char* out, size_t cap)
     snprintf(out, cap, "mw.ki.v1.%08lx.%u", (unsigned long)id, (unsigned)variant);
 }
 
-static void gen_key(uint32_t id, uint8_t variant, char* out, size_t cap)
+// NVS key of the generation kept by firmware before v9.
+static void legacy_gen_key(uint32_t id, uint8_t variant, char* out, size_t cap)
 {
     snprintf(out, cap, "kig%08lx%u", (unsigned long)id, (unsigned)variant);
 }
 
-// Generation recorded in NVS; 0 when none.
+// Generation recorded in the user directory; 0 when none.
 static uint32_t gen_stored(uint32_t id, uint8_t variant)
 {
-    char key[16];
-    uint8_t b[4];
-    size_t len = 0;
-    gen_key(id, variant, key, sizeof key);
-    if (mw_store_blob_read(key, b, sizeof b, &len) != MW_OK || len != 4) return 0;
-    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) |
-           ((uint32_t)b[3] << 24);
+    return mw_wallet_ki_gen(id, variant);
 }
 
 static mw_err_t gen_store(uint32_t id, uint8_t variant, uint32_t gen)
 {
-    char key[16];
-    uint8_t b[4] = { (uint8_t)gen, (uint8_t)(gen >> 8), (uint8_t)(gen >> 16),
-                     (uint8_t)(gen >> 24) };
-    gen_key(id, variant, key, sizeof key);
-    return mw_store_blob_write(key, b, sizeof b);
+    return mw_wallet_ki_gen_set(id, variant, gen);
 }
 
 static void account_hash(const mw_account_keys_t* keys, uint8_t out[32])
@@ -351,20 +370,24 @@ mw_err_t mw_ki_cache_save(void)
     return err;
 }
 
-void mw_ki_cache_rekey(uint32_t wallet_id, const uint8_t old_key[32],
-                       const uint8_t new_key[32])
+void mw_ki_cache_move(uint32_t wallet_id, const uint8_t old_key[32],
+                      const uint8_t new_key[32])
 {
-    char name[MW_FSTORE_NAME_MAX + 1], label[40];
+    char from[MW_FSTORE_NAME_MAX + 1], to[MW_FSTORE_NAME_MAX + 1], label[40];
     if (!old_key || !new_key) return;
     if (g.open && g.wallet_id == wallet_id) mw_ki_cache_close();
     for (uint8_t v = 0; v < 2; v++) {
         size_t size = 0, got = 0;
-        file_name(wallet_id, v, name, sizeof name);
-        if (mw_fstore_size(name, &size) != MW_OK) continue;
+        (void)mw_secure_user_key_set(old_key);
+        file_name(wallet_id, v, from, sizeof from);
+        (void)mw_secure_user_key_set(new_key);
+        file_name(wallet_id, v, to, sizeof to);
+        if (!from[0] || !to[0]) continue;
+        if (mw_fstore_size(from, &size) != MW_OK) continue;     // nothing (left) to move
         uint8_t* file = (size > KI_SEAL_HDR) ? (uint8_t*)ki_alloc(size) : NULL;
         uint8_t* plain = (size > KI_SEAL_HDR) ? (uint8_t*)ki_alloc(size) : NULL;
         bool ok = false;
-        if (file && plain && mw_fstore_read(name, file, size, &got) == MW_OK && got == size) {
+        if (file && plain && mw_fstore_read(from, file, size, &got) == MW_OK && got == size) {
             const size_t ct_len = size - KI_SEAL_HDR;
             seal_label(wallet_id, v, label, sizeof label);
             if (mw_secure_user_key_set(old_key) == MW_OK &&
@@ -373,21 +396,47 @@ void mw_ki_cache_rekey(uint32_t wallet_id, const uint8_t old_key[32],
                 mw_secure_user_key_set(new_key) == MW_OK &&
                 mw_seal(label, plain, ct_len, file, file + 16, file + KI_SEAL_HDR,
                         ct_len) == MW_OK &&
-                mw_fstore_write(name, file, size) == MW_OK) {
+                mw_fstore_write(to, file, size) == MW_OK) {
                 ok = true;
             }
         }
-        if (!ok && file && plain && got == size && size > KI_SEAL_HDR &&
-            mw_secure_user_key_set(new_key) == MW_OK &&
-            mw_unseal(label, file + KI_SEAL_HDR, size - KI_SEAL_HDR, file, file + 16,
-                      plain, size - KI_SEAL_HDR) == MW_OK) {
-            ok = true;                     // already under new_key (resumed re-key)
+        if (!ok) {
+            MW_LOGE("kicache", "key image cache of wallet %lu not moved: dropped",
+                    (unsigned long)wallet_id);
         }
-        if (!ok) (void)mw_fstore_remove(name);
+        (void)mw_fstore_remove(from);
         ki_free(file, size);
         ki_free(plain, size);
     }
     (void)mw_secure_user_key_set(new_key);
+}
+
+void mw_ki_cache_migrate_legacy(uint32_t wallet_id, uint32_t gen[2])
+{
+    char from[MW_FSTORE_NAME_MAX + 1], to[MW_FSTORE_NAME_MAX + 1], gk[16];
+    if (g.open && g.wallet_id == wallet_id) mw_ki_cache_close();
+    for (uint8_t v = 0; v < 2; v++) {
+        uint8_t b[4];
+        size_t len = 0;
+        legacy_gen_key(wallet_id, v, gk, sizeof gk);
+        if (mw_store_blob_read(gk, b, sizeof b, &len) == MW_OK && len == 4) {
+            const uint32_t x = (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+                               ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+            if (gen && x > gen[v]) gen[v] = x;
+        }
+        legacy_file_name(wallet_id, v, from, sizeof from);
+        file_name(wallet_id, v, to, sizeof to);
+        size_t size = 0, got = 0;
+        if (to[0] && mw_fstore_size(from, &size) == MW_OK) {
+            uint8_t* file = (uint8_t*)ki_alloc(size ? size : 1);
+            if (file && mw_fstore_read(from, file, size, &got) == MW_OK && got == size &&
+                mw_fstore_write(to, file, size) == MW_OK) {
+                (void)mw_fstore_remove(from);
+            }
+            ki_free(file, size ? size : 1);
+        }
+        (void)mw_store_blob_erase(gk);
+    }
 }
 
 mw_err_t mw_ki_cache_erase_wallet(uint32_t wallet_id)
@@ -396,10 +445,8 @@ mw_err_t mw_ki_cache_erase_wallet(uint32_t wallet_id)
     mw_err_t err = MW_OK;
     if (g.open && g.wallet_id == wallet_id) mw_ki_cache_close();
     for (uint8_t v = 0; v < 2; v++) {
-        char gk[16];
-        gen_key(wallet_id, v, gk, sizeof gk);
-        (void)mw_store_blob_erase(gk);
         file_name(wallet_id, v, name, sizeof name);
+        if (!name[0]) { err = MW_ERR_NOT_SUPPORTED; continue; }
         const mw_err_t e = mw_fstore_remove(name);
         if (e != MW_OK) err = e;
     }

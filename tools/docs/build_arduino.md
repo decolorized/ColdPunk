@@ -67,7 +67,7 @@ https://espressif.github.io/arduino-esp32/package_esp32_index.json
 | CPU Frequency | 240 MHz | Bulletproofs+ упирается в CPU |
 | Core Debug Level | None (для релиза) / Info (при отладке) | лог не должен содержать секретов |
 | USB DFU On Boot | Disabled | конфликтует с MSC |
-| Erase All Flash Before Sketch Upload | Disabled | иначе стирается NVS с кошельками |
+| Erase All Flash Before Sketch Upload | Disabled | иначе стираются NVS и раздел `storage` с кошельками |
 | Events Run On | Core 1 | — |
 | Flash Mode | QIO 80MHz | — |
 | Flash Size | **8MB (64Mb)** или 16MB | зависит от модуля |

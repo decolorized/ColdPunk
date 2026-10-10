@@ -5,8 +5,11 @@
 #define MW_FIRMWARE_VERSION      "0.1.0"
 #define MW_FIRMWARE_NAME         "Monero Cold Wallet"
 
-// TZ 7.1
-#define MAX_WALLETS              10
+// TZ 7.1. Per user (multi-user, v9): every user has a directory of its own.
+#define MAX_WALLETS              64
+// Users with their own password (Settings > Add user). Each user only sees
+// its own wallets; nothing shows how many users exist (security.md §4a).
+#define MW_USERS_MAX             32
 #define WALLET_NAME_LEN          32
 
 // TZ 5.10: input buffers are wiped after this long without a keypress.

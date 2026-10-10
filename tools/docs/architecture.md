@@ -185,7 +185,8 @@ malformed file can never blow the heap»).
 | `MW_MAX_EXPORTED_OUTPUTS` | 1000 | `monero/file_formats.h` |
 | `MW_MAX_KEYIMAGE_RECORDS` | 1000 | `config/app_config.h` |
 | `MW_UR_MAX_PARTS` | 512 | `transfer/ur.h` |
-| `MAX_WALLETS` | 10 | `config/app_config.h` |
+| `MAX_WALLETS` | 64 (на пользователя) | `config/app_config.h` |
+| `MW_USERS_MAX` | 32 | `config/app_config.h` |
 
 Грубая оценка `mw_transaction_t`: 16 входов × (кольцо 32 × 64 байта +
 служебное) — порядка 40 КБ на входы плюс мелочь. Это уже слишком много для
@@ -212,6 +213,25 @@ void  mw_session_lock(void);   // wipes keys and every scratch buffer
 Затирание — `mw_memzero` / `MW_ZERO` из `src/crypto/memzero.h`
 («Guaranteed-not-optimized-away zeroing»), сравнение — `mw_ct_equal`
 в постоянном времени.
+
+---
+
+## 3a. Хранение и пользователи (v9)
+
+| Где | Что | Модуль |
+| :--- | :--- | :--- |
+| NVS `devauth` | запись пароля: соль и раунды (общие для всех пользователей), verifier первого пользователя, счётчик попыток | `wallet/device_auth.c` |
+| NVS `settings`, `hw_kblk` | настройки устройства, номер блока eFuse | `wallet/secure_storage.cpp` |
+| FAT `u<24 hex>` | каталог пользователя: до 64 записей кошельков и поколения кэшей key images, запечатан ключом пользователя; рядом 3..10 файлов-пустышек того же размера | `wallet/wallet_store.c` |
+| FAT `k<24 hex>` | кэш key images кошелька (вариант без / с passphrase), имя — `HMAC(ключ пользователя, id, вариант)` | `wallet/ki_cache.c` |
+
+Имена файлов пользователя вычисляются из его ключа (`mw_secure_user_mac`),
+поэтому без пароля файлы разных пользователей не связать друг с другом.
+`mw_wallet_store_*` работают с каталогом пользователя, чей ключ установлен;
+`mw_device_auth_verify` после входа сбрасывает кэш каталога
+(`mw_wallet_store_close`). Каталог прошивок до v9 (NVS `wallets`, файлы
+`ki_<id>_<v>.bin`, поколения `kig…`) переносится первому пользователю при его
+первом входе. Подробно — `security.md` §4a, `device_password.md`.
 
 ---
 

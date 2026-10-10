@@ -40,6 +40,16 @@
 //   the re-key is resumed and the change completed. Nothing is ever sealed
 //   under a key whose password the record does not know.
 //
+// Users (v9)
+//   The record's salt and round count are the KDF parameters of EVERY user;
+//   its verifier belongs to the first user only. Any other password derives
+//   its key with the same parameters and is a user exactly when a sealed
+//   directory file named after that key exists (wallet_store.h). So a
+//   password costs one derivation however many users there are, and no list
+//   of users exists anywhere. A password change and the record upgrade keep
+//   the salt and the round count, since the other users' keys depend on
+//   them. The failed-attempt counter is the device's, shared by all users.
+//
 // SPDX-License-Identifier: MIT
 #include "device_auth.h"
 #include "secure_storage.h"
@@ -61,6 +71,8 @@ mw_err_t mw_store_blob_erase(const char* key);
 #define REC_VERSION  2
 #define REC_LEN_V1   58
 #define REC_LEN      MW_DEVICE_AUTH_REC_LEN
+#define REC_LEN_V2A  175                 // version 2 before v9 (no fails_total)
+#define CLEAN_PER_FORGIVE 10             // clean unlocks that lower fails_total by 1
 #define SALT_LEN     16
 #define VERIFIER_LEN 32
 
@@ -85,6 +97,8 @@ typedef struct {
     bool     present;
     params_t cur;
     uint8_t  fails;
+    uint8_t  fails_total;                // v9, see MW_DEVICE_PW_TOTAL_FREE
+    uint8_t  clean_streak;               // v9: unlocks without a failure in between
     bool     changing;
     params_t pend;
     uint8_t  wrap_new[32];
@@ -98,6 +112,8 @@ static uint32_t g_next_allowed_ms;       // mw_millis() value; 0 = no lockout
 // The RAM record is newer than storage: the last write of it failed. Retried
 // at the next verify() and at forget(), never from a getter.
 static bool     g_save_pending;
+// Who is logged in: the first user (record verifier) or another one.
+static bool     g_session_primary;
 
 // ---------------------------------------------------------------------------
 static void put_u32(uint8_t* p, uint32_t v) {
@@ -136,6 +152,8 @@ static mw_err_t rec_save(void) {
         memcpy(b + 111, g_rec.wrap_new, 32);
         memcpy(b + 143, g_rec.wrap_old, 32);
     }
+    b[175] = g_rec.fails_total;
+    b[176] = g_rec.clean_streak;
     mw_err_t e = mw_store_blob_write(REC_KEY, b, sizeof b);
     mw_memzero(b, sizeof b);
     return e;
@@ -162,7 +180,7 @@ static mw_err_t rec_load(void) {
         memcpy(g_rec.cur.salt, b + 9, SALT_LEN);
         memcpy(g_rec.cur.verifier, b + 25, VERIFIER_LEN);
         g_rec.fails = b[57];
-    } else if (b[4] == REC_VERSION && len == REC_LEN) {
+    } else if (b[4] == REC_VERSION && (len == REC_LEN || len == REC_LEN_V2A)) {
         const uint8_t fl   = b[58];
         g_rec.cur.version  = (fl & FLAG_CUR_V1) ? 1 : 2;
         g_rec.cur.hw_bound = (fl & FLAG_HW) != 0;
@@ -181,6 +199,8 @@ static mw_err_t rec_load(void) {
             memcpy(g_rec.wrap_old, b + 143, 32);
             if (g_rec.pend.rounds == 0) e = MW_ERR_FORMAT;
         }
+        g_rec.fails_total  = (len == REC_LEN) ? b[175] : g_rec.fails;
+        g_rec.clean_streak = (len == REC_LEN) ? b[176] : 0;
     } else {
         e = (b[4] > REC_VERSION) ? MW_ERR_VERSION : MW_ERR_FORMAT;
     }
@@ -226,10 +246,64 @@ static uint32_t delay_for(uint8_t fails) {
     return ms;
 }
 
-static void arm_lockout(void) {
+// The delay of the lifetime counter: none up to MW_DEVICE_PW_TOTAL_FREE,
+// then the same doubling as after the free tries.
+static uint32_t delay_now(void) {
     uint32_t d = delay_for(g_rec.fails);
+    if (g_rec.fails_total > MW_DEVICE_PW_TOTAL_FREE) {
+        const unsigned extra = (unsigned)g_rec.fails_total - MW_DEVICE_PW_TOTAL_FREE;
+        const uint32_t t = delay_for((uint8_t)(MW_DEVICE_PW_FREE_TRIES - 1 + (extra > 200 ? 200 : extra)));
+        if (t > d) d = t;
+    }
+    return d;
+}
+
+static void arm_lockout(void) {
+    uint32_t d = delay_now();
     g_next_allowed_ms = d ? (mw_millis() + d) : 0;
     if (g_next_allowed_ms == 0 && d) g_next_allowed_ms = 1;   // never confuse with "none"
+}
+
+// An attempt is counted and stored BEFORE the (slow, power-visible) check:
+// cutting the power once the result shows on the supply line no longer
+// saves an attempt. Returns the counters before, for attempt_back().
+typedef struct { uint8_t fails, total; } attempt_t;
+static attempt_t attempt_begin(void) {
+    const attempt_t a = { g_rec.fails, g_rec.fails_total };
+    if (g_rec.fails < 255) g_rec.fails++;
+    if (g_rec.fails_total < 255) g_rec.fails_total++;
+    (void)rec_commit();
+    return a;
+}
+// Not a wrong password (eFuse unavailable, I/O): the attempt is given back.
+static void attempt_back(attempt_t a) {
+    g_rec.fails = a.fails;
+    g_rec.fails_total = a.total;
+    (void)rec_commit();
+}
+// Success: the run of failures is over. The lifetime counter drops by one
+// only after CLEAN_PER_FORGIVE unlocks in a row without any failure; a
+// re-check inside a session (`unlock` false) never lowers it.
+static void attempt_ok(attempt_t a, bool unlock) {
+    g_rec.fails = 0;
+    g_rec.fails_total = a.total;
+    if (unlock) {
+        if (a.fails != 0) {
+            g_rec.clean_streak = 0;
+        } else if (++g_rec.clean_streak >= CLEAN_PER_FORGIVE) {
+            g_rec.clean_streak = 0;
+            if (g_rec.fails_total > 0) g_rec.fails_total--;
+        }
+    }
+    g_next_allowed_ms = 0;
+    (void)rec_commit();
+}
+// A "taken" answer costs a guess too.
+static void attempt_failed_now(void) {
+    if (g_rec.fails < 255) g_rec.fails++;
+    if (g_rec.fails_total < 255) g_rec.fails_total++;
+    (void)rec_commit();
+    arm_lockout();
 }
 
 bool mw_device_pw_weak(const char* pw) {
@@ -403,8 +477,10 @@ static mw_err_t hw_available(bool* bound) {
     return e;
 }
 
-// Fresh version-2 parameters for `pw`; *key receives its user key. Bound to
-// the chip whenever the eFuse key is provisioned.
+// Version-2 parameters for `pw`; *key receives its user key. Bound to the
+// chip whenever the eFuse key is provisioned. An existing version-2 record
+// keeps its salt and round count (every user's key depends on them); a
+// first record, or one of version 1, gets a fresh salt / the current count.
 static mw_err_t new_params(const char* pw, params_t* p, uint8_t key[32]) {
     bool bound = false;
     memset(p, 0, sizeof *p);
@@ -412,9 +488,25 @@ static mw_err_t new_params(const char* pw, params_t* p, uint8_t key[32]) {
     if (e != MW_OK) return e;
     p->version  = 2;
     p->hw_bound = bound;
-    p->rounds   = MW_DEVICE_PW_ROUNDS;
-    mw_random_bytes(p->salt, SALT_LEN);
+    if (g_rec.present && g_rec.cur.version == 2) {
+        p->rounds = g_rec.cur.rounds;
+        memcpy(p->salt, g_rec.cur.salt, SALT_LEN);
+    } else {
+        p->rounds = MW_DEVICE_PW_ROUNDS;
+        if (g_rec.present) memcpy(p->salt, g_rec.cur.salt, SALT_LEN);
+        else               mw_random_bytes(p->salt, SALT_LEN);
+    }
     return derive(pw, p, key, p->verifier);
+}
+
+// Other users may exist only on a record of version 2 bound to the chip;
+// they can log in while a change of the first user's password is pending
+// (it keeps the salt and the rounds), but none is added meanwhile.
+static bool users_login_possible(void) {
+    return g_rec.present && g_rec.cur.version == 2 && g_rec.cur.hw_bound;
+}
+static bool users_possible(void) {
+    return users_login_possible() && !g_rec.changing;
 }
 
 // wrap = key ^ HMAC-SHA256(other, tag); the same call unwraps.
@@ -448,11 +540,10 @@ mw_device_auth_state_t mw_device_auth_state(void) {
     (void)ensure_loaded();
     if (g_corrupt) return MW_AUTH_CORRUPT;
     if (g_rec.present) return MW_AUTH_SET;
-    // No record at all, but wallets: the record was lost (worn NVS page,
+    // No record at all, but user data: the record was lost (worn NVS page,
     // partial erase). Creating a password now would derive a different key
     // and orphan every wallet.
-    uint32_t wallets = 0;
-    if (mw_wallet_store_count(&wallets) != MW_OK || wallets != 0) return MW_AUTH_CORRUPT;
+    if (mw_wallet_store_any_data()) return MW_AUTH_CORRUPT;
     return MW_AUTH_NONE;
 }
 
@@ -486,6 +577,13 @@ mw_err_t mw_device_auth_set(const char* password) {
 
     e = rec_save();
     if (e == MW_OK) e = mw_secure_user_key_set(key);
+    if (e == MW_OK) {
+        mw_wallet_store_close();
+        (void)mw_wallet_store_user_create(key);    // MW_ERR_EXISTS cannot happen
+        (void)mw_wallet_store_mark_primary();
+        (void)mw_wallet_store_decoys_ensure();
+        g_session_primary = true;
+    }
     if (e != MW_OK) {
         memset(&g_rec, 0, sizeof g_rec);
         (void)mw_store_blob_erase(REC_KEY);
@@ -535,10 +633,18 @@ static mw_err_t switch_password(const params_t* next, const uint8_t old_key[32],
     prog_stage(MW_AUTH_STAGE_REKEY, 1);
     e = mw_wallet_store_rekey(old_key, new_key);   // step 2, idempotent
     prog_finish();
+    if (e != MW_OK && mw_wallet_store_rekey_committed()) {
+        // The wallets already belong to new_key: the record stays "changing"
+        // (both keys recoverable) and the next unlock finishes the change.
+        MW_LOGE("auth", "password change committed but not finished (%s): "
+                        "completed at the next unlock", mw_err_str(e));
+        mw_secure_user_key_clear();
+        mw_wallet_store_close();
+        return e;
+    }
     if (e != MW_OK) {
-        // Back to the old password: re-seal whatever was converted (also
-        // idempotent) and drop the pending part.
-        (void)mw_wallet_store_rekey(new_key, old_key);
+        // The re-key put everything back under old_key itself; drop the
+        // pending part.
         clear_pending();
         (void)rec_commit();
         (void)mw_secure_user_key_set(old_key);
@@ -561,11 +667,18 @@ static mw_err_t switch_password(const params_t* next, const uint8_t old_key[32],
 
 // Checks `password` against the record. On success *key holds the key of
 // the current password (after completing an interrupted change, if any).
-static mw_err_t check(const char* password, uint8_t key[32]) {
+// `cand` (may be NULL) receives the key the password derives with the
+// current parameters, also when it is not the first user's: the key another
+// user would have.
+static mw_err_t check(const char* password, uint8_t key[32], uint8_t cand[32]) {
     uint8_t ver[VERIFIER_LEN], other[32];
     prog_stage(MW_AUTH_STAGE_CHECK,
                (uint64_t)g_rec.cur.rounds + (g_rec.changing ? g_rec.pend.rounds : 0));
     mw_err_t e = derive(password, &g_rec.cur, key, ver);
+    if (cand) {
+        if (e == MW_OK) memcpy(cand, key, 32);
+        else            memset(cand, 0, 32);
+    }
     bool ok = (e == MW_OK) && mw_ct_equal(ver, g_rec.cur.verifier, VERIFIER_LEN) != 0;
 
     if (g_rec.changing) {
@@ -601,8 +714,9 @@ static mw_err_t check(const char* password, uint8_t key[32]) {
 static void maybe_upgrade(const char* password, const uint8_t key[32]) {
     bool bound = false;
     if (hw_available(&bound) != MW_OK) return;
-    const bool stale = g_rec.cur.version < 2 || g_rec.cur.rounds < MW_DEVICE_PW_ROUNDS ||
-                       (bound && !g_rec.cur.hw_bound);
+    // Not the round count of a version-2 record: the other users' keys
+    // depend on it (see the top of this file).
+    const bool stale = g_rec.cur.version < 2 || (bound && !g_rec.cur.hw_bound);
     if (!stale) return;
 
     params_t next;
@@ -630,44 +744,150 @@ mw_err_t mw_device_auth_verify(const char* password) {
     if (!password || !password[0]) return MW_ERR_INVALID_ARG;
     if (mw_device_auth_lockout_ms() > 0) return MW_ERR_ABORTED;
 
-    // The attempt is counted and stored BEFORE the (slow, power-visible)
-    // check: cutting the power once the result shows on the supply line no
-    // longer saves an attempt. A success clears the counter again below.
-    const uint8_t fails_before = g_rec.fails;
-    if (g_rec.fails < 255) g_rec.fails++;
-    (void)rec_commit();
+    // Counted before the check; a success clears it again below.
+    const attempt_t before = attempt_begin();
 
-    uint8_t key[32];
+    uint8_t key[32], cand[32], newer[32];
+    bool primary = true;
     const uint32_t t0 = mw_millis();
-    e = check(password, key);
+    e = check(password, key, cand);
+    if (e == MW_ERR_DECRYPT && users_login_possible() && !mw_ct_is_zero(cand, 32)) {
+        // Not the first user: another user when its directory exists. A
+        // directory left "superseded" by an interrupted change hands over
+        // the new key, under which the change is finished below.
+        uint8_t info = 0;
+        const mw_err_t pe = mw_wallet_store_user_probe(cand, &info, newer);
+        if (pe == MW_OK) {
+            if (info & MW_USER_SUPERSEDED) {
+                (void)mw_secure_user_key_set(cand);
+                mw_wallet_store_close();
+                if (mw_wallet_store_rekey(cand, newer) == MW_OK) memcpy(cand, newer, 32);
+                mw_secure_user_key_clear();
+                mw_wallet_store_close();
+            }
+            if (info & MW_USER_PRIMARY) {
+                // The first user's directory left behind by its own password
+                // change: only the record's (new) password opens it.
+                e = MW_ERR_DECRYPT;
+            } else {
+                primary = false;
+                memcpy(key, cand, 32);
+                e = MW_OK;
+            }
+        } else if (pe != MW_ERR_DECRYPT) {
+            e = pe;                       // storage fault: not a wrong password
+        }
+    }
+    mw_memzero(cand, sizeof cand);
+    mw_memzero(newer, sizeof newer);
     // For tuning MW_DEVICE_PW_ROUNDS on a given board (UART only: "[auth]"
     // lines never leave the device over USB).
     MW_LOGD("auth", "password check took %u ms (%u rounds)",
             (unsigned)(mw_millis() - t0), (unsigned)g_rec.cur.rounds);
     if (e == MW_ERR_DECRYPT) {
+        mw_memzero(key, sizeof key);
         arm_lockout();
         return MW_ERR_DECRYPT;
     }
     if (e != MW_OK) {
         // Not a wrong password (eFuse unavailable, re-key failure): give the
         // attempt back.
-        g_rec.fails = fails_before;
-        (void)rec_commit();
+        mw_memzero(key, sizeof key);
+        attempt_back(before);
         return e;
     }
 
     e = mw_secure_user_key_set(key);
     if (e != MW_OK) { mw_memzero(key, sizeof key); return e; }
+    mw_wallet_store_close();
+    g_session_primary = primary;
     // The counter was raised before the check, so the reset is always
     // written. The unlock itself never depends on the write: refusing it
     // would lock the owner out; a failed write is retried (retry_pending).
-    g_rec.fails = 0;
-    g_next_allowed_ms = 0;
-    (void)rec_commit();
+    attempt_ok(before, true);
 
-    maybe_upgrade(password, key);
+    if (primary) {
+        // Firmware before v9 kept the directory in NVS: move it first, the
+        // upgrade below re-keys the user's files.
+        if (mw_wallet_store_migrate_legacy() != MW_OK)
+            MW_LOGE("auth", "wallet directory not moved; will retry at the next unlock");
+        (void)mw_wallet_store_mark_primary();
+        maybe_upgrade(password, key);
+    }
+    if (mw_wallet_store_resume() != MW_OK)
+        MW_LOGE("auth", "interrupted password change not finished; will retry");
+    (void)mw_wallet_store_decoys_ensure();
     mw_memzero(key, sizeof key);
     return MW_OK;
+}
+
+// Checks that `password` is the logged-in user's (re-authentication for a
+// password change or for deleting the user). Counted like an unlock.
+// *key receives the user's key.
+static mw_err_t session_check(const char* password, uint8_t key[32]) {
+    uint8_t cur[32], cand[32];
+    mw_err_t e = ensure_loaded();
+    if (e != MW_OK) return e;
+    retry_pending();
+    if (!g_rec.present) return MW_ERR_NOT_SUPPORTED;
+    if (!password || !password[0]) return MW_ERR_INVALID_ARG;
+    if (mw_secure_user_key_copy(cur) != MW_OK) return MW_ERR_NOT_SUPPORTED;
+    if (mw_device_auth_lockout_ms() > 0) { mw_memzero(cur, sizeof cur); return MW_ERR_ABORTED; }
+    const attempt_t before = attempt_begin();
+
+    e = check(password, key, cand);
+    if (g_session_primary) {
+        if (e == MW_OK && !mw_ct_equal(key, cur, 32)) e = MW_ERR_DECRYPT;
+    } else if (e == MW_OK || e == MW_ERR_DECRYPT) {
+        // Another user's password (even the first user's) is not this one.
+        e = (!mw_ct_is_zero(cand, 32) && mw_ct_equal(cand, cur, 32)) ? MW_OK : MW_ERR_DECRYPT;
+        if (e == MW_OK) memcpy(key, cand, 32);
+    }
+    // check() may have finished an interrupted change of the first user and
+    // installed its key (and loaded its directory): the session key stays
+    // what it was, and its directory is read again from storage.
+    (void)mw_secure_user_key_set(cur);
+    mw_wallet_store_close();
+    mw_memzero(cur, sizeof cur);
+    mw_memzero(cand, sizeof cand);
+    if (e == MW_ERR_DECRYPT) {
+        mw_memzero(key, 32);
+        arm_lockout();
+        return e;
+    }
+    if (e != MW_OK) {
+        mw_memzero(key, 32);
+        attempt_back(before);
+        return e;
+    }
+    attempt_ok(before, false);
+    return MW_OK;
+}
+
+// The key `password` would have with the current parameters, and whether
+// it is taken: the first user's password or an existing directory.
+static mw_err_t key_for_new(const char* password, uint8_t key[32], params_t* next) {
+    uint8_t ver[VERIFIER_LEN];
+    mw_err_t e;
+    if (next) {
+        e = new_params(password, next, key);
+        memcpy(ver, next->verifier, VERIFIER_LEN);
+    } else {
+        e = derive(password, &g_rec.cur, key, ver);
+    }
+    if (e == MW_OK && g_rec.present && mw_ct_equal(ver, g_rec.cur.verifier, VERIFIER_LEN))
+        e = MW_ERR_EXISTS;
+    if (e == MW_OK) {
+        const mw_err_t pe = mw_wallet_store_user_probe(key, NULL, NULL);
+        if (pe == MW_OK)                e = MW_ERR_EXISTS;
+        else if (pe != MW_ERR_DECRYPT)  e = pe;      // storage fault
+    }
+    // "Taken" tells that some user has this password: as much as a login
+    // guess, so it costs a guess (counter and delay).
+    if (e == MW_ERR_EXISTS) attempt_failed_now();
+    mw_memzero(ver, sizeof ver);
+    if (e != MW_OK) mw_memzero(key, 32);
+    return e;
 }
 
 mw_err_t mw_device_auth_change(const char* old_password, const char* new_password) {
@@ -675,34 +895,103 @@ mw_err_t mw_device_auth_change(const char* old_password, const char* new_passwor
     if (e != MW_OK) return e;
     if (!g_rec.present) return MW_ERR_NOT_SUPPORTED;
     if (!password_ok(new_password)) return MW_ERR_INVALID_ARG;
+    if (!mw_secure_user_key_present()) {
+        // Not logged in (tests, or a caller outside the shell): log in first.
+        e = mw_device_auth_verify(old_password);
+        if (e != MW_OK) return e;
+    }
 
-    // The old password proves the caller may re-key; verify() also leaves the
-    // current user key installed, which the re-key needs.
-    e = mw_device_auth_verify(old_password);
-    if (e != MW_OK) return e;
-
-    uint8_t old_key[32], new_key[32], ver[VERIFIER_LEN];
+    uint8_t old_key[32], new_key[32];
     params_t next;
     memset(&next, 0, sizeof next);
-    prog_stage(MW_AUTH_STAGE_NEW, (uint64_t)g_rec.cur.rounds + MW_DEVICE_PW_ROUNDS);
-    e = derive(old_password, &g_rec.cur, old_key, ver);
-    mw_memzero(ver, sizeof ver);
-    if (e == MW_OK) e = new_params(new_password, &next, new_key);
-    if (e == MW_OK) e = switch_password(&next, old_key, new_key, false);
-
+    prog_stage(MW_AUTH_STAGE_NEW, (uint64_t)g_rec.cur.rounds * 2u);
+    e = session_check(old_password, old_key);
+    if (e == MW_OK) {
+        if (g_session_primary) {
+            e = key_for_new(new_password, new_key, &next);
+            if (e == MW_OK) e = switch_password(&next, old_key, new_key, false);
+        } else {
+            e = key_for_new(new_password, new_key, NULL);
+            if (e == MW_OK) {
+                prog_stage(MW_AUTH_STAGE_REKEY, 1);
+                e = mw_wallet_store_rekey(old_key, new_key);
+                prog_finish();
+                if (e == MW_ERR_DECRYPT) e = MW_ERR_FORMAT;
+            }
+        }
+    }
     mw_memzero(old_key, sizeof old_key);
     mw_memzero(new_key, sizeof new_key);
     mw_memzero(&next, sizeof next);
     return e;
 }
 
+mw_err_t mw_device_auth_add_user(const char* password) {
+    mw_err_t e = ensure_loaded();
+    if (e != MW_OK) return e;
+    if (!mw_secure_user_key_present()) return MW_ERR_NOT_SUPPORTED;
+    if (!users_possible()) return MW_ERR_NOT_SUPPORTED;
+    if (!password_ok(password) || strlen(password) < MW_DEVICE_PW_MIN_NEW)
+        return MW_ERR_INVALID_ARG;
+    if (mw_device_auth_lockout_ms() > 0) return MW_ERR_ABORTED;
+    const int files = mw_wallet_store_user_files();
+    if (files < 0) return MW_ERR_IO;
+    if (files >= MW_USER_FILES_MAX) return MW_ERR_TOO_MANY;
+
+    uint8_t key[32];
+    prog_stage(MW_AUTH_STAGE_NEW, g_rec.cur.rounds);
+    e = key_for_new(password, key, NULL);
+    prog_finish();
+    if (e == MW_OK) e = mw_wallet_store_user_create(key);
+    mw_memzero(key, sizeof key);
+    if (e == MW_OK) MW_LOGI("auth", "user added");
+    return e;
+}
+
+mw_err_t mw_device_auth_delete_user(const char* password) {
+    uint8_t key[32];
+    mw_err_t e = ensure_loaded();
+    if (e != MW_OK) return e;
+    if (g_rec.changing) return MW_ERR_NOT_SUPPORTED;
+    prog_stage(MW_AUTH_STAGE_CHECK, g_rec.cur.rounds);
+    e = session_check(password, key);
+    mw_memzero(key, sizeof key);
+    if (e != MW_OK) return e;
+    e = mw_wallet_store_user_destroy();
+    if (e != MW_OK) return e;
+    if (g_session_primary) {
+        // The record stays (its salt and round count are every user's), but
+        // no password matches its verifier any more.
+        mw_random_bytes(g_rec.cur.verifier, VERIFIER_LEN);
+        e = rec_commit();
+    }
+    MW_LOGI("auth", "user deleted");
+    mw_device_auth_forget();
+    return e;
+}
+
+mw_err_t mw_device_auth_check(const char* password) {
+    uint8_t key[32];
+    const mw_err_t e = session_check(password, key);
+    mw_memzero(key, sizeof key);
+    return e;
+}
+
+bool mw_device_auth_users_possible(void) {
+    return ensure_loaded() == MW_OK && users_possible();
+}
+
 void mw_device_auth_forget(void) {
     retry_pending();
     mw_secure_user_key_clear();
+    mw_wallet_store_close();
+    g_session_primary = false;
 }
 
 mw_err_t mw_device_auth_erase(void) {
     mw_secure_user_key_clear();
+    mw_wallet_store_close();
+    g_session_primary = false;
     memset(&g_rec, 0, sizeof g_rec);
     g_next_allowed_ms = 0;
     g_save_pending    = false;

@@ -42,7 +42,9 @@ extern "C" {
 #define MW_DEVICE_PW_ROUNDS   200000u
 #endif
 #define MW_DEVICE_PW_HW_STEPS 8           // eFuse HMAC passes inside the KDF
-#define MW_DEVICE_AUTH_REC_LEN 175        // record size in storage (version 2)
+#define MW_DEVICE_AUTH_REC_LEN 177        // record size in storage (version 2;
+                                          // 175 before v9: no fails_total,
+                                          // clean_streak)
 
 typedef enum {
     MW_AUTH_NONE = 0,     // no password record (first start)
@@ -53,6 +55,12 @@ typedef enum {
 } mw_device_auth_state_t;
 #define MW_DEVICE_PW_FREE_TRIES  3        // failures before the delay kicks in
 #define MW_DEVICE_PW_MAX_DELAY_MS (10u * 60u * 1000u)
+// v9: failures are also kept in a counter that a successful unlock does not
+// clear (only ten unlocks in a row without any failure lower it by one; a
+// password re-check inside a session never does). Above MW_DEVICE_PW_TOTAL_FREE it sets a delay of its own, so
+// knowing one user's password does not allow unlimited guesses at another's
+// by logging in between the guesses.
+#define MW_DEVICE_PW_TOTAL_FREE  6
 
 // Progress of the slow parts (the key derivation takes seconds on the
 // device). Called on the task that runs verify()/set()/change(), at most once
@@ -100,11 +108,35 @@ bool     mw_device_auth_save_pending(void);
 uint32_t mw_device_auth_lockout_ms(void);
 uint8_t  mw_device_auth_failed_attempts(void);
 
-// Verifies `old_password`, re-seals every wallet under the key derived from
-// `new_password` and stores the new record. Everything or nothing.
+// Changes the logged-in user's password (the first user's or another's):
+// re-checks `old_password` against that user, re-seals its wallets under the
+// key derived from `new_password` and, for the first user, stores the new
+// record. Everything or nothing. MW_ERR_EXISTS: the new password is taken.
 // MW_ERR_DECRYPT means only a wrong old password; a wallet record that does
 // not unseal during the re-key is reported as MW_ERR_FORMAT.
 mw_err_t mw_device_auth_change(const char* old_password, const char* new_password);
+
+// ---- users (v9, see device_auth.c) ----------------------------------------
+// Adds a user with its own password while someone is logged in; the new
+// user's wallets are only reachable with that password, and nothing shows
+// that it exists. Rules as for a new password (8..64).
+//   MW_ERR_EXISTS        the password is taken (the first user's or another);
+//                        counted as a failed attempt, since it tells as much
+//                        as a login guess
+//   MW_ERR_ABORTED       a lockout delay is running
+//   MW_ERR_TOO_MANY      no room for another user
+//   MW_ERR_NOT_SUPPORTED nobody logged in, or the record is not settled
+//                        (version 2, bound to the chip, no change pending)
+mw_err_t mw_device_auth_add_user(const char* password);
+// Deletes the logged-in user after re-checking its password: its wallets,
+// key image caches and directory. The first user's record stays (the other
+// users need its parameters) with a verifier no password matches. Logs out.
+mw_err_t mw_device_auth_delete_user(const char* password);
+// Re-checks that `password` is the logged-in user's (counted like an
+// unlock; another user's password is "wrong" here). Never switches users.
+mw_err_t mw_device_auth_check(const char* password);
+// Whether add_user() is possible now.
+bool     mw_device_auth_users_possible(void);
 
 // Drops the in-RAM user key (power-off, "lock device").
 void     mw_device_auth_forget(void);

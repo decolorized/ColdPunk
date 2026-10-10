@@ -83,6 +83,13 @@ mw_err_t mw_secure_hw_hmac(const uint8_t* msg, size_t len, uint8_t out[32], bool
 mw_err_t mw_secure_user_key_set(const uint8_t key[32]);
 void     mw_secure_user_key_clear(void);
 bool     mw_secure_user_key_present(void);
+// HMAC-SHA256(user key, label || data), len(label) + len <= 96. Names the
+// files of the user that is logged in (multi-user: they are unlinkable
+// without the key). MW_ERR_NOT_SUPPORTED without a user key.
+mw_err_t mw_secure_user_mac(const char* label, const uint8_t* data, size_t len,
+                            uint8_t out[32]);
+// A copy of the installed user key (to restore it after a temporary switch).
+mw_err_t mw_secure_user_key_copy(uint8_t out[32]);
 
 // AES-256-GCM using a key derived from the eFuse HMAC over `label`, mixed
 // with the user key.

@@ -986,7 +986,8 @@ MW_TEST(test_ki_cache_rollback_and_full)
     char name[40];
     size_t size = 0, got = 0;
     mw_ki_entry_t e;
-    snprintf(name, sizeof name, "ki_%08lx_0.bin", (unsigned long)g_id);
+    mw_ki_cache_file_name(g_id, 0, name, sizeof name);
+    CHECK(name[0] == 'k');
 
     CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
     CHECK(!mw_ki_cache_rolled_back());

@@ -95,7 +95,8 @@ typedef enum {
     // up from the wordlist would otherwise be read as "user asked to restart"
     // and would silently wipe the phrase the user had already typed.
     MW_KB_BACK             = -19,   // step back to the previous word
-    MW_KB_RESTART          = -20    // very-long Back: clear the whole phrase
+    MW_KB_RESTART          = -20,   // very-long Back: clear the whole phrase
+    MW_ERR_EXISTS          = -21    // already there (e.g. a password in use)
 } mw_err_t;
 
 const char* mw_err_str(mw_err_t err);
