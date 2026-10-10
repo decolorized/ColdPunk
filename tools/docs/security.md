@@ -164,7 +164,7 @@ configured correctly.
   never sees unauthenticated plaintext.
 * Verified against the AES-256 GCM test vectors (McGrew–Viega / NIST SP 800-38D
   test cases 13–18), a GMAC case, a 16-byte-IV case and the FIPS-197 Appendix
-  C.3 block vector. See `test/test_wallet_store.c`.
+  C.3 block vector. See `tools/test/test_wallet_store.c`.
 * `MW_AES_GCM_USE_MBEDTLS` switches the device build to mbedTLS (hardware AES).
   The portable path stays the reference and is what the host tests exercise.
 

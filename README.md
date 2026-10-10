@@ -481,7 +481,9 @@ make ASAN=1 run          # with AddressSanitizer + UBSan
 The suites cover cryptographic test vectors, seed encoding (including
 upstream polyseed vectors and a Cake/Cupcake encrypted phrase), passphrases,
 deterministic signatures, the Feather file formats end to end, the USB
-protocol, the device password and storage failure cases. On Windows,
+protocol, the SD card file logic (file kinds, ordering, result and safe file
+names), the device password (including weak-password rules) and storage
+failure cases. On Windows,
 [w64devkit](https://github.com/skeeto/w64devkit) is enough.
 
 The PC courier has its own tests against a simulated device
@@ -498,12 +500,12 @@ tested on the host, and the stagenet procedure, are listed in
 | :--- | :--- |
 | [`tools/docs/user_guide.md`](tools/docs/user_guide.md) | user guide (RU) |
 | [`tools/docs/security.md`](tools/docs/security.md) | threat model, key hierarchy, eFuse provisioning, limitations |
-| [`tools/docs/device_password.md`](tools/docs/device_password.md) | device password scheme and record format |
+| [`tools/docs/device_password.md`](tools/docs/device_password.md) | device password scheme, record format, password rules, eFuse requirement |
 | [`tools/docs/usb_link_protocol.md`](tools/docs/usb_link_protocol.md) | mwlink protocol 3 (RU) |
-| [`tools/docs/architecture.md`](tools/docs/architecture.md) | layers, FreeRTOS tasks, memory budget, data flows (RU) |
+| [`tools/docs/architecture.md`](tools/docs/architecture.md) | layers, FreeRTOS tasks, memory budget, data flows over USB and the SD card (RU) |
 | [`tools/docs/ui_screens.md`](tools/docs/ui_screens.md) | screens and navigation |
 | [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md) | build settings in detail (RU) |
-| [`tools/docs/testing.md`](tools/docs/testing.md) | host tests and stagenet checklist (RU) |
+| [`tools/docs/testing.md`](tools/docs/testing.md) | host tests, on-device checklist (incl. SD card), stagenet procedure (RU) |
 | [`boards/README.md`](boards/README.md) | board headers and adding a board |
 
 ---

@@ -11,7 +11,7 @@
 ```mermaid
 graph TD
     UI["ui/<br/>ui.h, i18n.h<br/>LVGL-экраны, клавиатуры"]
-    TR["transfer/<br/>transfer.h, ur.h<br/>SD / USB / QR"]
+    TR["transfer/<br/>transfer.h, link.h, sd_files.h<br/>USB (Serial/HID), SD"]
     FF["monero/file_formats.h<br/>конверт: magic|iv|ct|sig"]
     MC["monero/<br/>keys, mnemonic, address,<br/>key_image, tx, clsag,<br/>bulletproof_plus, sign, serialize"]
     CR["crypto/<br/>hash, ed25519, chacha,<br/>random, memzero"]
@@ -53,7 +53,7 @@ UI сверху дирижирует сценариями.
 
 Практическое следствие этого правила: `crypto/`, `monero/`, `data/` и
 `transfer/ur.c` компилируются обычным `gcc` на хосте — именно этот набор
-перечислен в `CORE_SRC` в `test/Makefile`. Всё, что тянет Arduino или
+перечислен в `CORE_SRC` в `tools/test/Makefile`. Всё, что тянет Arduino или
 железо, из хостовой сборки исключено.
 
 ### Платформозависимость
@@ -73,6 +73,7 @@ UI сверху дирижирует сценариями.
 | :--- | :--- | :--- | :--- | :--- |
 | UI | `MW_UI_TASK_CORE` = 0 | `MW_UI_TASK_PRIO` = 2 | `MW_UI_TASK_STACK` = 8192 | `lv_timer_handler()`, опрос тача/кнопок, отрисовка |
 | Crypto | `MW_CRYPTO_TASK_CORE` = 1 | `MW_CRYPTO_TASK_PRIO` = 3 | `MW_CRYPTO_TASK_STACK` = 32768 | оболочка `mw_shell_run()`: игра, пароль, меню, разбор файлов, key images, Bulletproofs+, CLSAG |
+| `sd_watch` | любое | 1 | 8192 | только пока открыт список **SD card files**: раз в 500 мс проверяет карту (сырое чтение сектора 0, мимо кэша FAT; пин детекта, если он есть на плате), при извлечении размонтирует, при установке монтирует; сам завершается после первого изменения |
 
 Цель разделения (ТЗ 4.1): пока криптозадача считает Bulletproofs+ несколько
 секунд, экран продолжает перерисовываться, и заявленные ≥ 20 FPS
@@ -206,8 +207,7 @@ void  mw_session_lock(void);   // wipes keys and every scratch buffer
 
 Эти буферы должны быть во внутреннем SRAM, а не в PSRAM: PSRAM у ESP32-S3
 внешний, и его содержимое проще снять физически. В заголовках это
-требование не закреплено — его нужно обеспечить в реализации
-(см. `docs/compliance_matrix.md`, раздел 8).
+требование не закреплено — его нужно обеспечить в реализации.
 
 Затирание — `mw_memzero` / `MW_ZERO` из `src/crypto/memzero.h`
 («Guaranteed-not-optimized-away zeroing»), сравнение — `mw_ct_equal`
@@ -298,6 +298,66 @@ sequenceDiagram
 
 Точка входа — `mw_shell_run()` (`src/ui/flows.cpp`); логика файлов —
 `src/wallet/wallet_ops.c` (тестируется на хосте целиком).
+
+---
+
+## 5a. Поток данных: обмен через SD-карту
+
+Тот же разбор и та же подпись, что при обмене по USB, но файл берётся с
+карты, а результат пишется на карту. Канал включается двумя флагами:
+`HAS_SD` в заголовке платы (есть ли слот) и `MW_USE_SD` в `app_config.h`
+(собирать ли поддержку).
+
+| Часть | Файл | Что делает |
+| :--- | :--- | :--- |
+| Драйвер | `src/hal/sdcard.cpp` | SD_MMC (SDIO, ES3C28P, `MW_SD_SDMMC`) или SPI (Touch-LCD-2: общая шина с дисплеем, `MW_SPI_BUS_SHARED`); FAT32 с длинными именами, файлы до 256 КиБ; все пути проходят `sd_path()` (длина ограничена, ведущий `/`, без `..` и `\`) |
+| Монтирование | `mw_sd_ensure()` / `mw_sd_release()` | карта смонтирована только на время работы с ней; после каждой записи — размонтирование, чтобы кэш FAT ушёл на карту до того, как её вынут |
+| Слежение | `mw_sd_watch_start/stop/changed()` | задача `sd_watch` (раздел 2) |
+| Логика (хост) | `src/transfer/sd_files.c` | вид файла по magic (`mw_sdf_kind`), время из имени Feather, сортировка «новые сверху», имя результата, безопасное имя файла, имя view-only файла, текст `ColdPunk_readme.txt` |
+| Сценарий | `src/ui/flows.cpp` | `sd_files_menu`, `sd_scan`, `sd_process`, `sd_export_view_key` |
+| Экран | `src/ui/screen_sd.cpp` | список с пустым состоянием; возвращает `MW_SD_LIST_CHANGED`, когда карта пропала или появилась |
+
+```mermaid
+sequenceDiagram
+    participant PC as ПК (Feather)
+    participant C as Карта (корень)
+    participant W as sd_watch
+    participant S as flows.cpp (криптозадача)
+    participant O as wallet_ops.c
+
+    PC->>C: <кошелёк>_<ts>_outputs / <ts>_unsigned_monero_tx
+    S->>C: mw_sd_ensure, ColdPunk_readme.txt при отсутствии, список корня
+    S->>S: sd_scan: первые 64 байта -> mw_sdf_kind, сортировка
+    S->>W: mw_sd_watch_start (список на экране)
+    W-->>S: MW_SD_LIST_CHANGED (вынули / вставили)
+    S->>C: mw_sd_read_file (выбранный файл)
+    S->>O: handle_outputs / handle_unsigned (как по USB)
+    O->>C: результат рядом с исходным, дата исходного, mw_sd_release
+    C->>PC: <..>_keyImages / <..>_signed_monero_tx
+```
+
+1. **Список.** Читается только корень карты, не больше 64 записей. Остаются
+   файлы размером 1 байт .. `MW_TRANSFER_MAX_FILE`, у которых magic — выходы
+   Feather или неподписанный набор. Порядок: дата FAT, если её поставил ПК
+   (не раньше 2000 года), иначе время из имени Feather, иначе 0.
+   Обработанный файл помечается *done*: рядом уже лежит его результат.
+2. **Обработка.** На время работы линк получает состояние BUSY, чтобы ПК не
+   прислал файл по USB. Дальше — те же `handle_outputs` / `handle_unsigned`,
+   что для inbox USB (разделы 4 и 5), только приёмник результата другой
+   (`sd_sink_put`).
+3. **Результат.** Имя строит `mw_sdf_result_name` (`_outputs` → `_keyImages`,
+   `unsigned_monero_tx` → `signed_monero_tx`, иначе суффикс). Часов у
+   устройства нет, поэтому результат получает дату исходного файла
+   (`mw_sd_set_mtime`). Сразу после записи карта размонтируется.
+4. **View key.** `sd_export_view_key` после предупреждения пишет
+   `<безопасное имя>_viewonly.txt` (`_2`, `_3`… если имя занято), текст
+   строит `mw_ops_viewonly_text`; буфер затирается после записи.
+5. **Выход.** Покидая меню, устройство размонтирует карту: вне списка она не
+   смонтирована.
+
+Seed, passphrase и private spend key на карту не пишутся никогда; на карту
+попадают только результаты, которые пользователь подтвердил на экране, и
+view-only файл после отдельного предупреждения.
 
 ---
 

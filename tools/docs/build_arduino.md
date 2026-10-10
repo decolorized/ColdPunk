@@ -63,7 +63,7 @@ https://espressif.github.io/arduino-esp32/package_esp32_index.json
 | Пункт меню Tools | Значение | Почему |
 | :--- | :--- | :--- |
 | Board | ESP32S3 Dev Module | ТЗ 1.4: только S3 |
-| USB CDC On Boot | **Enabled** (рекомендуется; собирается при любом значении) | `Serial` = USB CDC несёт протокол программы на ПК, консоль уходит на UART0. При Disabled протокол идёт по UART0, а консоль UART0 отключается. Таблица режимов — `docs/usb_link_protocol.md` §1 |
+| USB CDC On Boot | **Enabled** (рекомендуется; собирается при любом значении) | `Serial` = USB CDC несёт протокол программы на ПК, консоль уходит на UART0. При Disabled протокол идёт по UART0, а консоль UART0 отключается. Таблица режимов — `usb_link_protocol.md` §1 |
 | CPU Frequency | 240 MHz | Bulletproofs+ упирается в CPU |
 | Core Debug Level | None (для релиза) / Info (при отладке) | лог не должен содержать секретов |
 | USB DFU On Boot | Disabled | конфликтует с MSC |
@@ -241,8 +241,8 @@ mw_err_t mw_unseal(const char* label, const uint8_t* ct, size_t ct_len,
 — «AES-256-GCM using a key derived from the eFuse HMAC over `label`», а
 `wallet_entry_t` хранит уже зашифрованный `encrypted_seed[64]` с `seed_iv[16]`
 и `seed_tag[16]`. То есть seed защищён независимо от того, зашифрован ли сам
-NVS. Это осознанный компромисс, а не выполнение ТЗ 8.1 дословно; он отмечен
-как «частично» в `docs/compliance_matrix.md`.
+NVS. Это осознанный компромисс, а не выполнение ТЗ 8.1 дословно (см. также
+`security.md`).
 
 ### Прошивка eFuse-ключа
 
@@ -337,7 +337,7 @@ build.extra_flags=-DMW_BOARD_HEADER="\"../boards/es3c28p.h\""
 Проверка того, что подключилось, — во время выполнения через
 `mw_hal_caps()->board_name` (`src/hal/hal.h`).
 
-Добавление своей платы — `docs/adding_boards.md`.
+Добавление своей платы — `boards/README.md`.
 
 ---
 
@@ -387,7 +387,7 @@ void setup() {
 | Дисплей чёрный на GPIO 35–37 | эти пины заняты OPI PSRAM | перенести на другие GPIO |
 | `TOUCH_INT` и `CAM_PIN_SIOC` конфликтуют | в таблице ТЗ 2.2 оба = 39 | см. комментарий в `boards/es3c28p.h` |
 | Watchdog при подписи | тяжёлый счёт в `loop()` / задаче UI | считать на криптозадаче, `MW_CRYPTO_TASK_CORE` = 1 |
-| Переполнение стека криптозадачи | `mw_transaction_t` на стеке | размещать в куче/PSRAM, см. `docs/architecture.md` §3 |
+| Переполнение стека криптозадачи | `mw_transaction_t` на стеке | размещать в куче/PSRAM, см. `architecture.md` §3 |
 | Wi-Fi/BT внезапно линкуются | включён `MW_ENABLE_WIFI`/`MW_ENABLE_BT` | `app_config.h` выдаёт `#error` — так и задумано (ТЗ 8.4) |
 
 ---
@@ -397,8 +397,8 @@ void setup() {
 Тесты собираются обычным `gcc` и Arduino IDE для них не нужен:
 
 ```
-cd test
+cd tools/test
 make run
 ```
 
-Подробности — `docs/testing.md`.
+Подробности — `testing.md`.
