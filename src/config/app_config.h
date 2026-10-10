@@ -38,6 +38,32 @@
 // TZ 8.1: the eFuse key block of the wallet key is chosen at provisioning
 // (the highest free one, BLOCK_KEY5 down) - see secure_storage.cpp.
 
+// ---------------------------------------------------------------------------
+// Exchange interfaces with the PC, chosen at compile time. 1 = built in,
+// 0 = left out entirely (no code, nothing listens). Change them here or pass
+// -DMW_USE_SERIAL=0 etc. as a build flag. At least one must stay on.
+//
+//   MW_USE_SERIAL  mwlink over `Serial`: the USB CDC port ("USB CDC On Boot:
+//                  Enabled") or UART0 (disabled). Used by tools/mwlink.
+//   MW_USE_HID     mwlink over USB HID (needs "USB Mode: USB-OTG").
+//                  Used by MoneroPunkSigner.
+//   MW_USE_SD      microSD file exchange, on boards whose header has
+//                  HAS_SD 1 (ES3C28P, Touch-LCD-2). 0 also gives the
+//                  display its own SPI bus back on shared-bus boards.
+//
+// With MW_USE_SERIAL 0, also set "USB CDC On Boot: Disabled" if no COM port
+// should appear at all; UART0 then carries the text log only.
+// ---------------------------------------------------------------------------
+#ifndef MW_USE_SERIAL
+#define MW_USE_SERIAL 0
+#endif
+#ifndef MW_USE_HID
+#define MW_USE_HID    1
+#endif
+#ifndef MW_USE_SD
+#define MW_USE_SD     1
+#endif
+
 // TZ 8.4: no networking is ever compiled in.
 #if defined(MW_ENABLE_WIFI) || defined(MW_ENABLE_BT)
 #error "Air-gapped build: Wi-Fi/BT must not be enabled"

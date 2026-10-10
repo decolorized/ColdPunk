@@ -18,6 +18,7 @@
 #include <stddef.h>
 
 #include "hal.h"
+#include "../config/app_config.h"     // MW_USE_SERIAL / MW_USE_HID / MW_USE_SD
 
 // ===========================================================================
 // 1. board_config.h resolution (TZ 2.1 - manual selection, no auto-detect)
@@ -192,6 +193,15 @@
 // Storage / power / misc.
 #ifndef HAS_SD
 #define HAS_SD 0
+#endif
+// The slot is used only when the build wants it (app_config.h MW_USE_SD).
+#if !MW_USE_SD
+#undef  HAS_SD
+#define HAS_SD 0
+#endif
+// A wallet that cannot exchange files with the PC is of no use.
+#if !MW_USE_SERIAL && !MW_USE_HID && !HAS_SD
+#error "No exchange interface: enable MW_USE_SERIAL, MW_USE_HID or MW_USE_SD (on a board with HAS_SD)"
 #endif
 #ifndef SD_CS
 #define SD_CS -1

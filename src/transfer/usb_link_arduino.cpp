@@ -60,13 +60,18 @@ void     mw_usb_link_stop(void);
 bool     mw_usb_link_running(void);
 }
 
-#if defined(MW_USB_TINYUSB)
+// app_config.h: MW_USE_HID / MW_USE_SERIAL leave a transport out entirely.
+#if defined(MW_USB_TINYUSB) && MW_USE_HID
 #  include <USB.h>
 #  include <USBHID.h>
 #  define MW_LINK_HAVE_HID 1
 #else
 #  define MW_LINK_HAVE_HID 0
 #endif
+#if MW_USE_HID && !defined(MW_USB_TINYUSB) && !MW_USE_SERIAL
+#  warning "MW_USE_HID needs USB Mode = USB-OTG (TinyUSB); with MW_USE_SERIAL 0 the device has no USB link"
+#endif
+#define MW_LINK_HAVE_SERIAL (MW_USE_SERIAL ? 1 : 0)
 
 // `Serial` is UART0 when the IDE routes the USB CDC nowhere; then the
 // protocol owns UART0 and hal_esp32.cpp installs no UART console.
@@ -249,6 +254,10 @@ bool host_active(uint32_t last_rx_ms) {
 void serial_host_gone() { g_link.last_serial_rx_ms = 0; }
 
 bool send_serial(const uint8_t* msg, size_t len, uint32_t deadline_ms) {
+#if !MW_LINK_HAVE_SERIAL
+    (void)msg; (void)len; (void)deadline_ms;
+    return false;                        // built without the serial transport
+#else
     if (!MW_LINK_SERIAL) { serial_host_gone(); return false; }
     size_t n = mw_link_serial_frame(msg, len, g_link.tx_frame, g_link.tx_frame_cap);
     if (n == 0) return false;
@@ -269,6 +278,7 @@ bool send_serial(const uint8_t* msg, size_t len, uint32_t deadline_ms) {
     }
     MW_LINK_SERIAL.flush();
     return true;
+#endif
 }
 
 #if MW_LINK_HAVE_HID
@@ -408,6 +418,7 @@ void link_task(void* arg) {
         bool idle = true;
 
         // ---- serial ------------------------------------------------------
+#if MW_LINK_HAVE_SERIAL
         int avail = MW_LINK_SERIAL.available();
         while (avail > 0) {
             size_t want = (size_t)avail < sizeof(chunk) ? (size_t)avail : sizeof(chunk);
@@ -427,6 +438,7 @@ void link_task(void* arg) {
             }
             avail = MW_LINK_SERIAL.available();
         }
+#endif
 
         // ---- hid ---------------------------------------------------------
 #if MW_LINK_HAVE_HID
@@ -459,6 +471,10 @@ extern "C" bool mw_usb_link_running(void) { return g_link.running; }
 
 extern "C" mw_err_t mw_usb_link_init(void) {
     if (g_link.running) return MW_OK;
+#if !MW_LINK_HAVE_SERIAL && !MW_LINK_HAVE_HID
+    MW_LOGI("link", "built without a USB transport (MW_USE_SERIAL / MW_USE_HID)");
+    return MW_ERR_NOT_SUPPORTED;
+#endif
 
     if (!g_link.mutex) {
         g_link.mutex = xSemaphoreCreateMutex();
@@ -486,10 +502,12 @@ extern "C" mw_err_t mw_usb_link_init(void) {
 
     // The standard Serial. begin() is harmless when the core already opened
     // it (CDC On Boot); on UART0 it sets the baud rate the host must use.
+    uint8_t caps = 0;
+#if MW_LINK_HAVE_SERIAL
     MW_LINK_SERIAL.begin(115200);
     MW_LINK_SERIAL.setTimeout(5);
-
-    uint8_t caps = MW_LINK_CAP_SERIAL;
+    caps |= MW_LINK_CAP_SERIAL;
+#endif
 #if MW_LINK_HAVE_HID
     memset(&g_ring, 0, sizeof(g_ring));
     g_hid.begin();
@@ -520,7 +538,8 @@ extern "C" mw_err_t mw_usb_link_init(void) {
     }
 
     mw_link_set_up(true, caps);
-    MW_LOGI("link", "up: serial%s", (caps & MW_LINK_CAP_HID) ? " + hid" : " only");
+    MW_LOGI("link", "up:%s%s", (caps & MW_LINK_CAP_SERIAL) ? " serial" : "",
+            (caps & MW_LINK_CAP_HID) ? " hid" : "");
     return MW_OK;
 }
 

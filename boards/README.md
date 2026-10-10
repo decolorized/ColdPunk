@@ -122,6 +122,11 @@ top of the file. Every board here follows it.
 `HAS_TOUCH`, `HAS_SD`, `HAS_CAMERA`, `HAS_BUTTONS`, `HAS_PSRAM`,
 `PSRAM_SIZE_MB`, `HAS_HMAC`, `HAS_USB_OTG`, `DEFAULT_SEED_INPUT_MODE`.
 
+`HAS_SD` says that the board HAS a usable slot; whether the firmware uses it
+is a build option, `MW_USE_SD` in `src/config/app_config.h` (default 1). With
+`MW_USE_SD 0` the slot is treated as absent (`HAS_SD` becomes 0), and on a
+shared-bus board the display gets the faster exclusive SPI backend back.
+
 `DISPLAY_WIDTH` × `DISPLAY_HEIGHT` is the **physical** panel — its size at
 rotation 0, as in the datasheet (240×320 for a 2.8" ILI9341 or a 2" ST7789T3),
 whatever `DISPLAY_ROTATION` is. The logical size the UI uses is not written

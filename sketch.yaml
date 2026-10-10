@@ -60,4 +60,23 @@ profiles:
       - compiler.cpp.extra_flags=-I"{build.source.path}"
     # port: COM5
 
+  # HID only: no mwlink on Serial and no USB CDC port. MoneroPunkSigner and
+  # tools/mwlink (HID is its default) work as usual; `mwlink --serial` does
+  # not. UART0 carries the text log only. See README "Exchange interfaces".
+  coldpunk-hid:
+    notes: Release build without the serial transport (MW_USE_SERIAL=0,
+      CDC On Boot disabled). USB shows the HID device only.
+    fqbn: >-
+      esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=custom,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default,UploadSpeed=921600
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - lvgl (9.6.0)
+      - GFX Library for Arduino (1.6.9)
+    build_properties:
+      - compiler.c.extra_flags=-I"{build.source.path}" -DMW_USE_SERIAL=0
+      - compiler.cpp.extra_flags=-I"{build.source.path}" -DMW_USE_SERIAL=0
+    # port: COM5
+
 default_profile: coldpunk

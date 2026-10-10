@@ -15,7 +15,11 @@ device with a balance you cannot afford to lose.
 The device is an **air-gapped signer**. It never has a network stack compiled
 in (`app_config.h` refuses to build if `MW_ENABLE_WIFI` or `MW_ENABLE_BT` is
 defined), so the only inputs are the USB link to the PC (mwlink) and, on
-ES3C28P and Touch-LCD-2, Feather files on a microSD card. What leaves
+ES3C28P and Touch-LCD-2, Feather files on a microSD card. Each of them can be
+left out of the firmware at build time (`MW_USE_SERIAL`, `MW_USE_HID`,
+`MW_USE_SD` in `app_config.h`): a transport that is not needed is then not
+there to attack at all. The ROM bootloader's USB/UART download mode is not
+affected - closing it needs eFuse (Secure Download Mode, §6.3). What leaves
 it is key images, signed transactions and, only on a request confirmed on the
 device, the address or the private view key (to the PC, or - "View key to SD
 card", ES3C28P and Touch-LCD-2 - as a text file on the card).

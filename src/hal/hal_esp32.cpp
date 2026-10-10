@@ -93,7 +93,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#if defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)
+// Built without the serial transport (MW_USE_SERIAL 0): UART0 is free in
+// either USB setting, so it always carries the console.
+#if (defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)) || !MW_USE_SERIAL
 #  define MW_UART_CONSOLE 1
 #else
 #  define MW_UART_CONSOLE 0

@@ -251,6 +251,30 @@ libraries above, copy `lv_conf.h` next to the `lvgl` library folder, and set:
 Do **not** install `Adafruit TinyUSB`: TinyUSB ships with the ESP32 core. Full
 details are in [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md).
 
+### Exchange interfaces (build options)
+
+Each way of talking to the PC can be left out of the firmware entirely, in
+[`src/config/app_config.h`](src/config/app_config.h) or as a build flag
+(`-DMW_USE_SERIAL=0`):
+
+| Option | Default | What it is | Used by |
+| :--- | :---: | :--- | :--- |
+| `MW_USE_SERIAL` | 1 | mwlink over `Serial` (USB CDC port, or UART0 when *CDC On Boot* is off) | `tools/mwlink --serial`, serial terminals |
+| `MW_USE_HID` | 1 | mwlink over USB HID (needs *USB Mode: USB-OTG*) | MoneroPunkSigner, `tools/mwlink` (default) |
+| `MW_USE_SD` | 1 | microSD files, on boards with a slot (`HAS_SD 1`) | — |
+
+At least one must stay on (the build stops otherwise). A transport that is
+off has no code in the firmware and nothing listens on it. For a device that
+shows **no COM port at all**, use the `coldpunk-hid` profile
+(`MW_USE_SERIAL=0`, *CDC On Boot* disabled): UART0 then carries only the text
+log. `MW_USE_SD=0` on the Touch-LCD-2 also gives the display its own, faster
+SPI bus back. Flashing over USB is done by the chip's ROM bootloader and is not
+affected by these options. Details: [`tools/docs/build_arduino.md`](tools/docs/build_arduino.md) §2a.
+
+```sh
+arduino-cli compile --profile coldpunk-hid -u -p COM5
+```
+
 ### Partitions
 
 | Name | Type | Offset | Size |
