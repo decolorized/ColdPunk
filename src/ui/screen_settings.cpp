@@ -37,6 +37,7 @@
 //  restored the next time settings_build() runs. s_set_actions[] maps the row
 //  index back to the SET_* action, because the list of rows is dynamic.
 // ---------------------------------------------------------------------------
+#include "../config/build_info.h"
 #include "screen_common.h"
 #include "../wallet/file_store.h"
 #include "../hal/log.h"
@@ -756,11 +757,11 @@ void mw_screen_settings_run(void) {
             break;
 
         case SET_ABOUT: {
-            char body[224];
+            char body[256];
             const mw_hal_caps_t* c = mw_hal_caps();
             snprintf(body, sizeof(body),
-                     "%s %s\n%s\n%ux%u%s\n%s",
-                     TX(XSTR_APP_NAME), MW_FIRMWARE_VERSION,
+                     "%s %s\ncommit %s\n%s\n%ux%u%s\n%s",
+                     TX(XSTR_APP_NAME), MW_FIRMWARE_VERSION, MW_BUILD_COMMIT,
                      c->board_name ? c->board_name : "",
                      (unsigned)c->width, (unsigned)c->height,
                      c->monochrome ? " mono" : "",

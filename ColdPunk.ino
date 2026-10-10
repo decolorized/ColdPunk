@@ -21,6 +21,7 @@
 //  host protocol; the USB link forwards every line to the host program.
 // ============================================================================
 
+#include "src/config/build_info.h"
 #include <Arduino.h>
 
 #include "board_config.h"
@@ -246,7 +247,8 @@ void setup() {
         MW_LOGE("boot", "crypto task creation failed (%u bytes internal RAM free)",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
-    MW_LOGI("boot", "%s %s on %s ready", MW_FIRMWARE_NAME, MW_FIRMWARE_VERSION, BOARD_NAME);
+    MW_LOGI("boot", "%s %s (commit %s) on %s ready", MW_FIRMWARE_NAME, MW_FIRMWARE_VERSION,
+            MW_BUILD_COMMIT, BOARD_NAME);
 }
 
 void loop() {

@@ -275,6 +275,22 @@ affected by these options. Details: [`tools/docs/build_arduino.md`](tools/docs/b
 arduino-cli compile --profile coldpunk-hid -u -p COM5
 ```
 
+### Commit hash in About
+
+Settings → About and the boot log show which commit the firmware was built
+from (`commit c50033e`, `-dirty` when there were uncommitted changes). The hash
+comes from `src/config/build_commit.h`, which the git hooks in `.githooks/`
+write after every commit and checkout. Enable them once in your clone:
+
+```sh
+git config core.hooksPath .githooks
+sh .githooks/update-build-commit      # first time, or after editing files
+```
+
+Without the hooks (or from a source archive) About says `commit unknown`. A
+hash rather than a build time keeps the build reproducible: the same commit
+gives the same binary.
+
 ### Partitions
 
 | Name | Type | Offset | Size |

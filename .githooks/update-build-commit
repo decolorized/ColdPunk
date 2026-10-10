@@ -1,0 +1,21 @@
+#!/bin/sh
+# Writes src/config/build_commit.h with the current commit, e.g.
+#   #define MW_BUILD_COMMIT "c50033e"        (or "c50033e-dirty")
+# The firmware shows it in Settings -> About and in the boot log
+# (src/config/build_info.h; without the file it says "unknown").
+#
+# Runs from the git hooks in this folder after every commit, checkout, merge
+# and rebase once they are enabled (one time, in the repository):
+#     git config core.hooksPath .githooks
+# Git for Windows runs it with its own sh, so it works there too. Run it by
+# hand (sh .githooks/update-build-commit) to refresh after editing files.
+# The header is generated, local and listed in .gitignore.
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+commit=$(git -C "$root" describe --always --dirty --abbrev=7 2>/dev/null) || commit=unknown
+file="$root/src/config/build_commit.h"
+line="#define MW_BUILD_COMMIT \"$commit\""
+# Rewrite only on a change, so the build does not recompile for nothing.
+if [ -f "$file" ] && [ "$(cat "$file")" = "$line" ]; then
+    exit 0
+fi
+printf '%s\n' "$line" > "$file"
