@@ -1,4 +1,4 @@
-# ColdPunk
+#  ColdPunk
 
 **ColdPunk** is an air-gapped Monero cold wallet firmware for ESP32-S3 boards
 with a display. It keeps your seed on the device, computes key images and signs
