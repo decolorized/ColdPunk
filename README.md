@@ -234,33 +234,137 @@ policy and for adding a new board.
 
 ### One script (recommended)
 
+`build.bat` (Windows) and `build.sh` (Linux, macOS) download everything the
+build needs into `toolchain/` inside the project folder - arduino-cli, the
+pinned ESP32 core with its compilers, the libraries and esptool - and install
+nothing into the system or the home folder. Next to the built firmware they
+put esptool and a flash script, so the result is one folder you can flash
+from, on this computer or on another one.
+
+**What you need**
+
+| | Windows | Linux | macOS |
+| :--- | :--- | :--- | :--- |
+| System | 10 (1803 or later) or 11, 64-bit | x86-64 or ARM64 | Intel or Apple Silicon |
+| Tools | nothing (curl, tar, certutil come with Windows) | `curl` or `wget`, `tar`, `sha256sum` | nothing extra |
+| Disk | about 3 GB free | about 3 GB free | about 3 GB free |
+| Network | the first build downloads about 1.5 GB | | |
+
+Plus a USB **data** cable (a charge-only cable shows no port) and, on
+Windows, the driver of the board's USB-UART chip if Windows does not install
+it itself (CH340: wch-ic.com, CP210x: silabs.com).
+
+#### 1. Get the source
+
 ```sh
-build.bat              # Windows 10 / 11
-./build.sh             # Linux, macOS
-build.bat debug        # core log at Info level  (./build.sh debug)
-build.bat hid          # HID only, no serial     (./build.sh hid)
+git clone https://github.com/decolorized/ColdPunk.git
 ```
 
-The script downloads everything the build needs into `toolchain/` inside the
-project folder - arduino-cli, the pinned ESP32 core and compilers, the
-libraries and esptool - checks the checksums of what it downloads itself, and
-installs nothing into the system or the home folder (about 1.5 GB on the first
-build; later builds reuse it). The board is the one selected in
-`board_config.h`; the project folder must be named `ColdPunk`.
+or download the ZIP from GitHub and unpack it. **The folder must be named
+`ColdPunk`** (arduino-cli requires the folder to match `ColdPunk.ino`): a
+GitHub ZIP unpacks as `ColdPunk-main` - rename it. On Windows keep the path
+short, e.g. `C:\ColdPunk` or `Documents\ColdPunk`: the ESP32 core has deeply
+nested folders.
 
-The result lands in `firmware/ColdPunk-<version>-<board>/`: the four images,
-`SHA256SUMS.txt`, esptool for the OS the build ran on, and `flash.bat` /
-`flash.sh`:
+With git, enable the hooks once so that Settings → About shows the commit
+(see [Commit hash in About](#commit-hash-in-about)); the build scripts refresh
+it themselves when git is installed.
 
-```sh
-flash.bat COM5         # Windows (without a port: asks, Enter = auto)
-./flash.sh /dev/ttyUSB0
+#### 2. Choose the board
+
+Open [`board_config.h`](board_config.h) and leave exactly one
+`#define MW_BOARD_...` uncommented ([Supported boards](#supported-boards)).
+The reference board `MW_BOARD_ES3C28P` is selected by default.
+
+#### 3. Build
+
+| | Windows | Linux / macOS |
+| :--- | :--- | :--- |
+| Release | `build.bat` (or double-click it) | `./build.sh` |
+| Core log at Info level | `build.bat debug` | `./build.sh debug` |
+| HID only, no COM port | `build.bat hid` | `./build.sh hid` |
+
+The first build takes 10-30 minutes, most of it downloading; later builds
+take a minute or two. The script checks the SHA-256 of arduino-cli and
+esptool; the core and the libraries are pinned in
+[`sketch.yaml`](sketch.yaml) and checked by arduino-cli. At the end it
+prints the folder with the result:
+
+```
+firmware/ColdPunk-0.3.3-ES3C28P/
+  bootloader.bin  partitions.bin  boot_app0.bin  coldpunk.bin
+  SHA256SUMS.txt  esptool(.exe)   flash.bat  flash.sh  README.txt
 ```
 
-The flash scripts verify the checksums and write only the bootloader, the
-partition table and the program - the wallets (NVS, `storage`) are kept, as
-with an upload from the IDE. The folder can be copied to another computer and
-flashed from there without building.
+`esptool` is the one for the OS the build ran on. Elsewhere the flash scripts
+use esptool v5 from `PATH` (`pip install esptool`).
+
+#### 4. Connect the board
+
+The native USB port is the wallet's own link to the PC (HID, CDC), so the
+firmware is written through the board's **USB-UART bridge** (UART0, a CH340
+or CP210x chip). On a board with two USB connectors use the one marked
+UART / COM.
+
+| | Where the port shows up |
+| :--- | :--- |
+| Windows | Device Manager → Ports (COM & LPT): `USB-SERIAL CH340 (COM5)` or `Silicon Labs CP210x (COM5)` |
+| Linux | `/dev/ttyUSB0` or `/dev/ttyACM0` (`ls /dev/tty{USB,ACM}*`) |
+| macOS | `/dev/cu.usbserial-*` or `/dev/cu.wchusbserial*` |
+
+A board with **only the native USB port** is flashed through the chip's ROM
+bootloader: hold **BOOT**, plug the cable in (or press and release **RESET**
+while holding BOOT), release BOOT. A new port appears (*USB JTAG/serial debug
+unit*); flash to it, then press RESET.
+
+#### 5. Flash
+
+Run the script from the firmware folder:
+
+```sh
+flash.bat                   # Windows: asks for the port (Enter = find it)
+flash.bat COM5              # Windows, this port
+./flash.sh /dev/ttyUSB0     # Linux / macOS
+flash.bat COM5 460800       # a lower speed if 921600 fails
+```
+
+The script first checks the images against `SHA256SUMS.txt` and refuses to
+flash damaged files. It then writes the bootloader (0x0), the partition
+table (0x8000), `boot_app0` (0xe000) and the program (0x10000), and restarts
+the board. Go on with [First start](#first-start).
+
+#### Updating
+
+Build the new version (or take its firmware folder) and flash it the same
+way. **The wallets are kept:** only the four images are written; the NVS
+partition (wallets, settings, password record) and the `storage` partition
+stay untouched, exactly as with an upload from the IDE. Never flash a merged
+16 MB image or run `esptool erase-flash`: that wipes the wallets (have your
+seed words at hand before any update anyway).
+
+From a version before 0.3 the first start converts the `storage` partition
+from FAT to LittleFS ("Storage update"): the device reads the files into
+PSRAM, checks them and asks for a code. **Do not cut the power for about a
+minute after the code** - the partition is erased and written back, and a cut
+then loses the wallets (restore them from the seed). Declining keeps the old
+format until the next start. Firmware older than 0.3 cannot read the
+converted partition.
+
+#### If something goes wrong
+
+| Message / symptom | What to do |
+| :--- | :--- |
+| `The project folder must be named ColdPunk` | Rename the folder (a GitHub ZIP gives `ColdPunk-main`). |
+| `Download failed`, `checksum mismatch` | Run the script again (a damaged download is deleted). Behind a proxy, set `HTTPS_PROXY`. |
+| Windows: `No such file or directory` deep inside the core during the build | The path is too long: move the project to `C:\ColdPunk`. |
+| No new port when the board is plugged in | Another cable (data, not charge-only), another USB port, the CH340 / CP210x driver. |
+| `Failed to connect to ESP32-S3` / `No serial data received` | Close everything that holds the port (a serial monitor, MoneroPunkSigner, mwlink), then use BOOT / RESET as in step 4; try a lower speed. |
+| Linux: `Permission denied: /dev/ttyUSB0` | `sudo usermod -aG dialout $USER`, then log out and in. |
+| macOS: "esptool cannot be opened" | The folder came through a browser or AirDrop: `xattr -dr com.apple.quarantine .` in the firmware folder. |
+| `The firmware files are damaged` | The folder was changed or copied incompletely: copy it again or rebuild. |
+
+`toolchain/` can be deleted at any time to free the space; the next build
+downloads it again. `firmware/` keeps one folder per version and board.
 
 ### With arduino-cli
 
@@ -350,7 +454,7 @@ gives the same binary.
 | nvs | data/nvs | 0x9000 | 20 KB |
 | otadata | data/ota | 0xE000 | 8 KB |
 | app0 | app/ota_0 | 0x10000 | 4 MB |
-| storage | data/fat | 0x410000 | ~3.9 MB |
+| storage | data/spiffs (LittleFS) | 0x410000 | ~3.9 MB |
 
 ---
 

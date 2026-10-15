@@ -17,6 +17,10 @@ rem
 rem Uses curl, tar and certutil, which come with Windows 10 1803 and later.
 setlocal EnableExtensions
 
+rem Started by a double-click (cmd /c): keep the window open at the end.
+set "PAUSE_AT_END="
+echo %CMDCMDLINE% | findstr /i /c:" /c " >nul && set "PAUSE_AT_END=1"
+
 set "CLI_VERSION=1.5.1"
 set "CLI_SHA=fabe42e0eb04d00e776a66178299ff95a46c623dbc260f997e58fd514853dd40"
 set "ESPTOOL_VERSION=5.3.1"
@@ -157,6 +161,7 @@ call :unmap
 echo.
 echo Done: firmware\%NAME%
 echo Flash: firmware\%NAME%\flash.bat [COMx]   (wallets are kept)
+if defined PAUSE_AT_END pause
 exit /b 0
 
 :append_sum
@@ -167,6 +172,7 @@ exit /b 0
 call :unmap
 echo.
 echo Build failed.
+if defined PAUSE_AT_END pause
 exit /b 1
 
 :unmap
