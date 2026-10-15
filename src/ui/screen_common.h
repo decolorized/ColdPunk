@@ -182,7 +182,24 @@ typedef enum {
     // v9: users
     XSTR_USER_ADD, XSTR_USER_DELETE, XSTR_USER_ADD_HINT, XSTR_USER_ADDED,
     XSTR_USER_FULL, XSTR_USER_DEL_WARN, XSTR_USER_DELETED, XSTR_PW_TAKEN,
-    XSTR_USER_NA, XSTR_LOCK_RESET_Q, XSTR_ACCOUNT_NAME, XSTR_ACCOUNT_RULES,
+    XSTR_USER_NA, XSTR_ACCOUNT_NAME, XSTR_ACCOUNT_RULES,
+    XSTR_PP_HINT, XSTR_PP_HINT_ASK, XSTR_PP_HINT_WARN, XSTR_PP_HINT_SHOW, XSTR_PP_HINT_RULES,
+    XSTR_KI_STORAGE_FULL, XSTR_KI_SAVE_FAIL,
+    // v0.3
+    XSTR_RESET_PHRASE_Q, XSTR_PW_LEFT, XSTR_CHILD_PIN, XSTR_WIPING,
+    XSTR_WAIT_H, XSTR_WAIT_M, XSTR_WAIT_S,
+    XSTR_FS_CONVERT, XSTR_FS_CONVERT_NOTE, XSTR_FS_CONVERT_FAIL,
+    XSTR_FS_CONVERT_Q, XSTR_FS_LATER, XSTR_FS_LOST,
+    XSTR_PW_STAGE_OPEN, XSTR_BUSY, XSTR_KI_LOADING, XSTR_SAVING,
+    XSTR_WL_NETWORK, XSTR_WL_NET_SET,
+    XSTR_CHECK_SEED, XSTR_CHECK_SEED_HINT, XSTR_CHECK_SEED_OK, XSTR_CHECK_SEED_BAD,
+    XSTR_CHECK_SEED_INVALID,
+    XSTR_KI_GROWN,
+    XSTR_WL_BALANCE, XSTR_BAL_EST, XSTR_BAL_UNKNOWN, XSTR_BAL_MANUAL, XSTR_BAL_NONE,
+    XSTR_BAL_TXS, XSTR_BAL_TX_NONE, XSTR_BAL_TX_LINE, XSTR_BAL_TX_OWN, XSTR_BAL_SET,
+    XSTR_BAL_ENTER, XSTR_BAL_BAD, XSTR_BAL_CLEAR, XSTR_SET_BALANCE, XSTR_BAL_OFF_Q,
+    XSTR_JTAG_LOCK, XSTR_JTAG_W1, XSTR_JTAG_W2, XSTR_JTAG_W3, XSTR_JTAG_DONE,
+    XSTR_JTAG_LOCKED, XSTR_JTAG_FAIL,
     XSTR_COUNT
 } mw_xstr_id_t;
 
@@ -461,6 +478,18 @@ mw_err_t mw_screen_pin_run(const char* title, const char* hint, char* out,
 // The critical-action gate: shows `body`, then a random 4-digit number the
 // user has to type back on the keypad. true only when the number matched.
 bool     mw_ui_confirm_code(const char* title, const char* body);
+// "Too many attempts. Wait 1 h 05 min." for a lockout of `ms`.
+void     mw_ui_lockout_text(uint32_t ms, char* out, size_t cap);
+// 0.3.2: the progress page is up; the automatic "Please wait" page (run on
+// the UI task only, see lvgl_port.cpp).
+bool     mw_ui_progress_is_open(void);
+bool     mw_ui_page_is_active(void);   // a page is on screen (a dialog, a scan)
+void     mw_ui_busy_show_job(void);
+void     mw_ui_busy_hide_job(void);
+// Erases the device: the file storage first, then the NVS (the password
+// record with its counter last, so a cut in between wipes again at the next
+// start). Restarts; never returns.
+void     mw_shell_wipe_device(void);
 // Viewfinder + UR assembly progress. Returns true when the sequence completed.
 bool mw_screen_qr_scan_run(const char* title, uint8_t* buf, size_t cap,
                            size_t* len_out);

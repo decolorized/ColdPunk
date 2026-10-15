@@ -179,6 +179,8 @@ MW_TEST(test_session_input_buffer)
     CHECK(mw_ct_is_zero(buf, cap));
 }
 
+// v0.3: the network is the wallet's own; the device setting is what a new
+// wallet gets.
 MW_TEST(test_session_network_from_settings)
 {
     mw_settings_t s;
@@ -187,8 +189,19 @@ MW_TEST(test_session_network_from_settings)
     s.network = MW_NET_STAGENET;
     CHECK_EQ_INT(mw_settings_save(&s), MW_OK);
 
+    // Created while the setting said mainnet: stays mainnet.
+    CHECK_EQ_INT(mw_session_unlock(g_wallet_id, ""), MW_OK);
+    CHECK_EQ_INT(mw_session()->network, MW_NET_MAINNET);
+    mw_session_lock();
+    CHECK_EQ_INT(mw_wallet_set_network(g_wallet_id, MW_WNET_STAGENET), MW_OK);
     CHECK_EQ_INT(mw_session_unlock(g_wallet_id, ""), MW_OK);
     CHECK_EQ_INT(mw_session()->network, MW_NET_STAGENET);
+    mw_session_lock();
+    // A record of older firmware (no network of its own) follows the setting.
+    CHECK_EQ_INT(mw_wallet_set_network(g_wallet_id, MW_WNET_DEFAULT), MW_OK);
+    CHECK_EQ_INT(mw_session_unlock(g_wallet_id, ""), MW_OK);
+    CHECK_EQ_INT(mw_session()->network, MW_NET_STAGENET);
+    CHECK_EQ_INT(mw_wallet_set_network(g_wallet_id, 9), MW_ERR_INVALID_ARG);
 }
 
 int main(void)

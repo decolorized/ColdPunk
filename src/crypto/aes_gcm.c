@@ -11,6 +11,16 @@
 
 #include <string.h>
 
+// On the device the mbedTLS GCM of ESP-IDF is used: its AES runs on the
+// ESP32-S3 AES peripheral, tens of times faster than the table-free AES
+// below (the key image container, 64 KiB and up, is sealed and opened as a
+// whole). It is compared with the portable code at its first use; if the
+// two ever disagree, the portable code is used from then on.
+#if defined(ARDUINO) && !defined(MW_HOST_BUILD) && !defined(MW_AES_GCM_PORTABLE_ONLY)
+#  ifndef MW_AES_GCM_USE_MBEDTLS
+#    define MW_AES_GCM_USE_MBEDTLS 1
+#  endif
+#endif
 #if defined(MW_AES_GCM_USE_MBEDTLS)
 #include "mbedtls/gcm.h"
 #endif
@@ -334,6 +344,94 @@ static int gcm_args_ok(const uint8_t* key, const uint8_t* iv, size_t iv_len,
     return 1;
 }
 
+static int portable_encrypt(const uint8_t key[32], const uint8_t* iv, size_t iv_len,
+                            const uint8_t* aad, size_t aad_len,
+                            const uint8_t* pt, size_t pt_len, uint8_t* ct, uint8_t tag[16])
+{
+    return gcm_core(key, iv, iv_len, aad, aad_len, pt, pt_len, ct, 0, tag);
+}
+
+static int portable_decrypt(const uint8_t key[32], const uint8_t* iv, size_t iv_len,
+                            const uint8_t* aad, size_t aad_len,
+                            const uint8_t* ct, size_t ct_len, const uint8_t tag[16],
+                            uint8_t* pt)
+{
+    uint8_t computed[16];
+    gcm_core(key, iv, iv_len, aad, aad_len, ct, ct_len, pt, 1, computed);
+    const int ok = mw_ct_equal(computed, tag, MW_GCM_TAG_BYTES);
+    mw_memzero(computed, sizeof computed);
+    if (!ok) {
+        if (ct_len) mw_memzero(pt, ct_len);
+        return MW_AES_GCM_BAD_TAG;
+    }
+    return MW_AES_GCM_OK;
+}
+
+#if defined(MW_AES_GCM_USE_MBEDTLS)
+static int hw_encrypt(const uint8_t key[32], const uint8_t* iv, size_t iv_len,
+                      const uint8_t* aad, size_t aad_len,
+                      const uint8_t* pt, size_t pt_len, uint8_t* ct, uint8_t tag[16])
+{
+    mbedtls_gcm_context c;
+    int rc;
+    mbedtls_gcm_init(&c);
+    rc = mbedtls_gcm_setkey(&c, MBEDTLS_CIPHER_ID_AES, key, 256);
+    if (rc == 0)
+        rc = mbedtls_gcm_crypt_and_tag(&c, MBEDTLS_GCM_ENCRYPT, pt_len, iv, iv_len,
+                                       aad, aad_len, pt, ct, MW_GCM_TAG_BYTES, tag);
+    mbedtls_gcm_free(&c);
+    return (rc == 0) ? MW_AES_GCM_OK : MW_AES_GCM_BAD_ARG;
+}
+
+static int hw_decrypt(const uint8_t key[32], const uint8_t* iv, size_t iv_len,
+                      const uint8_t* aad, size_t aad_len,
+                      const uint8_t* ct, size_t ct_len, const uint8_t tag[16],
+                      uint8_t* pt)
+{
+    mbedtls_gcm_context c;
+    int rc;
+    mbedtls_gcm_init(&c);
+    rc = mbedtls_gcm_setkey(&c, MBEDTLS_CIPHER_ID_AES, key, 256);
+    if (rc == 0)
+        rc = mbedtls_gcm_auth_decrypt(&c, ct_len, iv, iv_len, aad, aad_len,
+                                      tag, MW_GCM_TAG_BYTES, ct, pt);
+    mbedtls_gcm_free(&c);
+    if (rc != 0) {
+        if (ct_len) mw_memzero(pt, ct_len);
+        return MW_AES_GCM_BAD_TAG;
+    }
+    return MW_AES_GCM_OK;
+}
+
+// 1 when the mbedTLS path gives exactly what the portable one gives (one
+// check, at the first use): sealing, opening, in place, a wrong tag refused.
+static int hw_usable(void)
+{
+    static int s_state = -1;
+    if (s_state >= 0) return s_state;
+    uint8_t key[32], iv[16], aad[5], pt[61], a[61], b[61], ta[16], tb[16], back[61];
+    for (int i = 0; i < 32; i++) key[i] = (uint8_t)(0x5a + 7 * i);
+    for (int i = 0; i < 16; i++) iv[i] = (uint8_t)(0xa3 ^ (11 * i));
+    for (int i = 0; i < 5; i++) aad[i] = (uint8_t)(3 * i + 1);
+    for (int i = 0; i < 61; i++) pt[i] = (uint8_t)(i * 29 + 7);
+    int ok = portable_encrypt(key, iv, 16, aad, 5, pt, 61, a, ta) == MW_AES_GCM_OK &&
+             hw_encrypt(key, iv, 16, aad, 5, pt, 61, b, tb) == MW_AES_GCM_OK &&
+             memcmp(a, b, 61) == 0 && memcmp(ta, tb, 16) == 0;
+    if (ok) {
+        memcpy(back, b, 61);
+        ok = hw_decrypt(key, iv, 16, aad, 5, back, 61, tb, back) == MW_AES_GCM_OK &&
+             memcmp(back, pt, 61) == 0;
+    }
+    if (ok) {
+        tb[3] ^= 1;
+        ok = hw_decrypt(key, iv, 16, aad, 5, b, 61, tb, back) == MW_AES_GCM_BAD_TAG;
+    }
+    mw_memzero(key, sizeof key);
+    s_state = ok ? 1 : 0;
+    return s_state;
+}
+#endif
+
 int mw_aes256_gcm_encrypt(const uint8_t key[32],
                           const uint8_t* iv, size_t iv_len,
                           const uint8_t* aad, size_t aad_len,
@@ -343,23 +441,10 @@ int mw_aes256_gcm_encrypt(const uint8_t key[32],
     if (!tag) return MW_AES_GCM_BAD_ARG;
     if (!gcm_args_ok(key, iv, iv_len, aad, aad_len, pt, pt_len, ct))
         return MW_AES_GCM_BAD_ARG;
-
 #if defined(MW_AES_GCM_USE_MBEDTLS)
-    {
-        mbedtls_gcm_context c;
-        int rc;
-        mbedtls_gcm_init(&c);
-        rc = mbedtls_gcm_setkey(&c, MBEDTLS_CIPHER_ID_AES, key, 256);
-        if (rc == 0)
-            rc = mbedtls_gcm_crypt_and_tag(&c, MBEDTLS_GCM_ENCRYPT, pt_len,
-                                           iv, iv_len, aad, aad_len,
-                                           pt, ct, MW_GCM_TAG_BYTES, tag);
-        mbedtls_gcm_free(&c);
-        return (rc == 0) ? MW_AES_GCM_OK : MW_AES_GCM_BAD_ARG;
-    }
-#else
-    return gcm_core(key, iv, iv_len, aad, aad_len, pt, pt_len, ct, 0, tag);
+    if (hw_usable()) return hw_encrypt(key, iv, iv_len, aad, aad_len, pt, pt_len, ct, tag);
 #endif
+    return portable_encrypt(key, iv, iv_len, aad, aad_len, pt, pt_len, ct, tag);
 }
 
 int mw_aes256_gcm_decrypt(const uint8_t key[32],
@@ -371,35 +456,8 @@ int mw_aes256_gcm_decrypt(const uint8_t key[32],
     if (!tag) return MW_AES_GCM_BAD_ARG;
     if (!gcm_args_ok(key, iv, iv_len, aad, aad_len, ct, ct_len, pt))
         return MW_AES_GCM_BAD_ARG;
-
 #if defined(MW_AES_GCM_USE_MBEDTLS)
-    {
-        mbedtls_gcm_context c;
-        int rc;
-        mbedtls_gcm_init(&c);
-        rc = mbedtls_gcm_setkey(&c, MBEDTLS_CIPHER_ID_AES, key, 256);
-        if (rc == 0)
-            rc = mbedtls_gcm_auth_decrypt(&c, ct_len, iv, iv_len, aad, aad_len,
-                                          tag, MW_GCM_TAG_BYTES, ct, pt);
-        mbedtls_gcm_free(&c);
-        if (rc != 0) {
-            if (ct_len) mw_memzero(pt, ct_len);
-            return MW_AES_GCM_BAD_TAG;
-        }
-        return MW_AES_GCM_OK;
-    }
-#else
-    {
-        uint8_t computed[16];
-        int ok;
-        gcm_core(key, iv, iv_len, aad, aad_len, ct, ct_len, pt, 1, computed);
-        ok = mw_ct_equal(computed, tag, MW_GCM_TAG_BYTES);
-        mw_memzero(computed, sizeof computed);
-        if (!ok) {
-            if (ct_len) mw_memzero(pt, ct_len);
-            return MW_AES_GCM_BAD_TAG;
-        }
-        return MW_AES_GCM_OK;
-    }
+    if (hw_usable()) return hw_decrypt(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt);
 #endif
+    return portable_decrypt(key, iv, iv_len, aad, aad_len, ct, ct_len, tag, pt);
 }

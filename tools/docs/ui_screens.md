@@ -861,7 +861,7 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - The file list opens with or without a card and follows it: a background task probes the slot twice a second (raw sector read of a mounted card, mount attempt of an empty slot); on a change the list is rebuilt ("Insert a microSD card" / "No Feather files" / the files).
 - Wallet menu "View key to SD card": warning, then `<wallet>_viewonly.txt` (wallet, network, address, private view key, restore height, how to restore, warning). The wallet name is made FAT/Windows-safe (`mw_sdf_safe_name`); a taken name gets `_2`, `_3`...
 
-### 11.5 Device password
+### 11.5 Account password
 - New passwords: 8..64 characters; digits-only, one repeated character or a plain run (`abcdefgh`, `87654321`) asks "Keep it anyway?". Passwords of 4..7 characters set by older firmware still open the device.
 
 ## 12. v8 changes (2026-10-09)
@@ -889,3 +889,41 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - Add account asks for the account's name first, then its password twice.
 - The main menu shows the logged-in account's name under the title.
 - Every new password (first setup, change, new account) needs 8..64 characters.
+
+### 13.2 v9.2
+- Passphrase hint: after a non-empty passphrase at wallet create / import, a warning ("Anyone who opens this account sees it…") and an optional hint (up to 31 characters; cancel = none). Opening such a wallet shows "Hint: …" before the passphrase keyboard (until tapped). Wallet menu of a passphrase wallet: **Passphrase hint** shows the current one and asks for a new one (empty clears, cancel keeps).
+- After key image export / signing: "Device storage is full: the key image cache was not saved…" when the partition is full, "The key image cache was not saved…" on another failure. The old "cache full (4096)" message is now about running out of RAM.
+- Add account refuses when the per-chip capacity (32..40) is reached ("No room for another account.").
+
+## 14. v0.3 changes (2026-10-14)
+
+### 14.1 Start-up and the password screen
+- Before the game, once: **Storage update** (FAT → LittleFS) with a progress bar and "Once. Do not switch off."; on failure "The storage was not updated (…). The device keeps working with the old format."
+- A wipe interrupted by a power cut (NVS mark `fswipe`, or the attempt counter at `MW_PW_WIPE_AT`) is finished first ("Erasing the device…").
+- Password screen: Cancel and the input timeout go straight back to the game; the "Back / Factory reset" question is gone.
+- Typing `MW_RESET_PHRASE` ("Reset My Device 1029384756") into the field: "The reset phrase was typed. Erase every account and every wallet?" behind the confirmation code, then "Erasing the device…" and a restart.
+- A running delay is shown as "Too many attempts. Wait 1 h 05 min." (until it ends or a tap); the field still opens after it, for the reset phrase (a password typed then is not checked).
+- From `MW_PW_CHILD_AT` wrong passwords: the confirmation-code screen ("Too many wrong passwords. N attempts left before the device erases everything.") before every password; Cancel or a wrong number go back to the game. "Wrong password (attempt N)" then adds the attempts left.
+- The title is **Account password** (was "Device password") everywhere.
+
+### 14.2 Wallet menu
+- **Balance** (when balance tracking is on): the subtitle shows "~ X XMR at the last sync (N outputs)", a typed-in value, or "No outputs yet"; rows **Signed transactions** (a text view, newest first), **Enter by hand** (keyboard, "1.25"), **Use the estimate** (only with a typed-in value).
+- **Network: <name>**: Mainnet / Testnet / Stagenet for this wallet, then "The wallet's network changed…".
+- **Check seed** (seed wallets only): an explanation, the word keyboard (25 or 16 words), then "The phrase matches this wallet." / "The phrase does NOT match this wallet." / "Not a valid phrase: the checksum is wrong."
+- After a key image export or a signature: "The key image cache of this account has grown to N KB…" once for every new 64 KiB step.
+
+### 14.3 Settings
+- **New wallets' network** (was "Network").
+- **Balance tracking: On/Off** (per account). Off asks "Switch balance tracking off? …" and erases the amounts, the lists and the typed-in balances.
+- **Lock firmware updates** (shows "On" once burned): three warnings (Next / Cancel), the confirmation code, the account password, then "Done. Firmware updates and debugging are locked." or "eFuses not burned: …".
+- Add account: the capacity is 16..24 per chip.
+
+### 14.4 v0.3.1
+- Storage update: the files are read into PSRAM (progress), then the confirmation-code screen "The storage of the previous firmware is converted once (N files, X KB). Do NOT switch off for about a minute…"; declining: "The old storage format stays…". A failure before: "The storage was not updated: <error> (N files, X KB)…". A cut during the write-back: "The storage conversion was interrupted: the wallets are lost…" at the next start.
+- The wrong-password counter clears on any correct password.
+
+### 14.5 v0.3.2
+- "Please wait" with a spinner: put up by the UI task itself whenever the crypto task has worked for 400 ms with nothing of its own on the screen (between two dialogs, after a progress page closed). The next dialog or progress page replaces it. Nothing the device does is left without something moving on the screen.
+- Login: after the password check a stage **Opening the account** (format check, decoys, counter), moving with the decoys written; first setup: the same stage while the 23 decoys are written.
+- Opening a wallet: **Loading the key image cache** right after the passphrase; closing it: **Saving** when the cache changed.
+- Key image export and signing: a **saving the key image cache** stage at the end; the list of signed transactions is saved under a "Saving" page.

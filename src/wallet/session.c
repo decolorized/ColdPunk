@@ -98,13 +98,12 @@ mw_err_t mw_session_unlock(uint32_t wallet_id, const char* passphrase)
     g_session.unlocked         = true;
     g_session.last_activity_ms = now_ms();
 
+    g_session.network = (mw_network_t)mw_wallet_network(wallet_id);   // per wallet (v0.3)
     if (mw_settings_load(&settings) == MW_OK) {
-        g_session.network = settings.network;
         g_autolock_min    = settings.autolock_min;
         g_autolock_valid  = true;
         mw_memzero(&settings, sizeof settings);
     } else {
-        g_session.network = MW_DEFAULT_NETWORK;
         refresh_autolock();
     }
 

@@ -15,11 +15,10 @@
 //   Records of version 1 (20000 rounds, no chip binding) are upgraded at the
 //   first successful unlock, and an unbound record once eFuse is provisioned.
 //
-// Failed attempts: the counter is incremented and stored BEFORE the password
-// is checked and cleared on success, so cutting the power at the right
-// moment does not save an attempt. From the third failure on every further
-// attempt is delayed for 2^(n-2) seconds, capped at 10 minutes, re-armed on
-// boot.
+// Failed attempts: one counter for all accounts, incremented and stored
+// BEFORE the password is checked, so cutting the power at the right moment
+// does not save an attempt. Delays, the child PIN, the wipe and when the
+// counter clears: app_config.h (MW_PW_*) and device_auth.c.
 //
 // Changing the password is atomic against a power loss (pending record with
 // both keys wrapped under each other; either password completes it).
@@ -44,9 +43,8 @@ extern "C" {
 #define MW_DEVICE_PW_ROUNDS   200000u
 #endif
 #define MW_DEVICE_PW_HW_STEPS 8           // eFuse HMAC passes inside the KDF
-#define MW_DEVICE_AUTH_REC_LEN 177        // record size in storage (version 2;
-                                          // 175 before v9: no fails_total,
-                                          // clean_streak)
+#define MW_DEVICE_AUTH_REC_LEN 193        // record size in storage (version 2;
+                                          // 175 before v9, 177 up to v0.2)
 
 typedef enum {
     MW_AUTH_NONE = 0,     // no password record (first start)
@@ -55,14 +53,9 @@ typedef enum {
                           // missing while wallets exist: never offer to
                           // create a new password over it
 } mw_device_auth_state_t;
-#define MW_DEVICE_PW_FREE_TRIES  3        // failures before the delay kicks in
-#define MW_DEVICE_PW_MAX_DELAY_MS (10u * 60u * 1000u)
-// v9: failures are also kept in a counter that a successful unlock does not
-// clear (only ten unlocks in a row without any failure lower it by one; a
-// password re-check inside a session never does). Above MW_DEVICE_PW_TOTAL_FREE it sets a delay of its own, so
-// knowing one user's password does not allow unlimited guesses at another's
-// by logging in between the guesses.
-#define MW_DEVICE_PW_TOTAL_FREE  6
+// The delay before the next attempt after `fails` wrong passwords; `logged`:
+// an account has logged in since power-on.
+uint32_t mw_device_pw_delay_for(uint8_t fails, bool logged);
 
 // Progress of the slow parts (the key derivation takes seconds on the
 // device). Called on the task that runs verify()/set()/change(), at most once
@@ -72,7 +65,8 @@ enum {
     MW_AUTH_STAGE_CHECK = 1,      // checking the password
     MW_AUTH_STAGE_UPGRADE,        // one-off: moving an old record to the new KDF
     MW_AUTH_STAGE_NEW,            // deriving the key of a new password
-    MW_AUTH_STAGE_REKEY           // re-sealing the wallets
+    MW_AUTH_STAGE_REKEY,          // re-sealing the wallets
+    MW_AUTH_STAGE_OPEN            // after the check: the account's storage
 };
 typedef void (*mw_device_auth_progress_fn)(int stage, int permille, void* ctx);
 void mw_device_auth_set_progress(mw_device_auth_progress_fn fn, void* ctx);
@@ -92,14 +86,16 @@ mw_err_t mw_device_auth_set(const char* password);
 // Checks the password.
 //   The attempt is counted before the check (stored), and given back when
 //   the check fails for a reason other than a wrong password.
-//   MW_OK            correct; user key installed, failure counter reset in
-//                    RAM and storage (a failed reset write is retried at the
-//                    next verify() and at forget(), see _save_pending)
+//   MW_OK            correct; user key installed, failure counter cleared
+//                    when the rules allow (device_auth.c), in RAM and storage
+//                    (a failed write is retried at the next verify() and at
+//                    forget(), see _save_pending)
 //   MW_ERR_DECRYPT   wrong password; counter incremented
 //   MW_ERR_INVALID_ARG  NULL or empty string; not counted as an attempt.
 //                    The 4..64 length rule of set()/change() is NOT applied
 //                    here, so any non-empty string is a counted attempt.
-//   MW_ERR_ABORTED   a lockout delay is still running (see _lockout_ms)
+//   MW_ERR_ABORTED   a lockout delay is still running (see _lockout_ms), or
+//                    the wipe is due (the hook did not run)
 //   MW_ERR_NOT_SUPPORTED  no password set yet
 mw_err_t mw_device_auth_verify(const char* password);
 
@@ -109,6 +105,25 @@ bool     mw_device_auth_save_pending(void);
 // Milliseconds until the next attempt is allowed; 0 when allowed now.
 uint32_t mw_device_auth_lockout_ms(void);
 uint8_t  mw_device_auth_failed_attempts(void);
+// Wrong passwords left before the device erases itself.
+int      mw_device_auth_attempts_left(void);
+// From MW_PW_CHILD_AT on, a random PIN shown on screen is asked before every
+// password (the shell does it; a wrong PIN is not an attempt).
+bool     mw_device_auth_child_pin_due(void);
+
+// Erasing everything at MW_PW_WIPE_AT wrong passwords: the shell installs a
+// function that wipes the storage and the NVS and restarts (it does not
+// return). It is called from the counting itself, and by wipe_check() at
+// start when the counter was left at the limit (a power cut during the last
+// check or during the wipe).
+typedef void (*mw_device_auth_wipe_fn)(void);
+void     mw_device_auth_set_wipe_hook(mw_device_auth_wipe_fn fn);
+bool     mw_device_auth_wipe_due(void);
+void     mw_device_auth_wipe_check(void);
+
+// The factory reset phrase (MW_RESET_PHRASE): typed into the password field
+// it erases the device; it can never be a password.
+bool     mw_device_pw_is_reset_phrase(const char* pw);
 
 // Changes the logged-in user's password (the first user's or another's):
 // re-checks `old_password` against that user, re-seals its wallets under the

@@ -165,8 +165,17 @@ configured correctly.
 * Verified against the AES-256 GCM test vectors (McGrew–Viega / NIST SP 800-38D
   test cases 13–18), a GMAC case, a 16-byte-IV case and the FIPS-197 Appendix
   C.3 block vector. See `tools/test/test_wallet_store.c`.
-* `MW_AES_GCM_USE_MBEDTLS` switches the device build to mbedTLS (hardware AES).
-  The portable path stays the reference and is what the host tests exercise.
+* **Device (0.3.3):** the firmware uses the mbedTLS GCM of ESP-IDF, whose AES
+  runs on the ESP32-S3 AES peripheral — the table-free AES above costs about
+  a second per 64 KiB on the chip, and the key image container (64 KiB and
+  up) is opened as a whole every time a wallet is opened. At its first use
+  the mbedTLS path is compared with the portable one (seal, open in place, a
+  wrong tag refused); should they ever disagree, the portable code is used
+  from then on. mbedTLS computes GHASH with 4-bit tables derived from the
+  key: a cache-timing signal in principle, of little use on a device whose
+  sealing keys an attacker cannot run code next to. Define
+  `MW_AES_GCM_PORTABLE_ONLY` to build without it. The portable path stays
+  the reference and is what the host tests exercise.
 
 ---
 
@@ -262,7 +271,7 @@ all six blocks (read-only).
 ### 4.1 On-device (the normal path)
 
 1. The device does not work without the key: right after the unlock gesture,
-   **before the device password**, a chip without it shows the first-start
+   **before the account password**, a chip without it shows the first-start
    notice and the provisioning screens (naming the block). Declining returns
    to the game. When no key block is free, the device says so, lists the
    blocks and does not continue.
@@ -386,26 +395,60 @@ password costs one KDF run however many users exist.
 
 | Store | Contents | What it tells |
 | :--- | :--- | :--- |
-| NVS `devauth` | salt, rounds, the first user's verifier, attempt counter | that the device has a password |
-| FAT `u…` files | always exactly 32 (`MW_USERS_MAX`) "slots": one per user, the rest **decoys**; all 9 824 bytes, random-looking without the key | nothing about the number of users |
-| FAT `k…` files | key image caches, named by `HMAC(K, id, variant)` | how many wallets (of all users together) have a key image cache, and their sizes |
+| NVS `devauth` | salt, rounds, the first user's verifier, the attempt counter | that the device has a password, how many wrong passwords are pending |
+| LittleFS `u…` files | always exactly 24 (`MW_USERS_SLOTS`) slot directories: one per account, the rest **decoys**; all 11 936 bytes, random-looking without the key | nothing about the number of accounts |
+| LittleFS `c…` files | one key image container per slot, "c" + the same 24 hex digits; 64 KiB, random for a decoy, sealed for an account; an account's grows in 64 KiB steps when its caches need more | a container above 64 KiB is an account with many synced outputs (the device warns at every step, see *Key images*) |
 
 A decoy carries a mark only this chip can compute: its bytes 16..31 (where
 a directory has its GCM tag) are `HMAC(eFuse key, "mw.decoy.v1" || bytes
-0..15)`. The firmware uses it to give a decoy's slot to a new user (the new
-directory is written first, then one decoy removed) and to put a decoy back
-when a user is deleted, so the count never changes. Without the chip the mark
-is as random as a GCM tag. Someone who runs their own firmware on this chip
-(no secure boot, §6.3) can ask the HMAC peripheral and tell decoys from
-directories, i.e. count the users — but still opens none of them. The cache files leak the total count of wallets that were synced; a
-user whose wallets never synced key images on this device leaves no cache
-file.
+0..15)`. The firmware uses it to give a decoy's slot to a new account (the
+new directory and container are written first, then one decoy slot removed)
+and to put a decoy back when an account is deleted, so the count never
+changes. Without the chip the mark is as random as a GCM tag, and decoys
+look like sealed data of the same size. The mark does not touch passwords
+or keys: it cannot help to guess or open anything. Someone who runs their own
+firmware on this chip (no secure boot, §6.3) can ask the HMAC peripheral and
+tell decoys from directories, i.e. count the accounts — but still opens none
+of them. Without secure boot this cannot be avoided as long as an account can
+be added without the other accounts' passwords: anything the firmware can
+check, other code on the same chip can check too.
 
-**Decoys over time.** Decoys are written once and never change; a user's
-directory is rewritten (new IV, new FAT clusters) whenever that user changes
-something. Two dumps taken at different times, or a close look at the FAT
-allocation order in one dump, can therefore single out directories that were
-in use. A user that is not touched between two dumps looks like a decoy.
+**Capacity.** How many accounts fit is 16..24, computed from the eFuse key
+(`HMAC(eFuse key, "mw.capacity.v1")`) and stored nowhere. Filling the slots
+with *Add account* therefore shows "capacity minus accounts", with the
+capacity unknown, not the number of accounts.
+
+**Key images.** All caches of an account live in its container, sealed as a
+whole (one generation in the sealed directory against rollback). There is
+no limit on the number of key images: the container grows in 64 KiB steps
+as long as `MW_KI_STORE_RESERVE` (192 KiB) stays free on the partition, so
+that the other accounts' files can always be rewritten. The 24 slots take
+about 1.9 MB of the 3.9 MB partition; about 2 MB is left for growth -
+roughly 24 000 more key images on the device, on top of about 790 per
+account in the base 64 KiB (82 bytes per key image since 0.3: the amount
+for the balance estimate is kept with it). When the partition is full the
+device says so after the operation (the result is valid; the outputs are
+exported again next time).
+
+**Growth warning (0.3).** A container above 64 KiB tells a flash dump that
+its slot is a real account. Every time the account's container crosses
+another 64 KiB step (128, 192, 256 KiB …) the device says so once, after
+the sync or signing that caused it: the size gives the account away, and a
+new wallet (the funds moved to it, the old wallet deleted) brings the
+container back down. The step last warned about is kept in the sealed
+directory.
+
+**Decoys over time.** Decoys are written once and never change; an account's
+directory and container are rewritten (new IV, new flash blocks) whenever
+that account changes something. Two dumps taken at different times, or a
+close look at the block allocation order in one dump, can single out slots that
+were in use. An account not touched between two dumps looks like a decoy.
+
+**Update from v9.1.** At the first unlock after the update, every v9.1 decoy
+is replaced by a current one, every directory of the old size is padded to
+the new size and every slot gets a container, so an account that does not
+log in afterwards does not stand out by size. Its per-wallet key image files
+(`k…`) stay until it logs in (then they are imported and removed).
 
 **Deleting a user** (Settings → *Delete this account*) needs that user's own
 password: its wallets, caches and directory are removed (overwritten, then
@@ -413,35 +456,73 @@ deleted; see the caveat in §5). Deleting the first user keeps the record —
 the other users depend on its salt — and replaces the verifier with random
 bytes. The factory reset erases every user.
 
-**Guessing.** The failed-attempt counter and its delay are device-wide: a
-wrong password counts the same whoever's it was meant to be. A successful
-unlock clears that counter, but not a second, lifetime counter
-(`fails_total` in the record): it drops by one only after ten unlocks in a
-row without any failure (a password re-check inside a session never lowers
-it), and above 6 it imposes the same doubling delay. Someone who knows one
-user's password therefore cannot guess at another's indefinitely by logging
-in between guesses: the delay keeps doubling, and each forgiven failure
-costs ten clean unlocks (ten key derivations). *Add account* and
-*change password* refuse a password some user already has
+**Guessing (0.3).** There is one failed-attempt counter for the device: a
+wrong password counts the same whoever's it was meant to be, and it is
+counted before the check (cutting the power when the result shows on the
+supply line saves nothing).
+
+* **Delay.** None for the first `MW_PW_FREE_TRIES` (10) wrong passwords,
+  then 1 min, doubling, up to `MW_PW_MAX_DELAY_MS` (8 h). Once an account has
+  logged in since power-on the delay is at most 10 minutes
+  (`MW_PW_DELAY_AFTER_LOGIN_MS`): the owner who mistypes after using the
+  device does not wait hours. That mark is in RAM only — a device taken away
+  and switched off is back to the long delays. The device has no clock: a
+  delay runs while it is on, and starts over in full after a restart.
+* **Clearing (0.3.1).** Any correct password clears the counter — a login
+  into any account, or a re-check of the password inside a session. The
+  model: whoever guesses knows no password at all.
+* **Child PIN.** From `MW_PW_CHILD_AT` (45) wrong passwords on, a random
+  four-digit number shown on the screen has to be typed before every
+  password; a wrong or cancelled number is not an attempt.
+* **Wipe.** At `MW_PW_WIPE_AT` (50) the device erases itself: the storage
+  partition first, then the NVS (the record with the counter last). A
+  counter found at the limit at start (a power cut during the last check or
+  during the wipe) wipes again before anything else.
+
+*Add account* and *change password* refuse a password some user already has
 (`MW_ERR_EXISTS`); that answer reveals as much as a successful login, so it
-is counted as a failed attempt too. A full device (`MW_USER_FILES_MAX` = 32
-directory files, no decoy left) refuses *Add account*; filling it shows how
-many slots were free, i.e. the number of users.
+is counted as a failed attempt too.
+
+What this does **not** stop: whoever knows one account's password can log
+in between guesses at another's and so never reach the wipe (the delays
+stay within 10 minutes after that login). With the password KDF at a few
+seconds per guess on the chip that is still slow, but it is not a limit.
+Whoever can write the flash can put back an old copy of the record (lower
+counter) or run firmware without a counter at all (§6.3).
 
 **Not hidden.** That the device supports several users (the Settings items
 are always there; each account has a name, seen only by that account).
+A passphrase wallet is marked `*` in the account's list.
 Whether the password just typed belongs to the first user
 or to another one may be told from a few milliseconds of timing (the second
 needs a file read). Settings, the touch calibration and the eFuse key are
 shared.
 
-**Limits.** 32 users (`MW_USERS_MAX`, the slot count), 64 wallets each
-(`MAX_WALLETS`). The slots take about 315 KB of the 3.9 MB `storage`
-partition; NVS holds nothing per user. Every password, the first one
-included, is 8..64 characters.
+**Limits.** 16..24 accounts (per chip, see *Capacity*), 64 wallets each
+(`MAX_WALLETS`). The 24 slots take about 1.9 MB of the 3.9 MB `storage`
+partition; NVS holds nothing per account. Every password, the first one
+included, is 8..64 characters, and none may be the reset phrase.
 
-**Power loss.** A file is replaced as write `.tmp` → old file to `.bak` →
-`.tmp` to the name → drop `.bak`; the next access puts a lone `.bak` back. A
+**Deleting the last account** does not reset the device (a reset would tell
+a coercer that no other account was left). The device stays on the password
+screen; nothing opens any more, and the reset phrase is the way out.
+
+**Passphrase hints.** A wallet's optional hint (up to 31 characters) is kept
+in the sealed directory and shown before its passphrase is asked - to
+whoever has opened that account. It must never contain the passphrase.
+
+**Power loss.** Since 0.3 the `storage` partition is LittleFS, which is
+copy-on-write: a file being written is committed when it is closed, and a
+power cut leaves the previous version and an intact file system (FAT, used
+before, could be damaged as a whole by a cut in the middle of a table
+update). A file is replaced as write `.tmp` → rename it over the name, one
+atomic step in LittleFS (should the rename over an existing file ever be
+refused, that write falls back to old file → `.bak`, `.tmp` → name, drop
+`.bak`). At mount a `.tmp` left by a cut is dropped and a lone `.bak` put
+back. Since 0.3.2 the names and sizes of the files are kept in RAM (read
+once at mount, kept up to date by every write and removal), so looking a
+file up costs no flash access; the FAT of older firmware keeps the old
+replace scheme until it is converted. A
 directory that exists but cannot be read is an error, never an empty user
 (nothing is written over it), and a password change past its commit point
 is never rolled back — it stays pending until a login finishes it. A
@@ -450,10 +531,29 @@ password change has its own commit point (`device_password.md`). The
 no password record (a fresh board); otherwise the device reports the I/O
 error instead of wiping the users.
 
-**Factory reset without a password.** Cancel on the password screen offers
-a factory reset (behind the confirmation code) — the only way out once no
-password opens anything. Anyone holding the device can wipe it this way, as
-they could by re-flashing it.
+**Factory reset without a password (0.3).** Typing the reset phrase
+`MW_RESET_PHRASE` ("Reset My Device 1029384756" by default) into the
+password field, then the confirmation code, erases the device — the way out
+once no password opens anything. It is checked before the password and is
+never an attempt; it works during a lockout delay too. Cancelling the
+password screen, or its input timeout, only goes back to the start screen.
+Anyone holding the device can wipe it this way, as they could by re-flashing
+it.
+
+**Storage update from older firmware (0.3.1).** A device updated from FAT
+storage converts it once at start, before the password: the slots beyond
+the current 24 go first (decoys only); every file is read into PSRAM, read
+again from the FAT and compared by CRC; the screen shows how many files and
+kilobytes and asks for the confirmation code ("do not switch off, seeds on
+paper?"). Then (NVS mark `fsmig`) the partition is erased completely,
+formatted as LittleFS, and the files are written back and read back
+against their CRCs. **A power cut in that minute loses the wallets** —
+PSRAM does not survive it; the next start finds the mark, puts an empty
+LittleFS in place and says so (restore from the seeds or reset). Declining
+keeps the FAT in use and asks again at the next start. The partition table
+changes only the `storage` subtype (`fat` → `spiffs`, cosmetic: the
+partition is found by its label, and the old FAT is mounted through the
+wear-levelling layer directly).
 
 ---
 
@@ -470,7 +570,7 @@ they could by re-flashing it.
 | Imported raw key material | `mw_wallet_create_from_keys()` | Single `done:` cleanup path — the 64-byte payload and the derived comparison scalar |
 | Deleted wallet record | `mw_wallet_delete()` | Random / random / zero, each pass committed, then the slot is dropped (TZ 7.2) |
 | A user | `mw_device_auth_delete_user()` | Its wallets, key image caches and directory file (zeroed, then removed) |
-| Everything | `mw_factory_reset()` (HAL) + `mw_fstore_wipe_all()` | Erases the NVS partition and every file of the `storage` partition, then reboots |
+| Everything | `mw_shell_wipe_device()`: `mw_fstore_wipe_all()` + `mw_factory_reset()` (HAL) | Factory reset, the reset phrase, the 50th wrong password: an NVS mark first, the whole `storage` partition erased (and a leftover migration copy), then the NVS partition, then a reboot; a cut before the NVS erase repeats the wipe at the next start |
 
 All wiping goes through `mw_memzero()`, which the compiler is not allowed to
 optimise away.
@@ -554,12 +654,24 @@ What follows for the user:
 * the password is the barrier against a stolen device: new passwords must have
   at least 8 characters (`MW_DEVICE_PW_MIN_NEW`), and digits-only, one repeated
   character or a plain run (`abcdefgh`) draws a warning;
-* whoever knows the device password opens every wallet that has no
+* whoever knows the account password opens every wallet that has no
   passphrase - the passphrase (§3) is the second factor.
 
 Enable Secure Boot v2 and flash encryption (§4.2) to close the oracle. Both are
 irreversible and lock you out of plain reflashing; the firmware does not turn
 them on by itself.
+
+**Lock firmware updates (0.3, Settings).** Burns the eFuses `DIS_PAD_JTAG`,
+`DIS_USB_JTAG`, `SOFT_DIS_JTAG`, `DIS_DOWNLOAD_MODE`,
+`DIS_USB_OTG_DOWNLOAD_MODE`, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE`,
+`DIS_FORCE_DOWNLOAD` and `DIS_DIRECT_BOOT`, after three warnings, a typed
+number and the account password. Afterwards neither JTAG nor the ROM
+download mode (USB or UART) works: the firmware cannot be read out,
+debugged or replaced over a cable — and can never be updated again (there
+is no signed OTA path). It is irreversible. It does **not** stop someone who
+opens the case and writes the flash chip directly with a programmer: their
+firmware boots, because without secure boot nothing checks it. It raises
+the bar from "a USB cable" to "a soldering iron".
 
 ### 6.4 No anti-tamper
 
@@ -574,7 +686,7 @@ and are not mitigated here.
 * **Passphrase check (task 3).** A wallet created with a passphrase keeps a
   14-byte check of the passphrase wallet's public keys INSIDE the sealed seed
   record, so a typo is caught ("wrong passphrase") while the check is only
-  readable after the device password unlocked the store. Records made by an
+  readable after the account password unlocked the store. Records made by an
   older firmware carry no check: there a wrong passphrase still silently
   yields a different wallet, and the device says it cannot verify. The
   directory does reveal whether a wallet has a passphrase variant (it has to:
@@ -660,10 +772,10 @@ and are not mitigated here.
   exported means the online wallet may be spending an already spent output;
   the device refuses and explains. Inputs already spent by an earlier
   transaction signed on the device are warned about. The key image cache
-  (`ki_cache.c`) is sealed (AES-GCM, device key) on the FAT partition and
+  (`ki_cache.c`) is sealed (AES-GCM, device key) on the storage partition and
   erased with its wallet and by the factory reset.
 * **The Minesweeper start screen is a decoy, not a security boundary.** It
-  hides the wallet from a casual look; the device password is what protects
+  hides the wallet from a casual look; the account password is what protects
   the sealed seeds. The USB descriptors still name the device.
 * **Autolock** closes whatever dialog is open, wipes the keys, drops the
   password-derived user key (`mw_device_auth_forget`) and clears the link's

@@ -9,6 +9,9 @@
 extern "C" {
 #endif
 
+// Passphrase hint: up to 31 bytes and the NUL.
+#define MW_PP_HINT_LEN 32
+
 // TZ 7.1 - layout kept byte-compatible with the spec.
 typedef struct {
     uint32_t id;
@@ -23,10 +26,23 @@ typedef struct {
     // task 3 item 5: MW_PP_* - whether a passphrase variant exists. The check
     // value itself lives inside the sealed record, never in the directory.
     uint8_t  pp_state;
-    // Generation of the key image cache file of each passphrase variant
-    // (anti-rollback, ki_cache.c); kept in the sealed user directory.
-    uint32_t ki_gen[2];
+    // Optional hint for the passphrase (v9.2), shown before it is asked.
+    char     pp_hint[MW_PP_HINT_LEN];
+    // v0.3: the wallet's network (MW_WNET_*; MW_WNET_DEFAULT = the device
+    // setting, for records written before 0.3) and a balance the user typed
+    // in (piconero, valid while MW_BAL_MANUAL is set).
+    uint8_t  network;
+    uint8_t  bal_flags;
+    uint64_t bal_manual;
 } wallet_entry_t;
+
+// wallet_entry_t.network
+#define MW_WNET_DEFAULT  0
+#define MW_WNET_MAINNET  1
+#define MW_WNET_STAGENET 2
+#define MW_WNET_TESTNET  3
+// wallet_entry_t.bal_flags
+#define MW_BAL_MANUAL    0x01
 
 // wallet_entry_t.pp_state
 #define MW_PP_UNKNOWN  0   // record from an older firmware: ask, cannot verify
@@ -41,7 +57,15 @@ typedef struct {
     uint32_t       count;
     uint32_t       active_wallet_id;
     char           account[MW_ACCOUNT_NAME_LEN];
+    uint32_t       ki_gen;            // key image container generation (ki_cache.c)
+    uint8_t        uid[16];           // v0.3: random, fixed for the account's life
+    uint32_t       ki_warned;         // container size (64 KiB steps) last warned about
+    uint8_t        opts;              // MW_ACC_OPT_*
+    uint8_t        fmt;               // 0.3.2: storage format reached (upgrade())
 } wallet_store_t;
+
+// wallet_store_t.opts
+#define MW_ACC_OPT_NO_BALANCE 0x01    // balance estimate and tx list switched off
 
 mw_err_t mw_wallet_store_init(void);
 mw_err_t mw_wallet_store_load(wallet_store_t* out);
@@ -125,12 +149,14 @@ const wallet_entry_t* mw_wallet_get(uint32_t id);
 mw_err_t mw_wallet_store_count(uint32_t* count);
 
 // ---------------- users (multi-user, v9) -------------------------------------
-// The device always holds exactly MW_USERS_MAX directory files ("slots"):
-// one per user, the rest decoys of the same size. A decoy carries a mark
-// only this chip can compute (eFuse HMAC), so the firmware can reuse it for
-// a new user while a flash dump shows MW_USERS_MAX random files whatever
-// the number of users.
-#define MW_USER_FILES_MAX  MW_USERS_MAX
+// The device always holds exactly MW_USER_FILES_MAX slots - a directory
+// "u<hex>" and a key image container "c<hex>" each: one per account, the
+// rest decoys of the same size. A decoy carries a mark only this chip can
+// compute (eFuse HMAC), so the firmware can give it to a new account while a
+// flash dump shows the same files whatever the number of accounts. How many
+// accounts fit is MW_USERS_MIN..MW_USER_FILES_MAX, fixed per chip and known
+// only to it, so filling the slots does not tell how many there were.
+#define MW_USER_FILES_MAX  MW_USERS_SLOTS
 
 // Every user's directory is one sealed file in the file store, named
 //   "u" + 24 hex digits of HMAC(user key, "mw.user.dir.v1")
@@ -172,6 +198,11 @@ int      mw_wallet_store_user_files(void);
 // when there are more (a cut between creating a user and dropping a decoy).
 mw_err_t mw_wallet_store_decoys_ensure(void);
 
+// Progress of the slow storage work (decoys written: first setup, the
+// storage update), `done` of `total` files; NULL switches it off.
+typedef void (*mw_wallet_store_progress_fn)(uint32_t done, uint32_t total, void* ctx);
+void     mw_wallet_store_set_progress(mw_wallet_store_progress_fn fn, void* ctx);
+
 // Whether a slot is free for another user (a decoy is left).
 bool     mw_wallet_store_slot_free(void);
 
@@ -204,9 +235,46 @@ mw_err_t mw_wallet_store_rekey(const uint8_t old_key[32], const uint8_t new_key[
 // and the next login finishes it (new_key is installed).
 bool     mw_wallet_store_rekey_committed(void);
 
-// Key image cache generation of a wallet variant (ki_cache.c).
-uint32_t mw_wallet_ki_gen(uint32_t id, uint8_t variant);
-mw_err_t mw_wallet_ki_gen_set(uint32_t id, uint8_t variant, uint32_t gen);
+// Generation of the account's key image container (ki_cache.c), kept in
+// the sealed directory.
+uint32_t mw_wallet_store_ki_gen(void);
+mw_err_t mw_wallet_store_ki_gen_set(uint32_t gen);
+
+// The 24 hex digits that name the logged-in account's slot ("u<hex>" is its
+// directory, "c<hex>" its key image container).
+#define MW_SLOT_HEX 24
+mw_err_t mw_wallet_store_slot_hex(char out[MW_SLOT_HEX + 1]);
+
+// The account's identity for the password counter (device_auth.c): 16
+// random bytes made at the first call and kept through password changes.
+mw_err_t mw_wallet_store_account_uid(uint8_t out[16]);
+// Accounts on the device (slots that are not decoys); -1 on an error.
+int      mw_wallet_store_accounts(void);
+// Account options (MW_ACC_OPT_*).
+uint8_t  mw_wallet_store_opts(void);
+mw_err_t mw_wallet_store_set_opts(uint8_t opts);
+// The 64 KiB steps of the key image container the user was last warned
+// about (ki growth warnings, flows.cpp).
+uint32_t mw_wallet_store_ki_warned(void);
+mw_err_t mw_wallet_store_set_ki_warned(uint32_t steps);
+
+// A wallet's network: its own, or the device default for MW_WNET_DEFAULT.
+// Returns an mw_network_t value.
+int      mw_wallet_network(uint32_t id);
+mw_err_t mw_wallet_set_network(uint32_t id, uint8_t wnet);
+// A manually entered balance (`set` false clears it).
+mw_err_t mw_wallet_set_manual_balance(uint32_t id, bool set, uint64_t piconero);
+
+// Passphrase hint of a wallet ("" when none); set with "" to clear. Up to
+// 31 bytes, no control characters. Only this account sees it.
+mw_err_t mw_wallet_pp_hint(uint32_t id, char* out, size_t cap);
+mw_err_t mw_wallet_set_pp_hint(uint32_t id, const char* hint);
+
+// Brings the logged-in account's storage to the current format: a v9.1
+// directory is rewritten as v2, the per-wallet key image files of older
+// firmware go into the account's container, and the container is created
+// when there is none. MW_OK when there was nothing to do.
+mw_err_t mw_wallet_store_upgrade(void);
 
 #ifdef __cplusplus
 }

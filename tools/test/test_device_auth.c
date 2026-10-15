@@ -97,36 +97,109 @@ MW_TEST(test_set_rules_and_verify)
 
 MW_TEST(test_lockout_after_failures)
 {
+    char pw[16];
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("password1"), MW_OK);
     mw_device_auth_forget();
+    CHECK_EQ_INT(mw_device_auth_init(), MW_OK);               // power-on: nobody logged in
 
-    CHECK_EQ_INT(mw_device_auth_verify("x1"), MW_ERR_DECRYPT);
-    CHECK_EQ_INT(mw_device_auth_verify("x2"), MW_ERR_DECRYPT);
-    CHECK_EQ_INT(mw_device_auth_lockout_ms(), 0u);              // two free tries
-    CHECK_EQ_INT(mw_device_auth_verify("x3"), MW_ERR_DECRYPT);  // third -> delay
-    CHECK_EQ_INT(mw_device_auth_failed_attempts(), 3);
-    CHECK(mw_device_auth_lockout_ms() > 0u);
-    CHECK(mw_device_auth_lockout_ms() <= 2000u);
+    for (int i = 1; i <= MW_PW_FREE_TRIES; i++) {
+        snprintf(pw, sizeof pw, "x%d", i);
+        CHECK_EQ_INT(mw_device_auth_verify(pw), MW_ERR_DECRYPT);
+        CHECK_EQ_INT(mw_device_auth_lockout_ms(), 0u);          // ten free tries
+    }
+    CHECK_EQ_INT(mw_device_auth_verify("x11"), MW_ERR_DECRYPT); // eleventh -> 1 min
+    CHECK_EQ_INT(mw_device_auth_failed_attempts(), 11);
+    CHECK(mw_device_auth_lockout_ms() > 59000u);
+    CHECK(mw_device_auth_lockout_ms() <= 60000u);
 
     // While the delay runs even the right password is refused, and the
     // refusal does not count as another failure.
     CHECK_EQ_INT(mw_device_auth_verify("password1"), MW_ERR_ABORTED);
-    CHECK_EQ_INT(mw_device_auth_failed_attempts(), 3);
+    CHECK_EQ_INT(mw_device_auth_failed_attempts(), 11);
 
-    // The counter is persisted: a "reboot" re-arms the delay.
+    // The counter is persisted: a "reboot" re-arms the delay in full.
+    mw_host_advance_ms(50000);
     CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
-    CHECK(mw_device_auth_lockout_ms() > 0u);
+    CHECK(mw_device_auth_lockout_ms() > 59000u);
 
-    mw_host_advance_ms(2500);
-    CHECK_EQ_INT(mw_device_auth_lockout_ms(), 0u);
-    CHECK_EQ_INT(mw_device_auth_verify("x4"), MW_ERR_DECRYPT);  // fourth -> 4 s
-    CHECK(mw_device_auth_lockout_ms() > 2000u);
-    CHECK(mw_device_auth_lockout_ms() <= 4000u);
-    mw_host_advance_ms(4500);
+    mw_host_advance_ms(60001);
+    CHECK_EQ_INT(mw_device_auth_verify("x12"), MW_ERR_DECRYPT); // -> 2 min
+    CHECK(mw_device_auth_lockout_ms() > 119000u);
+    CHECK(mw_device_auth_lockout_ms() <= 120000u);
+    mw_host_advance_ms(120001);
+    // One account on the device: its login clears the counter.
     CHECK_EQ_INT(mw_device_auth_verify("password1"), MW_OK);
     CHECK_EQ_INT(mw_device_auth_failed_attempts(), 0);
     CHECK_EQ_INT(mw_device_auth_lockout_ms(), 0u);
+}
+
+MW_TEST(test_delay_schedule)
+{
+    CHECK_EQ_INT(mw_device_pw_delay_for(0, false), 0u);
+    CHECK_EQ_INT(mw_device_pw_delay_for(10, false), 0u);
+    CHECK_EQ_INT(mw_device_pw_delay_for(11, false), 60000u);
+    CHECK_EQ_INT(mw_device_pw_delay_for(12, false), 120000u);
+    CHECK_EQ_INT(mw_device_pw_delay_for(19, false), 256u * 60000u);
+    CHECK_EQ_INT(mw_device_pw_delay_for(20, false), MW_PW_MAX_DELAY_MS);    // 8 h
+    CHECK_EQ_INT(mw_device_pw_delay_for(49, false), MW_PW_MAX_DELAY_MS);
+    CHECK_EQ_INT(mw_device_pw_delay_for(255, false), MW_PW_MAX_DELAY_MS);
+    // After a login since power-on: at most ten minutes.
+    CHECK_EQ_INT(mw_device_pw_delay_for(11, true), 60000u);
+    CHECK_EQ_INT(mw_device_pw_delay_for(15, true), MW_PW_DELAY_AFTER_LOGIN_MS);
+    CHECK_EQ_INT(mw_device_pw_delay_for(49, true), MW_PW_DELAY_AFTER_LOGIN_MS);
+}
+
+static int g_wiped;
+static void wipe_hook(void) { g_wiped++; }
+
+static void wrong_n(int n)
+{
+    for (int i = 0; i < n; i++) {
+        mw_host_advance_ms(mw_device_auth_lockout_ms() + 1u);
+        CHECK_EQ_INT(mw_device_auth_verify("wrong-password"), MW_ERR_DECRYPT);
+    }
+}
+
+MW_TEST(test_wipe_at_limit)
+{
+    fresh();
+    g_wiped = 0;
+    mw_device_auth_set_wipe_hook(wipe_hook);
+    CHECK_EQ_INT(mw_device_auth_set("right-password"), MW_OK);
+    mw_device_auth_forget();
+    CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
+    wrong_n(MW_PW_CHILD_AT - 1);
+    CHECK(!mw_device_auth_child_pin_due());
+    wrong_n(1);
+    CHECK(mw_device_auth_child_pin_due());                    // the child PIN from here
+    CHECK_EQ_INT(mw_device_auth_attempts_left(), MW_PW_WIPE_AT - MW_PW_CHILD_AT);
+    wrong_n(MW_PW_WIPE_AT - MW_PW_CHILD_AT - 1);
+    CHECK_EQ_INT(g_wiped, 0);
+    CHECK_EQ_INT(mw_device_auth_attempts_left(), 1);
+    wrong_n(1);
+    CHECK_EQ_INT(g_wiped, 1);                                 // the 50th wipes
+    CHECK(mw_device_auth_wipe_due());
+    // A power cut before the wipe finished: it runs again at the next start,
+    // and no password is checked meanwhile.
+    CHECK_EQ_INT(mw_device_auth_init(), MW_OK);
+    mw_device_auth_wipe_check();
+    CHECK_EQ_INT(g_wiped, 2);
+    mw_host_advance_ms(mw_device_auth_lockout_ms() + 1u);
+    CHECK_EQ_INT(mw_device_auth_verify("right-password"), MW_ERR_ABORTED);
+    CHECK_EQ_INT(g_wiped, 3);
+    mw_device_auth_set_wipe_hook(NULL);
+}
+
+MW_TEST(test_reset_phrase_never_a_password)
+{
+    fresh();
+    CHECK(mw_device_pw_is_reset_phrase(MW_RESET_PHRASE));
+    CHECK(!mw_device_pw_is_reset_phrase("Reset My Device"));
+    CHECK_EQ_INT(mw_device_auth_set(MW_RESET_PHRASE), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_device_auth_set("right-password"), MW_OK);
+    CHECK_EQ_INT(mw_device_auth_change("right-password", MW_RESET_PHRASE), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_device_auth_add_user(MW_RESET_PHRASE, NULL), MW_ERR_INVALID_ARG);
 }
 
 MW_TEST(test_change_password_rekeys_wallets)
@@ -245,11 +318,11 @@ MW_TEST(test_lockout_then_success_persists)
     fresh();
     CHECK_EQ_INT(mw_device_auth_set("right-pw"), MW_OK);
     mw_device_auth_forget();
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 12; i++) {
         mw_host_advance_ms(mw_device_auth_lockout_ms() + 1u);
         CHECK_EQ_INT(mw_device_auth_verify("wrong"), MW_ERR_DECRYPT);
     }
-    CHECK_EQ_INT(mw_device_auth_failed_attempts(), 5);
+    CHECK_EQ_INT(mw_device_auth_failed_attempts(), 12);
     CHECK(mw_device_auth_lockout_ms() > 0u);
     mw_host_advance_ms(mw_device_auth_lockout_ms() + 1u);
     CHECK_EQ_INT(mw_device_auth_verify("right-pw"), MW_OK);
@@ -761,6 +834,9 @@ int main(void)
     RUN_TEST(test_erase_and_reset);
     RUN_TEST(test_success_reset_persists);
     RUN_TEST(test_lockout_then_success_persists);
+    RUN_TEST(test_delay_schedule);
+    RUN_TEST(test_wipe_at_limit);
+    RUN_TEST(test_reset_phrase_never_a_password);
     RUN_TEST(test_reset_write_failure_retried);
     RUN_TEST(test_stale_storage_healed);
     RUN_TEST(test_increment_write_checked);

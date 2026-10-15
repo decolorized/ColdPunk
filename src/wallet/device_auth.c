@@ -17,6 +17,8 @@
 //     79  32   pending verifier            |  "changing" is set; zero
 //     111 32   wrap_new = new_key ^ H(old_key, "wrap.new")   |  otherwise
 //     143 32   wrap_old = old_key ^ H(new_key, "wrap.old")  /
+//     175  1   0 (the lifetime counter of v9..v0.2, no longer used)
+//     176 17   0 (v0.3.0 kept an account mark here; unused since 0.3.1)
 //
 // Derivation (version 2)
 //   PBKDF2-HMAC-SHA256, MW_DEVICE_PW_ROUNDS rounds in total. The PBKDF2 work is split into MW_DEVICE_PW_HW_STEPS chunks; between the
@@ -39,6 +41,17 @@
 //   either password is accepted: it opens one key, the wrap gives the other,
 //   the re-key is resumed and the change completed. Nothing is ever sealed
 //   under a key whose password the record does not know.
+//
+// Wrong passwords (v0.3)
+//   One counter for the device, shared by every account, counted before the
+//   check (cutting the power at the right moment saves nothing). Any correct
+//   password clears it (v0.3.1). Delay: none up to MW_PW_FREE_TRIES, then
+//   MW_PW_FIRST_DELAY_MS doubling up to MW_PW_MAX_DELAY_MS - but at most
+//   MW_PW_DELAY_AFTER_LOGIN_MS once an account has logged in since power-on.
+//   The delay runs again in full after a reboot. At MW_PW_WIPE_AT wrong
+//   passwords in a row the wipe hook erases everything; a counter left at
+//   that value (power cut during the last check or the wipe) wipes at the
+//   next start.
 //
 // Users (v9)
 //   The record's salt and round count are the KDF parameters of EVERY user;
@@ -71,8 +84,8 @@ mw_err_t mw_store_blob_erase(const char* key);
 #define REC_VERSION  2
 #define REC_LEN_V1   58
 #define REC_LEN      MW_DEVICE_AUTH_REC_LEN
-#define REC_LEN_V2A  175                 // version 2 before v9 (no fails_total)
-#define CLEAN_PER_FORGIVE 10             // clean unlocks that lower fails_total by 1
+#define REC_LEN_V2A  175                 // version 2 before v9
+#define REC_LEN_V9   177                 // v9..v0.2 (lifetime counter, no tag)
 #define SALT_LEN     16
 #define VERIFIER_LEN 32
 
@@ -97,8 +110,6 @@ typedef struct {
     bool     present;
     params_t cur;
     uint8_t  fails;
-    uint8_t  fails_total;                // v9, see MW_DEVICE_PW_TOTAL_FREE
-    uint8_t  clean_streak;               // v9: unlocks without a failure in between
     bool     changing;
     params_t pend;
     uint8_t  wrap_new[32];
@@ -114,6 +125,11 @@ static uint32_t g_next_allowed_ms;       // mw_millis() value; 0 = no lockout
 static bool     g_save_pending;
 // Who is logged in: the first user (record verifier) or another one.
 static bool     g_session_primary;
+// An account has logged in since power-on: the delay is at most
+// MW_PW_DELAY_AFTER_LOGIN_MS. RAM only, so a device taken away and switched
+// off is back to the long delays.
+static bool     g_logged_since_boot;
+static mw_device_auth_wipe_fn g_wipe_fn;
 
 // ---------------------------------------------------------------------------
 static void put_u32(uint8_t* p, uint32_t v) {
@@ -152,8 +168,7 @@ static mw_err_t rec_save(void) {
         memcpy(b + 111, g_rec.wrap_new, 32);
         memcpy(b + 143, g_rec.wrap_old, 32);
     }
-    b[175] = g_rec.fails_total;
-    b[176] = g_rec.clean_streak;
+    b[175] = 0;
     mw_err_t e = mw_store_blob_write(REC_KEY, b, sizeof b);
     mw_memzero(b, sizeof b);
     return e;
@@ -180,7 +195,8 @@ static mw_err_t rec_load(void) {
         memcpy(g_rec.cur.salt, b + 9, SALT_LEN);
         memcpy(g_rec.cur.verifier, b + 25, VERIFIER_LEN);
         g_rec.fails = b[57];
-    } else if (b[4] == REC_VERSION && (len == REC_LEN || len == REC_LEN_V2A)) {
+    } else if (b[4] == REC_VERSION &&
+               (len == REC_LEN || len == REC_LEN_V9 || len == REC_LEN_V2A)) {
         const uint8_t fl   = b[58];
         g_rec.cur.version  = (fl & FLAG_CUR_V1) ? 1 : 2;
         g_rec.cur.hw_bound = (fl & FLAG_HW) != 0;
@@ -199,8 +215,6 @@ static mw_err_t rec_load(void) {
             memcpy(g_rec.wrap_old, b + 143, 32);
             if (g_rec.pend.rounds == 0) e = MW_ERR_FORMAT;
         }
-        g_rec.fails_total  = (len == REC_LEN) ? b[175] : g_rec.fails;
-        g_rec.clean_streak = (len == REC_LEN) ? b[176] : 0;
     } else {
         e = (b[4] > REC_VERSION) ? MW_ERR_VERSION : MW_ERR_FORMAT;
     }
@@ -237,25 +251,21 @@ static void retry_pending(void) {
     if (g_save_pending) (void)rec_commit();
 }
 
-static uint32_t delay_for(uint8_t fails) {
-    if (fails < MW_DEVICE_PW_FREE_TRIES) return 0;
-    unsigned shift = (unsigned)fails - (MW_DEVICE_PW_FREE_TRIES - 1);   // 3 -> 1
-    if (shift > 20) shift = 20;
-    uint32_t ms = 1000u << shift;                                       // 2s, 4s, 8s ...
-    if (ms > MW_DEVICE_PW_MAX_DELAY_MS) ms = MW_DEVICE_PW_MAX_DELAY_MS;
-    return ms;
+_Static_assert(MW_PW_WIPE_AT > MW_PW_FREE_TRIES && MW_PW_WIPE_AT < 255, "MW_PW_WIPE_AT");
+_Static_assert(MW_PW_CHILD_AT <= MW_PW_WIPE_AT, "MW_PW_CHILD_AT");
+
+uint32_t mw_device_pw_delay_for(uint8_t fails, bool logged) {
+    if (fails <= MW_PW_FREE_TRIES) return 0;
+    unsigned shift = (unsigned)fails - (MW_PW_FREE_TRIES + 1);          // 11 -> 0
+    uint64_t ms = (shift >= 30) ? (uint64_t)MW_PW_MAX_DELAY_MS
+                                : (uint64_t)MW_PW_FIRST_DELAY_MS << shift;
+    if (ms > MW_PW_MAX_DELAY_MS) ms = MW_PW_MAX_DELAY_MS;
+    if (logged && ms > MW_PW_DELAY_AFTER_LOGIN_MS) ms = MW_PW_DELAY_AFTER_LOGIN_MS;
+    return (uint32_t)ms;
 }
 
-// The delay of the lifetime counter: none up to MW_DEVICE_PW_TOTAL_FREE,
-// then the same doubling as after the free tries.
 static uint32_t delay_now(void) {
-    uint32_t d = delay_for(g_rec.fails);
-    if (g_rec.fails_total > MW_DEVICE_PW_TOTAL_FREE) {
-        const unsigned extra = (unsigned)g_rec.fails_total - MW_DEVICE_PW_TOTAL_FREE;
-        const uint32_t t = delay_for((uint8_t)(MW_DEVICE_PW_FREE_TRIES - 1 + (extra > 200 ? 200 : extra)));
-        if (t > d) d = t;
-    }
-    return d;
+    return mw_device_pw_delay_for(g_rec.fails, g_logged_since_boot);
 }
 
 static void arm_lockout(void) {
@@ -267,43 +277,48 @@ static void arm_lockout(void) {
 // An attempt is counted and stored BEFORE the (slow, power-visible) check:
 // cutting the power once the result shows on the supply line no longer
 // saves an attempt. Returns the counters before, for attempt_back().
-typedef struct { uint8_t fails, total; } attempt_t;
+typedef struct { uint8_t fails; } attempt_t;
 static attempt_t attempt_begin(void) {
-    const attempt_t a = { g_rec.fails, g_rec.fails_total };
+    const attempt_t a = { g_rec.fails };
     if (g_rec.fails < 255) g_rec.fails++;
-    if (g_rec.fails_total < 255) g_rec.fails_total++;
     (void)rec_commit();
     return a;
 }
 // Not a wrong password (eFuse unavailable, I/O): the attempt is given back.
 static void attempt_back(attempt_t a) {
     g_rec.fails = a.fails;
-    g_rec.fails_total = a.total;
     (void)rec_commit();
 }
-// Success: the run of failures is over. The lifetime counter drops by one
-// only after CLEAN_PER_FORGIVE unlocks in a row without any failure; a
-// re-check inside a session (`unlock` false) never lowers it.
-static void attempt_ok(attempt_t a, bool unlock) {
-    g_rec.fails = 0;
-    g_rec.fails_total = a.total;
-    if (unlock) {
-        if (a.fails != 0) {
-            g_rec.clean_streak = 0;
-        } else if (++g_rec.clean_streak >= CLEAN_PER_FORGIVE) {
-            g_rec.clean_streak = 0;
-            if (g_rec.fails_total > 0) g_rec.fails_total--;
-        }
+
+// Erases everything once the counter has reached MW_PW_WIPE_AT.
+static void wipe_if_due(void) {
+    if (g_rec.present && g_rec.fails >= MW_PW_WIPE_AT && g_wipe_fn) {
+        MW_LOGE("auth", "%u wrong passwords: erasing the device", (unsigned)g_rec.fails);
+        g_wipe_fn();
     }
+}
+
+// A wrong password: the attempt stays counted.
+static void attempt_wrong(void) {
+    arm_lockout();
+    wipe_if_due();
+}
+
+// A correct password - a login or a re-check inside a session - clears the
+// counter (v0.3.1: the attacker is assumed to know no password at all).
+static void attempt_ok(attempt_t a, bool unlock) {
+    (void)a;
+    if (unlock) g_logged_since_boot = true;
+    if (g_rec.fails) MW_LOGI("auth", "failed-attempt counter cleared");
+    g_rec.fails = 0;
     g_next_allowed_ms = 0;
     (void)rec_commit();
 }
 // A "taken" answer costs a guess too.
 static void attempt_failed_now(void) {
     if (g_rec.fails < 255) g_rec.fails++;
-    if (g_rec.fails_total < 255) g_rec.fails_total++;
     (void)rec_commit();
-    arm_lockout();
+    attempt_wrong();
 }
 
 bool mw_device_pw_weak(const char* pw) {
@@ -323,10 +338,14 @@ bool mw_device_pw_weak(const char* pw) {
     return digits || same || (n > 1 && (up || down));
 }
 
+bool mw_device_pw_is_reset_phrase(const char* pw) {
+    return pw && strcmp(pw, MW_RESET_PHRASE) == 0;
+}
+
 static bool password_ok(const char* pw) {
     if (!pw) return false;
     size_t n = strlen(pw);
-    return n >= MW_DEVICE_PW_MIN && n <= MW_DEVICE_PW_MAX;
+    return n >= MW_DEVICE_PW_MIN && n <= MW_DEVICE_PW_MAX && !mw_device_pw_is_reset_phrase(pw);
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +385,34 @@ static void prog_tick(uint32_t iterations, void* ctx) {
     g_prog_done += iterations;
     prog_report();
 }
+
+// The work after a successful check (MW_AUTH_STAGE_OPEN), in steps.
+#define OPEN_STEPS 5
+static void open_step(int k) {
+    g_prog_stage = MW_AUTH_STAGE_OPEN;
+    g_prog_total = OPEN_STEPS;
+    g_prog_done  = (uint64_t)k;
+    g_prog_last  = -1;
+    prog_report();
+}
+
+// Decoy files written while an account is set up or opened: the open stage
+// moves with them (from `lo` to `hi` permille).
+static int g_ws_lo, g_ws_hi;
+static void ws_prog_cb(uint32_t done, uint32_t total, void* ctx) {
+    (void)ctx;
+    if (!g_prog_fn || !total) return;
+    g_prog_stage = MW_AUTH_STAGE_OPEN;
+    g_prog_total = 1000;
+    g_prog_done  = (uint64_t)(g_ws_lo + (int)((uint64_t)(g_ws_hi - g_ws_lo) * done / total));
+    prog_report();
+}
+static void ws_prog_on(int lo, int hi) {
+    g_ws_lo = lo;
+    g_ws_hi = hi;
+    mw_wallet_store_set_progress(ws_prog_cb, NULL);
+}
+static void ws_prog_off(void) { mw_wallet_store_set_progress(NULL, NULL); }
 
 static void prog_finish(void) {
     g_prog_done = g_prog_total;
@@ -523,6 +570,7 @@ mw_err_t mw_device_auth_init(void) {
     mw_err_t e = rec_load();
     g_loaded = true;
     g_save_pending = false;                 // RAM == storage again
+    g_logged_since_boot = false;            // a start: nobody has logged in
     if (e != MW_OK) {
         MW_LOGE("auth", "password record unreadable (%s)", mw_err_str(e));
         return e;
@@ -579,9 +627,13 @@ mw_err_t mw_device_auth_set(const char* password) {
     if (e == MW_OK) e = mw_secure_user_key_set(key);
     if (e == MW_OK) {
         mw_wallet_store_close();
+        // The account's files and the decoys next to it (about 1.8 MB on
+        // a fresh device): its own stage, moving with every decoy.
+        ws_prog_on(0, 1000);
         (void)mw_wallet_store_user_create(key, "Main");   // MW_ERR_EXISTS cannot happen
         (void)mw_wallet_store_mark_primary();
         (void)mw_wallet_store_decoys_ensure();
+        ws_prog_off();
         g_session_primary = true;
     }
     if (e != MW_OK) {
@@ -605,6 +657,27 @@ uint32_t mw_device_auth_lockout_ms(void) {
 uint8_t mw_device_auth_failed_attempts(void) {
     if (ensure_loaded() != MW_OK) return 0;
     return g_rec.fails;
+}
+
+int mw_device_auth_attempts_left(void) {
+    if (ensure_loaded() != MW_OK) return MW_PW_WIPE_AT;
+    return g_rec.fails >= MW_PW_WIPE_AT ? 0 : MW_PW_WIPE_AT - g_rec.fails;
+}
+
+bool mw_device_auth_child_pin_due(void) {
+    return ensure_loaded() == MW_OK && g_rec.present && g_rec.fails >= MW_PW_CHILD_AT;
+}
+
+void mw_device_auth_set_wipe_hook(mw_device_auth_wipe_fn fn) {
+    g_wipe_fn = fn;
+}
+
+bool mw_device_auth_wipe_due(void) {
+    return ensure_loaded() == MW_OK && g_rec.present && g_rec.fails >= MW_PW_WIPE_AT;
+}
+
+void mw_device_auth_wipe_check(void) {
+    if (ensure_loaded() == MW_OK) wipe_if_due();
 }
 
 bool mw_device_auth_save_pending(void) {
@@ -655,7 +728,6 @@ static mw_err_t switch_password(const params_t* next, const uint8_t old_key[32],
 
     g_rec.cur = g_rec.pend;                        // step 3
     clear_pending();
-    g_rec.fails = 0;
     if (rec_commit() != MW_OK) {
         // The wallets are under new_key and storage still says "changing"
         // with both keys recoverable: the next unlock (either password)
@@ -744,7 +816,8 @@ mw_err_t mw_device_auth_verify(const char* password) {
     if (!password || !password[0]) return MW_ERR_INVALID_ARG;
     if (mw_device_auth_lockout_ms() > 0) return MW_ERR_ABORTED;
 
-    // Counted before the check; a success clears it again below.
+    if (g_rec.fails >= MW_PW_WIPE_AT) { wipe_if_due(); return MW_ERR_ABORTED; }
+    // Counted before the check; a success may clear it again below.
     const attempt_t before = attempt_begin();
 
     uint8_t key[32], cand[32], newer[32];
@@ -786,7 +859,7 @@ mw_err_t mw_device_auth_verify(const char* password) {
             (unsigned)(mw_millis() - t0), (unsigned)g_rec.cur.rounds);
     if (e == MW_ERR_DECRYPT) {
         mw_memzero(key, sizeof key);
-        arm_lockout();
+        attempt_wrong();
         return MW_ERR_DECRYPT;
     }
     if (e != MW_OK) {
@@ -801,11 +874,11 @@ mw_err_t mw_device_auth_verify(const char* password) {
     if (e != MW_OK) { mw_memzero(key, sizeof key); return e; }
     mw_wallet_store_close();
     g_session_primary = primary;
-    // The counter was raised before the check, so the reset is always
-    // written. The unlock itself never depends on the write: refusing it
-    // would lock the owner out; a failed write is retried (retry_pending).
-    attempt_ok(before, true);
 
+    // What follows the check is shown as its own stage (0.3.2: it ran
+    // without a progress before and looked like a hang).
+    const uint32_t t1 = mw_millis();
+    open_step(0);
     if (primary) {
         // Firmware before v9 kept the directory in NVS: move it first, the
         // upgrade below re-keys the user's files.
@@ -814,9 +887,26 @@ mw_err_t mw_device_auth_verify(const char* password) {
         (void)mw_wallet_store_mark_primary();
         maybe_upgrade(password, key);
     }
+    open_step(1);
     if (mw_wallet_store_resume() != MW_OK)
         MW_LOGE("auth", "interrupted password change not finished; will retry");
+    open_step(2);
+    // Older formats of this account (v9.1 directory, per-wallet key image
+    // files) to the current one.
+    if (mw_wallet_store_upgrade() != MW_OK)
+        MW_LOGE("auth", "account storage not converted; will retry at the next unlock");
+    open_step(3);
+    ws_prog_on(600, 800);
     (void)mw_wallet_store_decoys_ensure();
+    ws_prog_off();
+    open_step(4);
+    // The counter was raised before the check, so it is always written
+    // again. The unlock itself never depends on the
+    // write: refusing it would lock the owner out; a failed write is
+    // retried (retry_pending).
+    attempt_ok(before, true);
+    open_step(OPEN_STEPS);
+    MW_LOGD("auth", "account opened in %u ms after the check", (unsigned)(mw_millis() - t1));
     mw_memzero(key, sizeof key);
     return MW_OK;
 }
@@ -832,7 +922,11 @@ static mw_err_t session_check(const char* password, uint8_t key[32]) {
     if (!g_rec.present) return MW_ERR_NOT_SUPPORTED;
     if (!password || !password[0]) return MW_ERR_INVALID_ARG;
     if (mw_secure_user_key_copy(cur) != MW_OK) return MW_ERR_NOT_SUPPORTED;
-    if (mw_device_auth_lockout_ms() > 0) { mw_memzero(cur, sizeof cur); return MW_ERR_ABORTED; }
+    if (mw_device_auth_lockout_ms() > 0 || g_rec.fails >= MW_PW_WIPE_AT) {
+        mw_memzero(cur, sizeof cur);
+        wipe_if_due();
+        return MW_ERR_ABORTED;
+    }
     const attempt_t before = attempt_begin();
 
     e = check(password, key, cand);
@@ -852,7 +946,7 @@ static mw_err_t session_check(const char* password, uint8_t key[32]) {
     mw_memzero(cand, sizeof cand);
     if (e == MW_ERR_DECRYPT) {
         mw_memzero(key, 32);
-        arm_lockout();
+        attempt_wrong();
         return e;
     }
     if (e != MW_OK) {
@@ -954,7 +1048,9 @@ mw_err_t mw_device_auth_delete_user(const char* password) {
     e = session_check(password, key);
     mw_memzero(key, sizeof key);
     if (e != MW_OK) return e;
+    ws_prog_on(0, 1000);
     e = mw_wallet_store_user_destroy();
+    ws_prog_off();
     if (e != MW_OK) return e;
     if (g_session_primary) {
         // The record stays (its salt and round count are every user's), but
@@ -992,6 +1088,7 @@ mw_err_t mw_device_auth_erase(void) {
     memset(&g_rec, 0, sizeof g_rec);
     g_next_allowed_ms = 0;
     g_save_pending    = false;
+    g_logged_since_boot = false;
     g_corrupt = false;
     g_loaded = true;
     mw_err_t e = mw_store_blob_erase(REC_KEY);

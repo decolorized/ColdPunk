@@ -2,15 +2,45 @@
 #ifndef MW_APP_CONFIG_H
 #define MW_APP_CONFIG_H
 
-#define MW_FIRMWARE_VERSION      "0.1.0"
+#define MW_FIRMWARE_VERSION      "0.3.3"
 #define MW_FIRMWARE_NAME         "Monero Cold Wallet"
 
 // TZ 7.1. Per user (multi-user, v9): every user has a directory of its own.
 #define MAX_WALLETS              64
-// Users with their own password (Settings > Add user). Each user only sees
-// its own wallets; nothing shows how many users exist (security.md §4a).
-#define MW_USERS_MAX             32
+// Accounts with their own password (Settings > Add account). Each account
+// only sees its own wallets; nothing shows how many exist (security.md §4a).
+// The device holds MW_USERS_SLOTS slots; how many accounts it takes is
+// MW_USERS_MIN..MW_USERS_SLOTS, fixed per chip by its eFuse key.
+#define MW_USERS_MIN             16
+#define MW_USERS_SLOTS           24
+#define MW_USERS_MAX             MW_USERS_SLOTS
 #define WALLET_NAME_LEN          32
+
+// Typed into the password field, this erases the device (after one more
+// confirmation). It can never be a password.
+#ifndef MW_RESET_PHRASE
+#define MW_RESET_PHRASE          "Reset My Device 1029384756"
+#endif
+
+// Wrong passwords (all accounts share one counter, security.md §4a):
+//   up to MW_PW_FREE_TRIES        no delay
+//   then                          1 min, doubling, at most MW_PW_MAX_DELAY_MS
+//                                 (MW_PW_DELAY_AFTER_LOGIN_MS once any account
+//                                 has logged in since the counter was cleared)
+//   from MW_PW_CHILD_AT           a random PIN shown on screen must be typed
+//                                 before each password
+//   at MW_PW_WIPE_AT              everything is erased
+// Any correct password clears the counter.
+#ifndef MW_PW_WIPE_AT
+#define MW_PW_WIPE_AT            50
+#endif
+#ifndef MW_PW_CHILD_AT
+#define MW_PW_CHILD_AT           (MW_PW_WIPE_AT - 5)
+#endif
+#define MW_PW_FREE_TRIES         10
+#define MW_PW_FIRST_DELAY_MS     (60u * 1000u)
+#define MW_PW_MAX_DELAY_MS       (8u * 60u * 60u * 1000u)
+#define MW_PW_DELAY_AFTER_LOGIN_MS (10u * 60u * 1000u)
 
 // TZ 5.10: input buffers are wiped after this long without a keypress.
 #define MW_INPUT_TIMEOUT_MS      (5 * 60 * 1000)

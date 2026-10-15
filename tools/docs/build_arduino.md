@@ -191,19 +191,19 @@ Arduino IDE 2.x **не даёт выбрать произвольный CSV** ч
    `~/.arduino15/packages/esp32/hardware/esp32/<версия>/boards.txt` —
    работает, но затирается при обновлении пакета.
 
-Пример таблицы под 8 МБ флеша без OTA:
+Таблица проекта (`partitions.csv`, помещается в 8 МБ флеша, OTA нет):
 
 ```
-# Name,   Type, SubType, Offset,  Size,    Flags
-nvs,      data, nvs,     0x9000,  0x5000,
-otadata,  data, ota,     0xe000,  0x2000,
-app0,     app,  ota_0,   0x10000, 0x500000,
-storage,  data, fat,     0x510000,0x2E0000,
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xE000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x400000,
+storage,  data, spiffs,  0x410000, 0x3E0000,
 ```
 
-Раздел `storage` типа `fat` нужен, если USB MSC/Floppy отдаёт внутренний том,
-а не SD-карту (`transfer.h`: `MW_CHANNEL_USB` — «shares the SD/internal FAT
-volume»).
+В `storage` с прошивки 0.3 лежит LittleFS. Тип `spiffs` — только метка:
+прошивка находит раздел по имени `storage`. Не меняйте адрес и размер
+`storage` на устройстве с данными — кошельки станут нечитаемыми.
 
 ---
 

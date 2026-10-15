@@ -263,3 +263,17 @@ bool mw_ui_confirm_code(const char* title, const char* body) {
     if (!ok) mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_CODE_WRONG));
     return ok;
 }
+
+// ---------------------------------------------------------------------------
+void mw_ui_lockout_text(uint32_t ms, char* out, size_t cap) {
+    char wait[32];
+    const uint32_t sec = (ms + 999u) / 1000u;
+    if (sec >= 3600u)
+        snprintf(wait, sizeof(wait), TX(XSTR_WAIT_H), (unsigned)(sec / 3600u),
+                 (unsigned)((sec % 3600u + 59u) / 60u));
+    else if (sec >= 60u)
+        snprintf(wait, sizeof(wait), TX(XSTR_WAIT_M), (unsigned)(sec / 60u), (unsigned)(sec % 60u));
+    else
+        snprintf(wait, sizeof(wait), TX(XSTR_WAIT_S), (unsigned)sec);
+    snprintf(out, cap, TX(XSTR_PW_LOCKED), wait);
+}

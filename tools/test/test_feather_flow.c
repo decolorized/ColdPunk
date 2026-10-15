@@ -204,6 +204,15 @@ MW_TEST(test_outputs_to_key_images)
         }
     }
     CHECK_EQ_INT(mw_ki_cache_count(), 4);
+    // v0.3: the balance estimate from the export (none of them spent).
+    {
+        uint64_t total = 0;
+        uint32_t outs = 0, unknown = 9;
+        CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+        CHECK_EQ_INT((long long)total, 6500000000000LL);
+        CHECK_EQ_INT(outs, 4);
+        CHECK_EQ_INT(unknown, 0);
+    }
 
     // A second pass over the same file finds them known.
     plen = fx_outputs_plain(&g_base, g_outs, 4, 10, 14, g_plain, sizeof g_plain);
@@ -426,6 +435,18 @@ MW_TEST(test_unsigned_to_signed)
     for (uint32_t i = 0; i < 2; ++i) {
         const mw_ki_entry_t* e = mw_ki_cache_find_image(&tx.ki[i]);
         CHECK(e != NULL && (e->flags & MW_KI_F_SPENT));
+        CHECK(e != NULL && (e->bal & MW_KI_B_SPENT));
+    }
+    // v0.3: the estimate drops the inputs and adds the change.
+    {
+        uint64_t total = 0;
+        uint32_t outs = 0, unknown = 9;
+        CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+        CHECK_EQ_INT((long long)total,
+                     (long long)(6500000000000ULL - 3500000000000ULL +
+                                 (3500000000000ULL - 3000000000000ULL - 45000000ULL)));
+        CHECK_EQ_INT(outs, 3);
+        CHECK_EQ_INT(unknown, 0);
     }
 
     // Signing the same inputs again is reported as a re-spend.
@@ -978,16 +999,16 @@ MW_TEST(test_viewonly_text)
                  MW_ERR_INVALID_ARG);
 }
 
-// Audit round 1: an older copy of the cache file put back is refused, and a
-// full cache says so instead of dropping entries silently.
-static uint8_t g_snap[256 * 1024];
+// Audit round 1: an older copy of the cache file put back is refused. v9.2:
+// the cache has no size limit - the account's container grows past 64 KiB.
+static uint8_t g_snap[1024 * 1024];
 MW_TEST(test_ki_cache_rollback_and_full)
 {
     char name[40];
     size_t size = 0, got = 0;
     mw_ki_entry_t e;
-    mw_ki_cache_file_name(g_id, 0, name, sizeof name);
-    CHECK(name[0] == 'k');
+    mw_ki_store_file_name(name, sizeof name);
+    CHECK(name[0] == 'c');
 
     CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
     CHECK(!mw_ki_cache_rolled_back());
@@ -1031,21 +1052,149 @@ MW_TEST(test_ki_cache_rollback_and_full)
     CHECK(!mw_ki_cache_rolled_back());
     CHECK_EQ_INT(mw_ki_cache_count(), 1);
 
-    // Fill it up: the insert that does not fit is reported, nothing evicted.
-    for (uint32_t i = mw_ki_cache_count(); i < MW_KI_CACHE_MAX; ++i) {
+    // Far more than the old 4096 limit: the container grows in 64 KiB steps
+    // and everything comes back.
+    const uint32_t big = 9000;
+    for (uint32_t i = mw_ki_cache_count(); i < big; ++i) {
         memset(&e, 0, sizeof e);
         e.out_pub.b[0] = (uint8_t)i; e.out_pub.b[1] = (uint8_t)(i >> 8); e.out_pub.b[2] = 0xEE;
         e.image.b[0] = (uint8_t)i;   e.image.b[1] = (uint8_t)(i >> 8);   e.image.b[2] = 0xEE;
         CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
     }
-    CHECK_EQ_INT(mw_ki_cache_count(), MW_KI_CACHE_MAX);
-    memset(e.out_pub.b, 0xCC, 32);
-    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_ERR_TOO_MANY);
-    CHECK_EQ_INT(mw_ki_cache_count(), MW_KI_CACHE_MAX);
-    mw_ki_cache_close();                    // not saved
+    CHECK_EQ_INT(mw_ki_cache_count(), big);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+    CHECK(mw_ki_store_size() > MW_KI_STORE_STEP);
+    CHECK_EQ_INT((int)(mw_ki_store_size() % MW_KI_STORE_STEP), 0);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_count(), big);
+    // Back to one entry: the container shrinks to its 64 KiB again.
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_erase_wallet(g_id), MW_OK);
+    CHECK_EQ_INT((int)mw_ki_store_size(), (int)MW_KI_STORE_STEP);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_count(), 0);
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
     // Leave the cache open with the saved file, as the next test expects.
     CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
     CHECK_EQ_INT(mw_ki_cache_count(), 1);
+}
+
+// v0.3: the list of signed transactions and the estimate survive a reopen;
+// switching the estimate off drops every amount and list of the account.
+MW_TEST(test_balance_and_tx_list)
+{
+    mw_ki_tx_t t, got;
+    uint64_t total = 0;
+    uint32_t outs = 0, unknown = 0;
+    CHECK(mw_ki_cache_is_open());
+    const uint32_t keep = mw_ki_cache_count();
+    mw_ki_entry_t e;
+    memset(&e, 0, sizeof e);
+    e.out_pub.b[0] = 0xB1;
+    e.image.b[0] = 0xB2;
+    e.flags = MW_KI_F_EXPORTED;
+    e.amount = 1234;
+    e.bal = MW_KI_B_AMOUNT;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    // An input of a signed transaction: only the spent mark is added.
+    e.amount = 0;
+    e.bal = MW_KI_B_SPENT;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_find_pub(&e.out_pub)->amount, 1234);
+    // The next export says it is not spent (the transaction never went out).
+    e.amount = 1234;
+    e.bal = MW_KI_B_AMOUNT;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    const uint64_t with = total;
+    for (int i = 0; i < MW_KI_TX_MAX + 3; ++i) {
+        memset(&t, 0, sizeof t);
+        t.sent = 1000u + (uint64_t)i;
+        t.fee = 7;
+        t.n_recipients = 1;
+        snprintf(t.addr, sizeof t.addr, "4AbCdEf%d", i);
+        CHECK_EQ_INT(mw_ki_cache_tx_add(&t), MW_OK);
+    }
+    CHECK_EQ_INT(mw_ki_cache_tx_count(), MW_KI_TX_MAX);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_count(), keep + 1);
+    CHECK_EQ_INT(mw_ki_cache_tx_count(), MW_KI_TX_MAX);
+    CHECK(mw_ki_cache_tx_get(MW_KI_TX_MAX - 1, &got));
+    CHECK_EQ_INT((long long)got.sent, 1000LL + MW_KI_TX_MAX + 2);   // the newest kept
+    CHECK_EQ_INT(got.seq, MW_KI_TX_MAX + 3);
+    CHECK_EQ_STR(got.addr, "4AbCdEf202");
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    CHECK_EQ_INT((long long)total, (long long)with);
+    // The other variant has none of it.
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 1, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_count(), 0);
+    mw_ki_cache_close();
+
+    // Estimate off: amounts and lists dropped, the key images kept.
+    CHECK_EQ_INT(mw_wallet_store_set_opts(MW_ACC_OPT_NO_BALANCE), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_balance_forget_all(), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_count(), keep + 1);
+    CHECK_EQ_INT(mw_ki_cache_tx_count(), 0);
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    CHECK_EQ_INT((long long)total, 0);
+    CHECK_EQ_INT(outs, 0);
+    // ... and nothing new is recorded while it is off.
+    e.out_pub.b[0] = 0xB3;
+    e.amount = 99;
+    e.bal = MW_KI_B_AMOUNT;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_add(&t), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_count(), 0);
+    CHECK_EQ_INT(mw_ki_cache_find_pub(&e.out_pub)->amount, 0);
+    CHECK_EQ_INT(mw_wallet_store_set_opts(0), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+}
+
+mw_err_t mw_host_ki_write_v1_container(uint32_t id, uint8_t variant,
+                                       const mw_account_keys_t* keys,
+                                       const mw_ki_entry_t* e, uint32_t n);
+
+// A container written before 0.3 (no amounts) is read and kept.
+MW_TEST(test_ki_container_v1_read)
+{
+    mw_ki_entry_t old[3];
+    memset(old, 0, sizeof old);
+    for (int i = 0; i < 3; ++i) {
+        old[i].out_pub.b[0] = (uint8_t)(0xC0 + i);
+        old[i].image.b[0] = (uint8_t)(0xD0 + i);
+        old[i].major = (uint32_t)i;
+        old[i].flags = MW_KI_F_EXPORTED;
+    }
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_host_ki_write_v1_container(g_id, 0, &g_base, old, 3), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK(!mw_ki_cache_rolled_back());
+    CHECK_EQ_INT(mw_ki_cache_count(), 3);
+    uint64_t total = 1;
+    uint32_t outs = 1, unknown = 0;
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    CHECK_EQ_INT((long long)total, 0);
+    CHECK_EQ_INT(unknown, 3);                       // amounts not known yet
+    CHECK_EQ_INT(mw_ki_cache_find_image(&old[2].image)->major, 2);
+    mw_ki_entry_t e = old[1];
+    e.amount = 77;
+    e.bal = MW_KI_B_AMOUNT;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);        // written as version 2
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_count(), 3);
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    CHECK_EQ_INT((long long)total, 77);
+    CHECK_EQ_INT(outs, 1);
+    CHECK_EQ_INT(unknown, 2);
 }
 
 MW_TEST(test_delete_wipes_cache)
@@ -1093,6 +1242,8 @@ int main(void)
     RUN_TEST(test_wallet_export);
     RUN_TEST(test_viewonly_text);
     RUN_TEST(test_ki_cache_rollback_and_full);
+    RUN_TEST(test_balance_and_tx_list);
+    RUN_TEST(test_ki_container_v1_read);
     RUN_TEST(test_delete_wipes_cache);
 
     mw_bpp_free();

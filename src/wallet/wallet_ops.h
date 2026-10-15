@@ -66,6 +66,9 @@ mw_err_t mw_ops_outputs_inspect(const mw_account_keys_t* keys,
 // mw_ops_outputs_to_keyimages() / mw_ops_unsigned_sign(); 0 normally. The
 // result itself is still valid, but the device cannot track those outputs.
 uint32_t mw_ops_cache_overflow(void);
+// Result of the last key image cache save of an operation (MW_ERR_TOO_MANY:
+// the storage partition is full).
+mw_err_t mw_ops_cache_save_error(void);
 
 // Computes the key image + signature of every output (the whole file fails
 // on the first output that is not ours), records them in the open key

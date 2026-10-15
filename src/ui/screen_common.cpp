@@ -790,6 +790,58 @@ void mw_ui_progress_close(void) {
     mw_ui_sync_call(progress_close_job, NULL);
 }
 
+bool mw_ui_progress_is_open(void) { return s_progress.open; }
+bool mw_ui_page_is_active(void) { return s_active_page != NULL; }
+
+// ---------------------------------------------------------------------------
+// "Please wait" (0.3.2): put up by the UI task by itself when the crypto task
+// has been working for a while with nothing on the screen - between two
+// dialogs, or after a progress page closed - and taken down before the next
+// job of the crypto task runs (lvgl_port.cpp). Nothing waits on it.
+// ---------------------------------------------------------------------------
+static mw_page_t s_busy_page;
+static bool      s_busy_open;
+
+static void busy_del_cb(lv_event_t* e) {
+    MW_UNUSED(e);
+    s_busy_open = false;
+    s_busy_page.scr = NULL;
+}
+
+void mw_ui_busy_show_job(void) {
+    if (s_busy_open || s_progress.open) return;
+    const mw_metrics_t* m = mw_metrics();
+    mw_ui_overlay_create(&s_busy_page, TX(XSTR_BUSY));
+    lv_obj_add_event_cb(s_busy_page.scr, busy_del_cb, LV_EVENT_DELETE, NULL);
+    lv_obj_t* area = lv_obj_create(s_busy_page.body);
+    lv_obj_remove_style_all(area);
+    lv_obj_set_width(area, lv_pct(100));
+    lv_obj_set_flex_grow(area, 1);
+    MW_OBJ_CLEAR_FLAG(area, LV_OBJ_FLAG_SCROLLABLE);
+#if LVGL_VERSION_MAJOR >= 9 && LV_USE_SPINNER
+    lv_obj_update_layout(s_busy_page.scr);
+    lv_coord_t side = lv_obj_get_content_height(area);
+    const lv_coord_t wide = lv_obj_get_content_width(area);
+    if (wide < side) side = wide;
+    side = (lv_coord_t)(side / 2);
+    if (side >= 16) {
+        lv_obj_t* sp = lv_spinner_create(area);
+        lv_spinner_set_anim_params(sp, 1000, 60);
+        lv_obj_set_size(sp, side, side);
+        lv_obj_center(sp);
+        if (!m->mono) lv_obj_set_style_arc_color(sp, mw_palette()->accent, LV_PART_INDICATOR);
+    }
+#endif
+    MW_UNUSED(m);
+    s_busy_open = true;
+}
+
+void mw_ui_busy_hide_job(void) {
+    if (!s_busy_open) return;
+    mw_ui_page_destroy(&s_busy_page);
+    s_busy_open = false;
+}
+
 void mw_ui_progress_cancellable(bool on) {
     s_progress.cancellable = on;
     s_progress.cancelled   = false;

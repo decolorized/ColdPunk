@@ -146,9 +146,9 @@ explicit confirmation on the device screen. The PC program is only a courier.
   **full address of every recipient**. The change address is checked against
   the wallet (substitution protection).
 - A **key image cache** remembers which outputs the device has seen. It is
-  bound to the wallet and protected against rollback (generation counter in
-  the sealed user directory), and the device warns about inputs already spent
-  by an earlier signature.
+  bound to the wallet, protected against rollback (generation counter in the
+  sealed account directory) and not limited in size, and the device warns
+  about inputs already spent by an earlier signature.
 - Address and private view key shown as text on the device.
 - PC requests for the address or the view-only data (address + private view
   key + restore height) with a plain Yes / No on the device.
@@ -162,16 +162,31 @@ explicit confirmation on the device screen. The PC program is only a courier.
 **Device**
 
 - Disguised as **Minesweeper** at power-on and after every lock.
-- **Device password** (always 8–64 characters; weak ones draw a warning): 200 000
+- **Account password** (always 8–64 characters; weak ones draw a warning): 200 000
   PBKDF2-HMAC-SHA256 rounds on the SHA accelerator, with the chip's eFuse HMAC
   key mixed in between and at the end. The attempt
-  counter is written before each check, and failed attempts back off
-  exponentially (2 s … 10 min, kept across reboots).
-- **Accounts with their own passwords** (up to 32, 64 wallets each, each
-  with a name you can change): each password opens only its own wallets,
-  nothing on the device lists the accounts or their number (always 32
-  same-size slot files), and an account can only be deleted with its own
-  password. Made
+  counter is written before each check; after 10 wrong passwords the delay
+  grows from 1 minute to 8 hours (at most 10 minutes once an account has
+  logged in since power-on); any correct password clears the count; from
+  the 45th a number on the screen has to be typed first, and the 50th in a
+  row erases the device (`MW_PW_*` in
+  `app_config.h`). Typing the reset phrase into the password field erases
+  the device too.
+- **Accounts with their own passwords** (16..24 per chip, 64 wallets each,
+  each with a name you can change): each password opens only its own
+  wallets, nothing on the device lists the accounts or their number (always
+  24 same-size slots), and an account can only be deleted with its own
+  password.
+- Per wallet: its own **network** (Mainnet / Stagenet / Testnet), **Check
+  seed** (does a typed phrase match the wallet?), an estimated **balance**
+  with the list of transactions signed on the device (per account, can be
+  switched off).
+- **Lock firmware updates**: burns the eFuses that switch JTAG and the
+  USB/UART download mode off for good (irreversible).
+- Power-loss-safe storage (**LittleFS**; FAT storage of older firmware is
+  converted once, through PSRAM, after a confirmation).
+- **Passphrase hint** per wallet (optional, shown before the passphrase is
+  asked, only to its own account). Made
   for showing only part of the funds under coercion; what a flash dump still
   shows is in [`tools/docs/security.md`](tools/docs/security.md) §4a.
 - **USB is enabled only after the correct password.**
@@ -321,7 +336,7 @@ gives the same binary.
    [`tools/docs/security.md`](tools/docs/security.md) §4.
 2. **Unlock gesture.** The device starts as Minesweeper. Step on a mine, then
    tap the exploded mine **three times within 2 seconds**.
-3. **Device password.** Choose one (entered twice). It is needed at every
+3. **Account password.** Choose one (entered twice). It is needed at every
    unlock and also protects the sealed seeds.
 4. **Create or import a wallet**, write the words on paper (they are shown
    only once), pass the word check and compare the address with your PC
@@ -426,7 +441,7 @@ On Linux, give your user access to the HID device with the udev rule from
   enabled.
 - **Sealed seeds.** Each seed record is AES-256-GCM encrypted with
   `HMAC(eFuse key, "mw.seed.v1.<id>")` computed inside the HMAC peripheral, and
-  additionally bound to the device password. Records are constant-length, so
+  additionally bound to the account password. Records are constant-length, so
   the ciphertext does not reveal the seed type.
 - **Fail-closed RNG.** The TRNG is health-tested at boot; a failure stops the
   device instead of producing weak keys.
@@ -435,8 +450,8 @@ On Linux, give your user access to the HID device with the udev rule from
 - **Atomic password change**, with interrupted changes recovered on the next
   unlock.
 - **Users are unlinkable without their passwords**: one sealed directory file
-  per user, named after that user's key, among decoy files of the same size
-  (32 slot files in all); no per-user data in NVS; one device-wide attempt
+  per account, named after that account's key, among decoys of the same size
+  (24 slots in all); no per-user data in NVS; one device-wide attempt
   counter.
 
 Known limitations (details in [`tools/docs/security.md`](tools/docs/security.md)):
@@ -462,7 +477,7 @@ src/
   data/               word lists (Monero, Polyseed/BIP39)
   monero/             keys, mnemonics, polyseed, addresses, key images, CLSAG,
                       Bulletproofs+, transaction parsing and signing, file formats
-  wallet/             device password, sealed wallet store, session, key image cache
+  wallet/             account password, sealed wallet store, session, key image cache
   transfer/           mwlink protocol (link.c), USB HID/CDC transport,
                       SD card file browser logic (sd_files.c)
   hal/                display, touch, buttons, SD (SPI and SDIO), logging, host stubs
@@ -493,7 +508,7 @@ The suites cover cryptographic test vectors, seed encoding (including
 upstream polyseed vectors and a Cake/Cupcake encrypted phrase), passphrases,
 deterministic signatures, the Feather file formats end to end, the USB
 protocol, the SD card file logic (file kinds, ordering, result and safe file
-names), the device password (including weak-password rules) and storage
+names), the account password (including weak-password rules) and storage
 failure cases. On Windows,
 [w64devkit](https://github.com/skeeto/w64devkit) is enough.
 
@@ -511,7 +526,7 @@ tested on the host, and the stagenet procedure, are listed in
 | :--- | :--- |
 | [`tools/docs/user_guide.md`](tools/docs/user_guide.md) | user guide (RU) |
 | [`tools/docs/security.md`](tools/docs/security.md) | threat model, key hierarchy, eFuse provisioning, limitations |
-| [`tools/docs/device_password.md`](tools/docs/device_password.md) | device password scheme, record format, password rules, eFuse requirement |
+| [`tools/docs/device_password.md`](tools/docs/device_password.md) | account password scheme, record format, password rules, eFuse requirement |
 | [`tools/docs/usb_link_protocol.md`](tools/docs/usb_link_protocol.md) | mwlink protocol 3 (RU) |
 | [`tools/docs/architecture.md`](tools/docs/architecture.md) | layers, FreeRTOS tasks, memory budget, data flows over USB and the SD card (RU) |
 | [`tools/docs/ui_screens.md`](tools/docs/ui_screens.md) | screens and navigation |

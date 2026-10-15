@@ -45,22 +45,30 @@
 #include "../transfer/transfer.h"
 #include "../wallet/device_auth.h"
 #include "../wallet/wallet_store.h"
+#include "../wallet/ki_cache.h"
+#include "../wallet/secure_storage.h"
 #include "../wallet/session.h"
 #include "../crypto/memzero.h"
 #include "../hal/touch_map.h"
 #include "../hal/display_drivers.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum {
     SET_BACK = 0, SET_KB, SET_LAYOUT, SET_BRIGHT, SET_AUTOLOCK, SET_CALIB,
     SET_FORMAT, SET_LANG, SET_NET, SET_DEBUG, SET_PASSWORD, SET_ABOUT,
-    SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE, SET_ACCOUNT
+    SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE, SET_ACCOUNT,
+    SET_BALANCE, SET_LOCK_FLASH
 };
 
 // The logged-in account's name, read on the crypto task before each build.
 static char s_account[MW_ACCOUNT_NAME_LEN];
+// The account's balance tracking (v0.3) and whether flashing is locked,
+// read on the crypto task too.
+static bool s_balance_on;
+static bool s_flash_locked;
 
 typedef struct {
     mw_page_t     page;
@@ -70,7 +78,7 @@ typedef struct {
 static set_ctx_t s_set;
 
 // Row index -> SET_* action. Filled by settings_build() on every rebuild.
-#define SET_MAX_ROWS 20
+#define SET_MAX_ROWS 24
 static int s_set_actions[SET_MAX_ROWS];
 static int s_set_count = 0;
 
@@ -177,6 +185,8 @@ static void settings_build(void* arg) {
     add(LV_SYMBOL_EDIT,     TX(XSTR_ACCOUNT_NAME), s_account, SET_ACCOUNT);
     add(LV_SYMBOL_PLUS,     TX(XSTR_USER_ADD), NULL, SET_USER_ADD);
     add(LV_SYMBOL_CLOSE,    TX(XSTR_USER_DELETE), NULL, SET_USER_DELETE);
+    add(LV_SYMBOL_LIST,     TX(XSTR_SET_BALANCE),
+        s_balance_on ? TX(XSTR_ON) : TX(XSTR_OFF), SET_BALANCE);
 
     add(LV_SYMBOL_FILE,     TX(XSTR_SETTINGS_ABOUT), NULL, SET_ABOUT);
 
@@ -187,6 +197,8 @@ static void settings_build(void* arg) {
         add(LV_SYMBOL_SETTINGS, TX(XSTR_EFUSE_BLOCKS), buf, SET_EFUSE);
     }
 
+    add(LV_SYMBOL_STOP,     TX(XSTR_JTAG_LOCK),
+        s_flash_locked ? TX(XSTR_ON) : NULL, SET_LOCK_FLASH);
     add(LV_SYMBOL_TRASH,    T(STR_SETTINGS_RESET), NULL, SET_RESET);
 
     lv_obj_t* f = mw_ui_page_footer(&c->page);
@@ -509,26 +521,32 @@ static mw_err_t ask_password(const char* title, char* out, size_t cap) {
 // Shows why a device-password check failed. Wrong, locked and empty are user
 // outcomes; anything else is a fault and is logged.
 static void show_auth_error(mw_err_t e) {
-    char msg[96];
-    if (e == MW_ERR_DECRYPT) {
-        snprintf(msg, sizeof(msg), TX(XSTR_PW_WRONG),
-                 (int)mw_device_auth_failed_attempts());
+    char msg[192];
+    if (e == MW_ERR_DECRYPT || e == MW_ERR_EXISTS) {
+        snprintf(msg, sizeof(msg), "%s",
+                 e == MW_ERR_EXISTS ? TX(XSTR_PW_TAKEN) : "");
+        size_t n = strlen(msg);
+        if (e == MW_ERR_DECRYPT)
+            snprintf(msg, sizeof(msg), TX(XSTR_PW_WRONG), (int)mw_device_auth_failed_attempts());
+        n = strlen(msg);
+        if (mw_device_auth_child_pin_due()) {
+            snprintf(msg + n, sizeof(msg) - n, "\n");
+            n = strlen(msg);
+            snprintf(msg + n, sizeof(msg) - n, TX(XSTR_PW_LEFT), mw_device_auth_attempts_left());
+            n = strlen(msg);
+        }
         const uint32_t ms = mw_device_auth_lockout_ms();
         if (ms) {
-            const size_t n = strlen(msg);
             snprintf(msg + n, sizeof(msg) - n, "\n");
-            snprintf(msg + n + 1, sizeof(msg) - n - 1, TX(XSTR_PW_LOCKED),
-                     (int)((ms + 999u) / 1000u));
+            n = strlen(msg);
+            mw_ui_lockout_text(ms, msg + n, sizeof(msg) - n);
         }
         mw_ui_message(T(STR_ERR_GENERIC), msg);
     } else if (e == MW_ERR_ABORTED) {
-        snprintf(msg, sizeof(msg), TX(XSTR_PW_LOCKED),
-                 (int)((mw_device_auth_lockout_ms() + 999u) / 1000u));
+        mw_ui_lockout_text(mw_device_auth_lockout_ms(), msg, sizeof(msg));
         mw_ui_message(T(STR_ERR_GENERIC), msg);
     } else if (e == MW_ERR_INVALID_ARG) {
         mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_EMPTY));
-    } else if (e == MW_ERR_EXISTS) {
-        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PW_TAKEN));
     } else if (e == MW_ERR_TOO_MANY) {
         mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_USER_FULL));
     } else if (e == MW_ERR_NOT_SUPPORTED) {
@@ -581,9 +599,8 @@ static void change_password(void) {
     // anything is typed, then go back to Settings.
     const uint32_t wait_ms = mw_device_auth_lockout_ms();
     if (wait_ms) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), TX(XSTR_PW_LOCKED),
-                 (int)((wait_ms + 999u) / 1000u));
+        char msg[96];
+        mw_ui_lockout_text(wait_ms, msg, sizeof(msg));
         mw_ui_message_timeout(T(STR_ERR_GENERIC), msg, wait_ms);
         return;
     }
@@ -631,8 +648,8 @@ static void change_password(void) {
 static bool lockout_note(void) {
     const uint32_t wait_ms = mw_device_auth_lockout_ms();
     if (!wait_ms) return false;
-    char msg[64];
-    snprintf(msg, sizeof(msg), TX(XSTR_PW_LOCKED), (int)((wait_ms + 999u) / 1000u));
+    char msg[96];
+    mw_ui_lockout_text(wait_ms, msg, sizeof(msg));
     mw_ui_message_timeout(T(STR_ERR_GENERIC), msg, wait_ms);
     return true;
 }
@@ -719,6 +736,73 @@ static bool delete_user(void) {
     return gone;
 }
 
+// Balance tracking of this account (v0.3): off erases what was gathered.
+static void toggle_balance(void) {
+    const uint8_t opts = mw_wallet_store_opts();
+    const bool on = !(opts & MW_ACC_OPT_NO_BALANCE);
+    const char* items[] = { TX(XSTR_OFF), TX(XSTR_ON) };
+    const int i = mw_ui_choose(TX(XSTR_SET_BALANCE), items, 2, on ? 1 : 0);
+    if (i < 0 || (i == 1) == on) return;
+    mw_err_t e;
+    if (i == 0) {
+        if (!mw_ui_confirm(TX(XSTR_SET_BALANCE), TX(XSTR_BAL_OFF_Q), TX(XSTR_YES), TX(XSTR_NO)))
+            return;
+        e = mw_wallet_store_set_opts((uint8_t)(opts | MW_ACC_OPT_NO_BALANCE));
+        if (e == MW_OK) {
+            // Every wallet's typed-in balance goes too.
+            wallet_store_t* st = (wallet_store_t*)malloc(sizeof(wallet_store_t));
+            if (st && mw_wallet_store_load(st) == MW_OK)
+                for (uint32_t k = 0; k < st->count; k++)
+                    (void)mw_wallet_set_manual_balance(st->wallets[k].id, false, 0);
+            if (st) { mw_memzero(st, sizeof(*st)); free(st); }
+            e = mw_ki_cache_balance_forget_all();
+        }
+    } else {
+        e = mw_wallet_store_set_opts((uint8_t)(opts & ~MW_ACC_OPT_NO_BALANCE));
+    }
+    MW_LOGI("settings", "balance tracking %s -> %s", i ? "on" : "off", mw_err_str(e));
+    if (e == MW_OK) mw_ui_message_timeout(T(STR_MAIN_SETTINGS), TX(XSTR_SETTINGS_SAVED), 1500);
+    else            mw_ui_message(T(STR_ERR_GENERIC), mw_err_str(e));
+}
+
+// Burning the eFuses that lock JTAG and the download modes (v0.3): three
+// warnings, a typed number, the account password.
+static void lock_flashing(void) {
+    if (mw_secure_flashing_locked()) {
+        mw_ui_message(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_LOCKED));
+        return;
+    }
+    if (lockout_note()) return;
+    if (!mw_ui_confirm(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W1), T(STR_NEXT), T(STR_CANCEL))) return;
+    if (!mw_ui_confirm(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W2), T(STR_NEXT), T(STR_CANCEL))) return;
+    if (!mw_ui_confirm(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W3), T(STR_NEXT), T(STR_CANCEL))) return;
+    if (!mw_ui_confirm_code(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W1))) return;
+    char pw[MW_DEVICE_PW_MAX + 1];
+    memset(pw, 0, sizeof(pw));
+    if (ask_password(TX(XSTR_PW_ENTER), pw, sizeof(pw)) == MW_OK) {
+        mw_ui_progress(TX(XSTR_JTAG_LOCK), 0, TX(XSTR_PW_STAGE_CHECK));
+        mw_flow_auth_progress_on(TX(XSTR_JTAG_LOCK));
+        mw_err_t e = mw_device_auth_check(pw);
+        mw_flow_auth_progress_off();
+        mw_ui_progress_close();
+        if (e != MW_OK) {
+            show_auth_error(e);
+        } else {
+            MW_LOGE("settings", "locking JTAG and the download modes (eFuse)");
+            e = mw_secure_lock_flashing();
+            if (e == MW_OK) {
+                mw_ui_message(T(STR_SUCCESS), TX(XSTR_JTAG_DONE));
+            } else {
+                char msg[96];
+                snprintf(msg, sizeof(msg), TX(XSTR_JTAG_FAIL), mw_err_str(e));
+                mw_ui_message(T(STR_ERR_GENERIC), msg);
+            }
+        }
+    }
+    mw_memzero(pw, sizeof(pw));
+    mw_session_wipe_input();
+}
+
 // ---------------------------------------------------------------------------
 void mw_screen_settings_run(void) {
     s_set.s = *mw_ui_settings();
@@ -726,6 +810,8 @@ void mw_screen_settings_run(void) {
     for (;;) {
         if (mw_wallet_store_account_name(s_account, sizeof(s_account)) != MW_OK)
             s_account[0] = 0;
+        s_balance_on = !(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE);
+        s_flash_locked = mw_secure_flashing_locked();
         const int32_t action = mw_ui_modal_call(settings_build, &s_set);
         bool dirty = false;
 
@@ -875,6 +961,14 @@ void mw_screen_settings_run(void) {
             rename_account();
             break;
 
+        case SET_BALANCE:
+            toggle_balance();
+            break;
+
+        case SET_LOCK_FLASH:
+            lock_flashing();
+            break;
+
         case SET_USER_DELETE:
             if (delete_user()) {
                 mw_ui_lock_request();    // back to the game; nobody is logged in
@@ -911,11 +1005,7 @@ void mw_screen_settings_run(void) {
         case SET_RESET:
             if (mw_ui_confirm_code(T(STR_SETTINGS_RESET), T(STR_RESET_CONFIRM))) {
                 MW_LOGE("settings", "factory reset requested by the user");
-                (void)mw_device_auth_erase();
-                // Key image caches (FAT partition) go too; they are sealed under
-                // the device key, but nothing of a wallet may survive a reset.
-                (void)mw_fstore_wipe_all();
-                mw_factory_reset();      // wipes NVS and reboots; never returns
+                mw_shell_wipe_device();  // never returns
             }
             break;
 

@@ -224,6 +224,11 @@ mw_err_t mw_secure_key_status(void)
     return (err == MW_OK) ? MW_OK : MW_ERR_NOT_SUPPORTED;
 }
 
+// The host has no eFuses: locking is a flag, for the UI tests.
+static bool s_flash_locked;
+bool     mw_secure_flashing_locked(void) { return s_flash_locked; }
+mw_err_t mw_secure_lock_flashing(void) { s_flash_locked = true; return MW_OK; }
+
 mw_err_t mw_secure_key_provision(void)
 {
     uint8_t k[32];
@@ -599,6 +604,34 @@ static void fstore_recover(const char* name)
 
 mw_err_t mw_fstore_init(void) { return ensure_dir() == 0 ? MW_OK : MW_ERR_IO; }
 bool     mw_fstore_ready(void) { return true; }
+bool     mw_fstore_on_fat(void) { return false; }
+mw_err_t mw_fstore_migrate_prepare(mw_fstore_mig_info_t* info)
+{
+    if (info) memset(info, 0, sizeof *info);
+    return MW_ERR_NOT_SUPPORTED;
+}
+mw_err_t mw_fstore_migrate_commit(void) { return MW_ERR_NOT_SUPPORTED; }
+void     mw_fstore_migrate_abort(void) {}
+bool     mw_fstore_migration_lost(void) { return false; }
+void     mw_fstore_set_progress(mw_fstore_progress_fn fn) { (void)fn; }
+
+// A value that changes with the file: inode, size and modification time
+// (also when a test edits the store directory by hand; every write here
+// renames a new file into place, so the inode changes too).
+uint32_t mw_fstore_seq(const char* name)
+{
+    char p[640];
+    struct stat st;
+    if (!fstore_name_ok(name)) return 0;
+    fstore_recover(name);
+    fstore_path(name, p, sizeof p);
+    if (stat(p, &st) != 0) return 0;
+    uint32_t h = 2166136261u;
+    const uint64_t v[4] = { (uint64_t)st.st_ino, (uint64_t)st.st_size,
+                            (uint64_t)st.st_mtime, 0 };
+    for (int i = 0; i < 4; i++) { h ^= (uint32_t)v[i] ^ (uint32_t)(v[i] >> 32); h *= 16777619u; }
+    return h ? h : 1u;
+}
 
 mw_err_t mw_fstore_write(const char* name, const uint8_t* data, size_t len)
 {
@@ -703,6 +736,17 @@ int mw_fstore_list(const char* prefix, char (*names)[MW_FSTORE_NAME_MAX + 1], in
     }
     closedir(d);
     return n;
+}
+
+// Host: as much as the test sets (mw_host_fstore_set_free), else plenty.
+static size_t g_host_free = (size_t)64 * 1024 * 1024;
+void mw_host_fstore_set_free(size_t n);
+void mw_host_fstore_set_free(size_t n) { g_host_free = n; }
+mw_err_t mw_fstore_free_bytes(size_t* out)
+{
+    if (!out) return MW_ERR_INVALID_ARG;
+    *out = g_host_free;
+    return MW_OK;
 }
 
 mw_err_t mw_fstore_wipe_all(void)

@@ -59,6 +59,15 @@ typedef struct {
 // State of BLOCK_KEY0..5, for the read-only Settings page.
 mw_err_t mw_secure_key_blocks(mw_key_block_info_t out[MW_SECURE_KEY_BLOCKS]);
 
+// v0.3: burns the eFuses that switch off JTAG (pad and USB, hard and soft)
+// and every ROM download mode (UART, USB-Serial-JTAG, USB-OTG, forced),
+// for good: the firmware can no longer be read out, debugged or replaced
+// over USB/UART. A programmer on the flash chip itself is not stopped by
+// this (only secure boot would). MW_OK when everything reads back burned.
+mw_err_t mw_secure_lock_flashing(void);
+// Whether all of those eFuses are burned.
+bool     mw_secure_flashing_locked(void);
+
 // Raw HMAC of `msg` under the eFuse key (device) / the emulated root key
 // (host), for binding the device-password derivation to the chip
 // (device_auth.c): an offline guess then needs the chip for every attempt.

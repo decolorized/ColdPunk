@@ -42,6 +42,7 @@
 #include "../crypto/memzero.h"
 #include "../crypto/random.h"
 #include "../hal/hal.h"
+#include "../hal/log.h"
 // Pulls in board_config.h (and therefore HAS_TOUCH, DISPLAY_*, and the
 // DEFAULT_SEED_INPUT_MODE of TZ 2.2) with the fallbacks the HAL already
 // defines for boards that leave an optional define out.
@@ -53,6 +54,7 @@ extern "C" {
 #include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_efuse.h"
+#include "esp_efuse_table.h"
 #include "esp_hmac.h"
 #include "esp_random.h"
 #include "nvs.h"
@@ -320,6 +322,63 @@ extern "C" mw_err_t mw_secure_key_provision(void)
     kblk_remember(blk_i);
     s_kblk = -2;                                 // look it up again
     return mw_secure_key_status();
+}
+
+// ---------------------------------------------------------------------------
+// Locking the debug and download interfaces (v0.3)
+// ---------------------------------------------------------------------------
+namespace {
+struct lock_fuse_t { const esp_efuse_desc_t** field; const char* name; };
+const lock_fuse_t kLockFuses[] = {
+    { ESP_EFUSE_DIS_PAD_JTAG,                    "DIS_PAD_JTAG" },
+    { ESP_EFUSE_DIS_USB_JTAG,                    "DIS_USB_JTAG" },
+    { ESP_EFUSE_SOFT_DIS_JTAG,                   "SOFT_DIS_JTAG" },
+    { ESP_EFUSE_DIS_DOWNLOAD_MODE,               "DIS_DOWNLOAD_MODE" },
+    { ESP_EFUSE_DIS_USB_OTG_DOWNLOAD_MODE,       "DIS_USB_OTG_DOWNLOAD_MODE" },
+    { ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE, "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE" },
+    { ESP_EFUSE_DIS_FORCE_DOWNLOAD,              "DIS_FORCE_DOWNLOAD" },
+    { ESP_EFUSE_DIS_DIRECT_BOOT,                 "DIS_DIRECT_BOOT" },
+};
+
+// Every bit of the field set.
+bool fuse_full(const esp_efuse_desc_t** f) {
+    const int bits = esp_efuse_get_field_size(f);
+    size_t cnt = 0;
+    if (bits <= 0 || esp_efuse_read_field_cnt(f, &cnt) != ESP_OK) return false;
+    return (int)cnt == bits;
+}
+}  // namespace
+
+extern "C" bool mw_secure_flashing_locked(void)
+{
+    for (const lock_fuse_t& l : kLockFuses)
+        if (!fuse_full(l.field)) return false;
+    return true;
+}
+
+extern "C" mw_err_t mw_secure_lock_flashing(void)
+{
+    if (mw_secure_flashing_locked()) return MW_OK;
+    if (esp_efuse_batch_write_begin() != ESP_OK) return MW_ERR_IO;
+    bool ok = true;
+    for (const lock_fuse_t& l : kLockFuses) {
+        if (fuse_full(l.field)) continue;
+        size_t cnt = 0;
+        const int bits = esp_efuse_get_field_size(l.field);
+        (void)esp_efuse_read_field_cnt(l.field, &cnt);
+        if (esp_efuse_write_field_cnt(l.field, (size_t)bits - cnt) != ESP_OK) {
+            MW_LOGE("efuse", "%s not burned", l.name);
+            ok = false;
+        }
+    }
+    if (!ok) {
+        (void)esp_efuse_batch_write_cancel();
+        return MW_ERR_IO;
+    }
+    if (esp_efuse_batch_write_commit() != ESP_OK) return MW_ERR_IO;
+    const bool done = mw_secure_flashing_locked();
+    MW_LOGI("efuse", "debug and download interfaces %s", done ? "locked" : "NOT fully locked");
+    return done ? MW_OK : MW_ERR_IO;
 }
 
 // ---------------------------------------------------------------------------

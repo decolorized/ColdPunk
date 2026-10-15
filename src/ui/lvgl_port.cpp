@@ -502,12 +502,28 @@ lv_group_t* mw_ui_group_current(void) { return s_group_current; }
 // ---------------------------------------------------------------------------
 // Job plumbing
 // ---------------------------------------------------------------------------
+// The crypto task is working without a dialog of its own (0.3.2): set when
+// a dialog of it closes and by any job it posts except a dialog; after
+// MW_BUSY_AFTER_MS with no progress page the UI shows "Please wait".
+#define MW_BUSY_AFTER_MS 400
+static volatile bool     s_crypto_busy;
+static volatile uint32_t s_busy_since;
+
+static void busy_note(bool busy) {
+    s_crypto_busy = busy;
+    s_busy_since  = mw_millis();
+}
+
 static void pump_jobs(void) {
 #if MW_HAS_FREERTOS
     ui_job_t j;
     if (!s_job_q) return;
     while (xQueueReceive(s_job_q, &j, 0) == pdTRUE) {
         MW_LOGD("ui", "pump_job kind=%u fn=%p", (unsigned)j.kind, (void*)j.fn);
+        // Whatever the crypto task puts up next replaces "Please wait"
+        // (which must be gone first: pages restore the screen they cover).
+        mw_ui_busy_hide_job();
+        busy_note(j.kind != JOB_MODAL);
         if (j.fn) j.fn(j.arg);
         if (j.kind == JOB_SYNC && s_sync_sem) xSemaphoreGive(s_sync_sem);
     }
@@ -608,6 +624,7 @@ void mw_ui_modal_done(int32_t result) {
     mw_ui_modal_clear_cancel();
     s_frames[idx].result = result;
     s_frames[idx].done   = true;
+    if (!s_frames[idx].local) busy_note(true);     // the crypto task goes on
 #if MW_HAS_FREERTOS
     if (!s_frames[idx].local && s_modal_sem) xSemaphoreGive(s_modal_sem);
 #endif
@@ -856,6 +873,11 @@ void mw_ui_tick(void) {
     mw_ui_lock();
     poll_buttons();
     pump_jobs();
+    if (s_crypto_busy && s_frame_top < 0 && !mw_ui_progress_is_open() &&
+        !mw_ui_page_is_active() &&
+        (uint32_t)(now - s_busy_since) >= MW_BUSY_AFTER_MS) {
+        mw_ui_busy_show_job();
+    }
     if (s_status_dirty) {
         s_status_dirty = false;
         mw_ui_status_apply();
