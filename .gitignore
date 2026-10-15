@@ -23,3 +23,7 @@ src/config/build_commit.h
 
 # Host test stores (removed when the suites finish)
 tools/test/.mw_test_*/
+
+# build.sh / build.bat: the downloaded toolchain and the built firmware
+/toolchain/
+/firmware/

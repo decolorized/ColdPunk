@@ -1,0 +1,4 @@
+# Windows scripts keep CRLF, shell scripts LF, whatever core.autocrlf says.
+*.bat text eol=crlf
+*.sh  text eol=lf
+tools/flash/README.txt text eol=crlf

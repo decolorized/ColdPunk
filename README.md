@@ -232,7 +232,37 @@ policy and for adding a new board.
 
 ## Building and flashing
 
-### With arduino-cli (recommended)
+### One script (recommended)
+
+```sh
+build.bat              # Windows 10 / 11
+./build.sh             # Linux, macOS
+build.bat debug        # core log at Info level  (./build.sh debug)
+build.bat hid          # HID only, no serial     (./build.sh hid)
+```
+
+The script downloads everything the build needs into `toolchain/` inside the
+project folder - arduino-cli, the pinned ESP32 core and compilers, the
+libraries and esptool - checks the checksums of what it downloads itself, and
+installs nothing into the system or the home folder (about 1.5 GB on the first
+build; later builds reuse it). The board is the one selected in
+`board_config.h`; the project folder must be named `ColdPunk`.
+
+The result lands in `firmware/ColdPunk-<version>-<board>/`: the four images,
+`SHA256SUMS.txt`, esptool for the OS the build ran on, and `flash.bat` /
+`flash.sh`:
+
+```sh
+flash.bat COM5         # Windows (without a port: asks, Enter = auto)
+./flash.sh /dev/ttyUSB0
+```
+
+The flash scripts verify the checksums and write only the bootloader, the
+partition table and the program - the wallets (NVS, `storage`) are kept, as
+with an upload from the IDE. The folder can be copied to another computer and
+flashed from there without building.
+
+### With arduino-cli
 
 [`sketch.yaml`](sketch.yaml) pins the ESP32 core (3.3.11), the libraries
 (`lvgl` 9.6.0, `GFX Library for Arduino` 1.6.9), every board option and the
@@ -468,6 +498,7 @@ ColdPunk.ino          entry point: HAL, UI task (core 0), crypto task (core 1)
 board_config.h        board selection
 boards/               one header per supported board
 sketch.yaml           arduino-cli build profiles
+build.bat, build.sh   build with everything downloaded into toolchain/
 lv_conf.h             LVGL configuration
 partitions.csv        flash layout
 res/                  source images (monero.png -> src/ui/img_monero.c)
@@ -486,6 +517,7 @@ src/
 tools/
   img2lvgl.py         PNG -> LVGL 9 C image (RGB565A8): regenerates img_monero.c
   docs/               design, security, protocol, user guide, testing
+  flash/              flash.bat, flash.sh, README.txt copied next to a build
   test/               host test suite (gcc, no hardware needed)
   tools/mwlink/       PC courier: CLI, Tk GUI, device simulator, tests
 ```
