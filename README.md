@@ -7,10 +7,15 @@ small USB protocol that carries files, never secrets.
 
 Website: **[monerocoldwallet.diy](http://monerocoldwallet.diy)**
 
-The PC side is **[MoneroPunkSigner](https://github.com/decolorized/MoneroPunkSigner)**,
-a fork of Feather Wallet that speaks the device protocol natively. A
-stand-alone Python courier (`tools/tools/mwlink`) works with stock Feather as
-well.
+Two ways to talk to the PC:
+
+- **USB** - **[MoneroPunkSigner](https://github.com/decolorized/MoneroPunkSigner)**,
+  a fork of Feather Wallet that speaks the device protocol natively. A
+  stand-alone Python courier (`tools/tools/mwlink`) works with stock Feather
+  as well.
+- **microSD card** (boards with a slot) - **any** Monero wallet with the
+  standard cold-signing files: stock **Feather**, **monero-wallet-gui** or
+  **monero-wallet-cli** as a view-only wallet. Nothing to install on the PC.
 
 > [!WARNING]
 > **Experimental. Not audited. Not tested with real funds.**
@@ -101,20 +106,28 @@ this section.
 ```
   PC (online)                                     ColdPunk (offline)
   ───────────────────────────────                 ───────────────────────────────
-  MoneroPunkSigner / Feather                      seed, passphrase, spend key
-  watch-only wallet                                 never leave the device
-
-  export outputs        ───── USB (mwlink) ────▶  "Generate key images for N
+  watch-only wallet                               seed, passphrase, spend key
+    USB: MoneroPunkSigner                           never leave the device
+    SD:  Feather, monero-wallet-gui,
+         monero-wallet-cli
+                         USB (mwlink) or microSD
+  export outputs        ──────── outputs ───────▶  "Generate key images for N
                                                    outputs?"  → Yes
-  import key images     ◀────────────────────────  key images
+  import key images     ◀────── key images ──────  key images
 
   create transaction    ───── unsigned tx ─────▶  review amount, fee, change and
                                                    every full destination address
   broadcast             ◀────── signed tx ──────  CLSAG + Bulletproofs+ on device
 
-  "Restore from keys"   ── request view-only ──▶  "Send the view key?" → Yes
-                        ◀─ address + view key ──
+  restore from keys     ── request view-only ──▶  "Send the view key?" → Yes
+    (view-only)         ◀─ address + view key ──    USB
+                        ◀─ <wallet>_viewonly.txt    SD: wallet menu →
+                                                    View key to SD card
 ```
+
+Over USB the files travel inside the mwlink protocol; over the card they are
+ordinary files - the same ones Feather, the Monero GUI and the CLI write and
+read for cold signing - placed in the card's root folder.
 
 The device never has a network stack compiled in. Every action that produces
 something for the PC (key images, a signed transaction, the view key) needs an
@@ -154,8 +167,10 @@ explicit confirmation on the device screen. The PC program is only a courier.
 - Address and private view key shown as text on the device.
 - PC requests for the address or the view-only data (address + private view
   key + restore height) with a plain Yes / No on the device.
-- **SD card exchange** (ES3C28P, Touch-LCD-2): the wallet menu lists the Feather files in
-  the card root (newest first). Pick one to sign it or to make key images; the
+- **SD card exchange** (ES3C28P, Touch-LCD-2): the wallet menu lists the
+  standard Monero cold-signing files (outputs, unsigned transactions) of
+  Feather, monero-wallet-gui or monero-wallet-cli in the card root (newest
+  first). Pick one to sign it or to make key images; the
   result is written next to it with the same date. The list follows the card:
   it empties when the card is pulled out and fills again when one is put in.
 - **View key to SD card** (ES3C28P, Touch-LCD-2): `<wallet>_viewonly.txt` with the primary
@@ -562,17 +577,34 @@ gives the same binary.
    *Sign*. Do not power off while Bulletproofs+ is computed.
 3. The signed transaction comes back; review and broadcast it on the PC.
 
-**Over the SD card (ES3C28P, Touch-LCD-2):**
+**Over the SD card (ES3C28P, Touch-LCD-2) - with any Monero wallet:**
 
-1. Copy the Feather file (`…_outputs` or `…_unsigned_monero_tx`) into the
-   **root** of a FAT32 microSD card and insert it into the device.
+The card carries the standard cold-signing files of Monero's own wallet code,
+so the PC side can be stock **Feather**, **monero-wallet-gui** or
+**monero-wallet-cli**; no MoneroPunkSigner, no driver, no courier.
+
+1. Copy the wallet's file (outputs export, or the unsigned transaction) into
+   the **root** of a FAT32 microSD card and insert it into the device.
 2. Open the wallet → **SD card files**. Only files the device can process are
    listed, newest first (by the date the PC set, or by the time in the file
    name). Each row shows the type, size and date; processed files are marked
    *done*.
 3. Pick a file and confirm on the device, exactly as over USB.
 4. The result (`…_keyImages` or `…_signed_monero_tx`) is written next to the
-   source with the source's date. Import it in Feather.
+   source with the source's date. Import it in the PC wallet.
+
+| | Feather | monero-wallet-gui | monero-wallet-cli |
+| :--- | :--- | :--- | :--- |
+| View-only wallet | *Restore wallet from keys → View only* | *Restore wallet from keys*, spend key empty | `monero-wallet-cli --generate-from-view-key <name>` |
+| Outputs → card | *Tools → Offline transaction signing*: export outputs | export outputs (offline signing) | `export_outputs <card>/wallet_outputs` |
+| Key images ← card | same dialog: import key images | import key images | `import_key_images <card>/wallet_keyImages` |
+| Transaction → card | create the transaction, save the unsigned file | create the transaction file | `transfer <address> <amount>` writes `unsigned_monero_tx` |
+| Signed ← card | load the signed file, broadcast | submit the signed file | `submit_transfer` reads `signed_monero_tx` from the current folder |
+
+For the view-only wallet take the address, view key and restore height from
+`<wallet>_viewonly.txt` (below). The CLI writes `unsigned_monero_tx` into its
+current folder: copy it to the card, and the device's `signed_monero_tx` back
+into that folder before `submit_transfer`.
 
 On the first use the device writes `ColdPunk_readme.txt` with these steps to
 the card. Files up to 256 KB. Every write is flushed and the card unmounted
@@ -582,7 +614,11 @@ open list notices a card pulled out or put in and updates itself.
 
 **View-only wallet on the PC:** in MoneroPunkSigner, *Restore wallet from keys
 → ColdPunk*, then answer *Yes* on the device. Address, view key, restore height
-and wallet name are filled in.
+and wallet name are filled in. Without USB: wallet menu → **View key to SD
+card** writes `<wallet>_viewonly.txt` (wallet name, network, primary address,
+private view key, restore height) to the card for any of the wallets above;
+delete the file after use - it shows every incoming payment to whoever reads
+it.
 
 The full user guide (in Russian) is
 [`tools/docs/user_guide.md`](tools/docs/user_guide.md).
