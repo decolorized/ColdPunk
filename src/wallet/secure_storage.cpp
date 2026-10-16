@@ -56,6 +56,7 @@ extern "C" {
 #include "esp_efuse.h"
 #include "esp_efuse_table.h"
 #include "esp_hmac.h"
+#include "esp_secure_boot.h"
 #include "esp_random.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -328,16 +329,27 @@ extern "C" mw_err_t mw_secure_key_provision(void)
 // Locking the debug and download interfaces (v0.3)
 // ---------------------------------------------------------------------------
 namespace {
-struct lock_fuse_t { const esp_efuse_desc_t** field; const char* name; };
+// Each field with the write protection bit of its group: on a chip whose
+// bootloader turned on secure boot / flash encryption (build-secure), some of
+// them are already burned and some groups are write-protected (e.g.
+// DIS_FORCE_DOWNLOAD shares its WR_DIS bit with DIS_ICACHE, which that
+// bootloader protects). A field that can no longer be changed is skipped.
+struct lock_fuse_t {
+    const esp_efuse_desc_t** field;
+    const esp_efuse_desc_t** wr_dis;
+    const char* name;
+};
 const lock_fuse_t kLockFuses[] = {
-    { ESP_EFUSE_DIS_PAD_JTAG,                    "DIS_PAD_JTAG" },
-    { ESP_EFUSE_DIS_USB_JTAG,                    "DIS_USB_JTAG" },
-    { ESP_EFUSE_SOFT_DIS_JTAG,                   "SOFT_DIS_JTAG" },
-    { ESP_EFUSE_DIS_DOWNLOAD_MODE,               "DIS_DOWNLOAD_MODE" },
-    { ESP_EFUSE_DIS_USB_OTG_DOWNLOAD_MODE,       "DIS_USB_OTG_DOWNLOAD_MODE" },
-    { ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE, "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE" },
-    { ESP_EFUSE_DIS_FORCE_DOWNLOAD,              "DIS_FORCE_DOWNLOAD" },
-    { ESP_EFUSE_DIS_DIRECT_BOOT,                 "DIS_DIRECT_BOOT" },
+    { ESP_EFUSE_DIS_PAD_JTAG,  ESP_EFUSE_WR_DIS_DIS_PAD_JTAG,  "DIS_PAD_JTAG" },
+    { ESP_EFUSE_DIS_USB_JTAG,  ESP_EFUSE_WR_DIS_DIS_USB_JTAG,  "DIS_USB_JTAG" },
+    { ESP_EFUSE_SOFT_DIS_JTAG, ESP_EFUSE_WR_DIS_SOFT_DIS_JTAG, "SOFT_DIS_JTAG" },
+    { ESP_EFUSE_DIS_DOWNLOAD_MODE, ESP_EFUSE_WR_DIS_DIS_DOWNLOAD_MODE, "DIS_DOWNLOAD_MODE" },
+    { ESP_EFUSE_DIS_USB_OTG_DOWNLOAD_MODE, ESP_EFUSE_WR_DIS_DIS_USB_OTG_DOWNLOAD_MODE,
+      "DIS_USB_OTG_DOWNLOAD_MODE" },
+    { ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE, ESP_EFUSE_WR_DIS_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE,
+      "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE" },
+    { ESP_EFUSE_DIS_FORCE_DOWNLOAD, ESP_EFUSE_WR_DIS_DIS_FORCE_DOWNLOAD, "DIS_FORCE_DOWNLOAD" },
+    { ESP_EFUSE_DIS_DIRECT_BOOT,    ESP_EFUSE_WR_DIS_DIS_DIRECT_BOOT,    "DIS_DIRECT_BOOT" },
 };
 
 // Every bit of the field set.
@@ -347,12 +359,22 @@ bool fuse_full(const esp_efuse_desc_t** f) {
     if (bits <= 0 || esp_efuse_read_field_cnt(f, &cnt) != ESP_OK) return false;
     return (int)cnt == bits;
 }
+
+// Burned - or, with secure boot on, write-protected unburned: then nothing can
+// change it any more, and what it would block needs code already running on
+// the chip (DIS_FORCE_DOWNLOAD: entering download mode from software), which
+// secure boot limits to signed firmware.
+bool fuse_settled(const lock_fuse_t& l) {
+    return fuse_full(l.field) ||
+           (esp_efuse_read_field_bit(l.wr_dis) && esp_secure_boot_enabled());
+}
 }  // namespace
 
+// Locked: every field settled (above).
 extern "C" bool mw_secure_flashing_locked(void)
 {
     for (const lock_fuse_t& l : kLockFuses)
-        if (!fuse_full(l.field)) return false;
+        if (!fuse_settled(l)) return false;
     return true;
 }
 
@@ -362,7 +384,10 @@ extern "C" mw_err_t mw_secure_lock_flashing(void)
     if (esp_efuse_batch_write_begin() != ESP_OK) return MW_ERR_IO;
     bool ok = true;
     for (const lock_fuse_t& l : kLockFuses) {
-        if (fuse_full(l.field)) continue;
+        if (fuse_settled(l)) {
+            if (!fuse_full(l.field)) MW_LOGI("efuse", "%s is write-protected, skipped", l.name);
+            continue;
+        }
         size_t cnt = 0;
         const int bits = esp_efuse_get_field_size(l.field);
         (void)esp_efuse_read_field_cnt(l.field, &cnt);

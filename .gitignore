@@ -27,3 +27,7 @@ tools/test/.mw_test_*/
 # build.sh / build.bat: the downloaded toolchain and the built firmware
 /toolchain/
 /firmware/
+
+# make-keys: the secure boot signing key and the flash encryption key.
+# NEVER commit them.
+/keys/

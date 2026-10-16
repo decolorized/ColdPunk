@@ -5,6 +5,8 @@ with a display. It keeps your seed on the device, computes key images and signs
 transactions there, and talks to a watch-only wallet on your PC only through a
 small USB protocol that carries files, never secrets.
 
+Website: **[monerocoldwallet.diy](http://monerocoldwallet.diy)**
+
 The PC side is **[MoneroPunkSigner](https://github.com/decolorized/MoneroPunkSigner)**,
 a fork of Feather Wallet that speaks the device protocol natively. A
 stand-alone Python courier (`tools/tools/mwlink`) works with stock Feather as
@@ -366,6 +368,69 @@ converted partition.
 `toolchain/` can be deleted at any time to free the space; the next build
 downloads it again. `firmware/` keeps one folder per version and board.
 
+### Secure boot and flash encryption (optional, irreversible)
+
+Without secure boot anyone with the device and a cable can flash their own
+firmware and use the chip's HMAC key to guess the password at full speed
+([security.md](tools/docs/security.md) §6.3). Three more script pairs close
+that, with a bootloader built by ESP-IDF 5.5.5 - the version the Arduino core
+is built from, with the same options.
+
+`build` uses the bootloader that ships with the Arduino core. The Arduino
+core is built without secure boot and flash encryption, so its bootloader has
+no code for them; the secured device needs a bootloader built with those
+options:
+
+* `build-idf-bootloader` builds the bootloader with ESP-IDF using exactly the
+  Arduino core's options. Its code is identical to Arduino's byte for byte
+  (only the build date and the maximum chip revision field in the header
+  differ: v0.99 instead of "any"). It is not a different bootloader but a
+  check that the ESP-IDF build is set up as the Arduino one.
+* `build-secure` builds the same bootloader plus the secure boot and flash
+  encryption options. That adds code (signature check of the firmware at
+  every start, enabling the protection and encrypting the flash on the first
+  start), so it is larger and does not match Arduino's.
+
+| Script | What it does |
+| :--- | :--- |
+| `build-idf-bootloader.bat` / `.sh` | the normal firmware with the IDF-built bootloader (same code as Arduino's), **no** secure boot, nothing burned |
+| `make-keys.bat` / `.sh` | creates `keys/secure_boot_signing_key.pem` (RSA-3072) and `keys/flash_encryption_key.bin` (XTS-AES-128) once; refuses to run when either exists |
+| `build-secure.bat` / `.sh` | the firmware plus a bootloader with Secure Boot V2 and flash encryption in release mode; signs both, and makes encrypted copies for updates |
+
+These download ESP-IDF 5.5.5 (2 GB), a portable Python, the IDF compiler,
+cmake and ninja into `toolchain/` as well - about 3 GB once, 6 GB on disk.
+The keys stay in `keys/` (or where `COLDPUNK_KEYS` points); they never go into
+a firmware folder and `keys/` is in `.gitignore`.
+
+**Order:**
+
+1. Flash a normal build and finish the [first start](#first-start): the
+   wallet's eFuse key (`HMAC_UP`) must exist before securing - afterwards the
+   chip can no longer read-protect a new key.
+2. Optionally flash a `build-idf-bootloader` folder and check that the device
+   starts and works as before.
+3. `make-keys` once; copy `keys/` to two offline places. **Lose the keys and
+   the device can never be updated again; leak them and anyone can make
+   firmware it will run.**
+4. `build-secure`, then in its folder `secure-first-flash.bat COM5` /
+   `./secure-first-flash.sh /dev/ttyUSB0`. It checks the eFuses (stops if the
+   device is already secured, has no wallet key, or lacks two free key
+   blocks), asks you to type `SECURE`, burns the flash encryption key
+   (espefuse asks for `BURN`) and writes the signed images. On that start the
+   bootloader burns the digest of your signing key, revokes the two other
+   digest slots, encrypts the bootloader, partition table, otadata and
+   firmware in place, turns JTAG off and the ROM download mode into its secure
+   variant. **Up to a minute with a dark screen - do not cut the power.** The
+   wallets are kept.
+5. From then on update only with `flash.bat` / `flash.sh` from a newer
+   `build-secure` folder made with the same keys (signed and encrypted
+   images, written without esptool's stub). A normal build no longer boots.
+
+Size note: the Arduino core keeps the partition table at 0x8000, so the
+signed bootloader must fit into 32 KB. With secure boot and flash encryption
+it does only without log output (`CONFIG_BOOTLOADER_LOG_LEVEL_NONE`): a
+secured device that does not start prints nothing on the serial port.
+
 ### With arduino-cli
 
 [`sketch.yaml`](sketch.yaml) pins the ESP32 core (3.3.11), the libraries
@@ -603,6 +668,8 @@ board_config.h        board selection
 boards/               one header per supported board
 sketch.yaml           arduino-cli build profiles
 build.bat, build.sh   build with everything downloaded into toolchain/
+build-idf-bootloader, build-secure, make-keys (.bat/.sh)
+                      IDF bootloader, secure boot + flash encryption, keys
 lv_conf.h             LVGL configuration
 partitions.csv        flash layout
 res/                  source images (monero.png -> src/ui/img_monero.c)
@@ -621,7 +688,10 @@ src/
 tools/
   img2lvgl.py         PNG -> LVGL 9 C image (RGB565A8): regenerates img_monero.c
   docs/               design, security, protocol, user guide, testing
-  flash/              flash.bat, flash.sh, README.txt copied next to a build
+  build/              lib.bat, lib.sh - shared code of the build scripts
+  bootloader/         ESP-IDF project for the bootloader (sdkconfig.defaults, .secure)
+  flash/              flash.bat, flash.sh, README.txt copied next to a build;
+                      secure/: the scripts of a build-secure folder
   test/               host test suite (gcc, no hardware needed)
   tools/mwlink/       PC courier: CLI, Tk GUI, device simulator, tests
 ```
@@ -678,6 +748,7 @@ tested on the host, and the stagenet procedure, are listed in
 | :--- | :--- |
 | **[ColdPunk](https://github.com/decolorized/ColdPunk)** (this repository) | firmware of the offline signing device |
 | **[MoneroPunkSigner](https://github.com/decolorized/MoneroPunkSigner)** | Feather Wallet fork for the PC: watch-only wallet with native ColdPunk support over USB HID |
+| **[monerocoldwallet.diy](http://monerocoldwallet.diy)** | project website |
 
 Use matching versions: both sides must speak the same mwlink protocol version
 (currently 3).

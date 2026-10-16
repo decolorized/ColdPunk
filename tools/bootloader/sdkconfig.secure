@@ -1,0 +1,24 @@
+# Added on top of sdkconfig.defaults by build-secure: Secure Boot V2 and
+# flash encryption in release mode, with images signed outside the build.
+#
+# On the first start this bootloader verifies the app against its own key,
+# burns the digest of the public key from its signature block, revokes the
+# two unused digest slots, encrypts the bootloader, the partition table,
+# otadata and the app in place with the XTS-AES-128 key already burned into
+# eFuse (the host key, see secure-first-flash), and burns the release-mode
+# eFuses: SPI_BOOT_CRYPT_CNT, DIS_DOWNLOAD_MANUAL_ENCRYPT, JTAG off, the
+# download-mode cache off, Secure Download Mode on, WR_DIS_RD_DIS.
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+CONFIG_SECURE_BOOT_V2_RSA_ENABLED=y
+# CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_AES128=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y
+CONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y
+
+# Size: with secure boot and flash encryption the bootloader must still fit
+# below the partition table at 0x8000 (the Arduino core's offset, fixed in its
+# libraries) together with its 4 KB signature sector. Log level "error" gives
+# 0x9000; without log strings it is 0x7000 + 0x1000 signature = 0x8000.
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y

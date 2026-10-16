@@ -2,3 +2,5 @@
 *.bat text eol=crlf
 *.sh  text eol=lf
 tools/flash/README.txt text eol=crlf
+*.ps1 text eol=crlf
+tools/flash/secure/README.txt text eol=crlf

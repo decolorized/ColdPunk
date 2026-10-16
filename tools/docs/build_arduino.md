@@ -43,6 +43,22 @@ build.bat              Windows 10 / 11 (build.bat debug, build.bat hid)
 собрали на другой ОС), берётся esptool v5 из PATH. Объединённый 16-МБ образ
 (`merged.bin`) в папку не кладётся: он затирает кошельки.
 
+### Загрузчик от ESP-IDF, secure boot, шифрование флеша
+
+| Скрипт | Что делает |
+| :--- | :--- |
+| `build-idf-bootloader` | обычная прошивка с загрузчиком, собранным ESP-IDF 5.5.5 (`tools/bootloader`, те же опции, что у ядра Arduino; код совпадает с ардуиновским загрузчиком байт в байт, кроме даты сборки и поля max chip rev). Ничего не прожигает |
+| `make-keys` | один раз создаёт `keys/secure_boot_signing_key.pem` и `keys/flash_encryption_key.bin`; если хоть один есть — ничего не трогает |
+| `build-secure` | прошивка + загрузчик с Secure Boot V2 и шифрованием флеша (release); подписывает, шифрует копии для обновлений |
+
+Скачивают дополнительно ESP-IDF 5.5.5 (2 ГБ), Python 3.12 (python-build-standalone),
+компилятор IDF, cmake и ninja — всё в `toolchain/`, ~3 ГБ один раз. Загрузчик
+с secure boot и шифрованием влезает в 32 КБ до таблицы разделов (0x8000)
+только без логов (`CONFIG_BOOTLOADER_LOG_LEVEL_NONE`): 0x7000 + 0x1000 подпись.
+Образ приложения пересобирается из ELF с `--secure-pad-v2`; без паддинга он
+сверяется байт в байт с ардуиновским. Порядок действий и предупреждения —
+README, «Secure boot and flash encryption».
+
 ## 0a. Быстрый путь: arduino-cli и sketch.yaml
 
 В папке скетча лежит `sketch.yaml` с профилем сборки: точная версия ядра

@@ -333,18 +333,25 @@ shred -u hmac_key0.bin
 only in a factory script you have already tested on a scrap board.
 
 Optional, strongly recommended for a device that will hold real value:
+Secure Boot V2 and flash encryption. Do not burn those eFuses by hand - the
+project has scripts for it (README, "Secure boot and flash encryption"):
 
-```bash
-# Flash encryption in release mode (irreversible, and it disables plaintext
-# flashing - you will need a signed OTA path afterwards).
-espefuse.py --port /dev/ttyACM0 burn_efuse SPI_BOOT_CRYPT_CNT 7
+* `make-keys` creates the RSA-3072 signing key and the XTS-AES-128 flash
+  encryption key once (it refuses to overwrite them);
+* `build-secure` builds a bootloader with ESP-IDF 5.5.5 (the core's version,
+  `tools/bootloader/sdkconfig.secure`: Secure Boot V2 RSA, flash encryption
+  in release mode, Secure Download Mode), signs it and the firmware, and
+  makes encrypted copies for updates;
+* `secure-first-flash` in its output folder checks the eFuses, burns the
+  flash encryption key (host-generated, so that later updates can be
+  pre-encrypted on the PC) and writes the signed images; the bootloader
+  enables the rest on that first start (digest of the signing key, unused
+  digest slots revoked, in-place encryption, JTAG off, `WR_DIS_RD_DIS`).
 
-# Secure Boot v2 (irreversible). Sign your firmware first.
-espsecure.py generate_signing_key --version 2 secure_boot_signing_key.pem
-espefuse.py --port /dev/ttyACM0 burn_key BLOCK_KEY1 \
-    secure_boot_digest.bin SECURE_BOOT_DIGEST0
-espefuse.py --port /dev/ttyACM0 burn_efuse SECURE_BOOT_EN 1
-```
+Because the bootloader burns `WR_DIS_RD_DIS`, no key can be read-protected
+afterwards: the HMAC key (above) must be burned **before**, which
+`secure-first-flash` checks. Updates are then written with `flash` from a
+`build-secure` folder (pre-encrypted, esptool without its stub).
 
 ### 4.3 sdkconfig requirements
 
@@ -657,9 +664,18 @@ What follows for the user:
 * whoever knows the account password opens every wallet that has no
   passphrase - the passphrase (§3) is the second factor.
 
-Enable Secure Boot v2 and flash encryption (§4.2) to close the oracle. Both are
-irreversible and lock you out of plain reflashing; the firmware does not turn
-them on by itself.
+Enable Secure Boot v2 and flash encryption (§4.2, `build-secure`) to close
+the oracle. Both are irreversible and lock you out of plain reflashing (updates
+then need images signed and encrypted with your keys); the firmware does not
+turn them on by itself.
+
+With them on, one weakness remains: the attempt counter lives in NVS, which
+flash encryption does not cover, and the ROM download mode can still write
+flash (that is how updates work). Someone with the device can therefore write
+an older copy of the NVS back to reset the counter and its delays - slowly,
+by hand, guessing through the device's own screen and KDF. Secure boot stops
+a custom firmware from guessing at full speed; it does not make the counter
+tamper-proof.
 
 **Lock firmware updates (0.3, Settings).** Burns the eFuses `DIS_PAD_JTAG`,
 `DIS_USB_JTAG`, `SOFT_DIS_JTAG`, `DIS_DOWNLOAD_MODE`,
@@ -671,7 +687,10 @@ debugged or replaced over a cable — and can never be updated again (there
 is no signed OTA path). It is irreversible. It does **not** stop someone who
 opens the case and writes the flash chip directly with a programmer: their
 firmware boots, because without secure boot nothing checks it. It raises
-the bar from "a USB cable" to "a soldering iron".
+the bar from "a USB cable" to "a soldering iron". On a device secured with
+`build-secure` the bootloader has already burned or write-protected some of
+these fields (`DIS_FORCE_DOWNLOAD` is write-protected unburned); the lock
+skips them and counts the device as locked.
 
 ### 6.4 No anti-tamper
 
