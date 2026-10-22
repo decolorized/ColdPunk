@@ -984,6 +984,15 @@ mw_err_t mw_kb_run(const mw_kb_ctx_t* ctx, char* out, size_t out_cap) {
     if (s_kb.ctx.type != KEYBOARD_FULL && s_kb.ctx.type != KEYBOARD_SCROLL) {
         s_kb.ctx.type = mw_ui_settings()->keyboard;
     }
+    if (ctx->mode == MW_KB_MODE_FREE_TEXT && ctx->initial) {
+        size_t n = strlen(ctx->initial);
+        size_t lim = sizeof(s_kb.text) - 1;
+        if (out_cap - 1 < lim) lim = out_cap - 1;
+        if (n > lim) n = lim;
+        memcpy(s_kb.text, ctx->initial, n);
+        s_kb.text[n] = '\0';
+        s_kb.text_len = (uint16_t)n;
+    }
     s_kb.layer            = MW_KB_LAYER_LOWER;
     s_kb.next_mask        = 0x03FFFFFFu;
     s_kb.last_activity_ms = mw_millis();

@@ -567,6 +567,9 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_KI_SAVED_ADDED] = "Добавлено %u сохранённых\n"
                             "key images (выходы #%u-#%u).\n"
                             "Выходы до #%u в файл не вошли.",
+    [XSTR_PP_REVIEW]        = "Passphrase (%u симв.):\n«%s»",
+    [XSTR_PP_REVIEW_EMPTY]  = "Passphrase пустая.",
+    [XSTR_PP_OPEN]          = "Войти",
     [XSTR_BOOTONLY]         = "Прошивка только с BOOT",
     [XSTR_BOOTONLY_W1]      = "Будут прожжены eFuse: JTAG\nотключится, а программа больше\nне сможет перевести чип\nв режим загрузки.\nПрошить можно будет только\nс зажатой кнопкой BOOT.\nОтменить нельзя.",
     [XSTR_BOOTONLY_W2]      = "Если на плате USB-UART мост\nсам дёргает BOOT и RESET\n(прошивка шла без кнопки),\nэто его не остановит: для чипа\nон то же, что кнопка.\nНе прошитое вашим ключом\nостанавливает только secure boot.",
@@ -973,6 +976,9 @@ static const char* const X_EN[XSTR_COUNT] = {
                             "(outputs #%u-#%u).\n"
                             "Outputs before #%u are not\n"
                             "in the file.",
+    [XSTR_PP_REVIEW]        = "Passphrase (%u chars):\n«%s»",
+    [XSTR_PP_REVIEW_EMPTY]  = "The passphrase is empty.",
+    [XSTR_PP_OPEN]          = "Open",
     [XSTR_BOOTONLY]         = "Flash only with BOOT",
     [XSTR_BOOTONLY_W1]      = "This burns eFuses: JTAG is\nswitched off and software can\nno longer send the chip into\nthe download mode. Flashing\nthen needs the BOOT button\nheld. This cannot be undone.",
     [XSTR_BOOTONLY_W2]      = "A USB-UART bridge that works\nBOOT and RESET by itself\n(flashing worked without the\nbutton) is the same as the\nbutton for the chip: this does\nnot stop it. Only secure boot\nstops foreign firmware.",

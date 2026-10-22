@@ -95,9 +95,11 @@ static bool confirm_empty_passphrase(void) {
                          TX(XSTR_YES), TX(XSTR_NO));
 }
 
-static mw_err_t run_keyboard(const char* title, char* buf, size_t cap) {
+static mw_err_t run_keyboard(const char* title, char* buf, size_t cap,
+                             const char* initial = NULL) {
     mw_kb_ctx_t kc;
     memset(&kc, 0, sizeof(kc));
+    kc.initial    = initial;
     kc.mode       = MW_KB_MODE_FREE_TEXT;
     kc.type       = mw_ui_settings()->keyboard;
     kc.title      = title;
@@ -126,16 +128,33 @@ mw_err_t mw_screen_passphrase_open_run(const char* wallet_name, char* out,
     snprintf(title, sizeof(title), "%s: %s", wallet_name ? wallet_name : "",
              T(STR_PASSPHRASE));
     mw_session_wipe_input();
-    mw_err_t e = run_keyboard(title, sess, sess_cap);
-    if (e != MW_OK) {
+    // 0.3.6: what was typed is shown before the slow open - Back returns to
+    // the keyboard with it, Open opens. `out` keeps the text between rounds.
+    for (;;) {
+        mw_err_t e = run_keyboard(title, sess, sess_cap, out[0] ? out : NULL);
+        if (e != MW_OK) {
+            mw_session_wipe_input();
+            mw_memzero(out, out_cap);
+            return MW_ERR_ABORTED;
+        }
+        const size_t l = pp_strnlen(sess, sess_cap);
+        const size_t n = l < out_cap ? l : out_cap - 1;
+        memcpy(out, sess, n);
+        out[n] = '\0';
         mw_session_wipe_input();
-        return MW_ERR_ABORTED;
+
+        // Quotes mark spaces at the ends; the length catches the rest.
+        static char body[256 + 96];          // MW_KB_TEXT_MAX (keyboard.h) + text
+        if (n) snprintf(body, sizeof(body), TX(XSTR_PP_REVIEW), (unsigned)n, out);
+        else   snprintf(body, sizeof(body), "%s", TX(XSTR_PP_REVIEW_EMPTY));
+        const bool go = mw_ui_confirm(title, body, TX(XSTR_PP_OPEN), T(STR_BACK));
+        mw_memzero(body, sizeof(body));
+        if (go) return MW_OK;
+        if (mw_ui_lock_requested()) {           // autolock: not "Back"
+            mw_memzero(out, out_cap);
+            return MW_ERR_ABORTED;
+        }
     }
-    const size_t l = pp_strnlen(sess, sess_cap);
-    memcpy(out, sess, l);
-    out[l < out_cap ? l : out_cap - 1] = '\0';
-    mw_session_wipe_input();
-    return MW_OK;
 }
 
 mw_err_t mw_screen_passphrase_run(char* out, size_t out_cap) {

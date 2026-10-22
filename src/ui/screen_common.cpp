@@ -379,6 +379,9 @@ lv_obj_t* mw_ui_label(lv_obj_t* parent, const char* text, lv_style_t* style) {
     return l;
 }
 
+static void press_note_cb(lv_event_t* e);           // below, with the list guards
+static void button_click_guard_cb(lv_event_t* e);
+
 lv_obj_t* mw_ui_button(lv_obj_t* parent, const char* text,
                        lv_event_cb_t cb, void* user) {
     const mw_metrics_t* m = mw_metrics();
@@ -402,7 +405,11 @@ lv_obj_t* mw_ui_button(lv_obj_t* parent, const char* text,
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_center(l);
 
-    if (cb) lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
+    if (cb) {
+        lv_obj_add_event_cb(b, press_note_cb, LV_EVENT_PRESSED, NULL);
+        lv_obj_add_event_cb(b, button_click_guard_cb, LV_EVENT_CLICKED, NULL);  // first
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, user);
+    }
     return b;
 }
 
@@ -416,9 +423,41 @@ static void list_scroll_cb(lv_event_t* e) {
     MW_UNUSED(e);
     s_list_scroll_ms = lv_tick_get();
 }
+// 0.3.6: a press is a click only when the finger stayed where it came down.
+// LVGL starts a scroll only after MW scroll_limit (16 px, lvgl_port.cpp, kept
+// high so tap jitter does not eat clicks); a finger that slid less than that
+// - a small scroll, or a list that fits and does not scroll at all - used to
+// open the row. Now more than MW_CLICK_SLOP_PX between press and release
+// cancels the click (rows and buttons).
+#define MW_CLICK_SLOP_PX 8
+static lv_point_t s_press_pt;
+static bool       s_press_ptr;
+static void press_note_cb(lv_event_t* e) {
+    lv_indev_t* in = lv_event_get_indev(e);
+    s_press_ptr = in && lv_indev_get_type(in) == LV_INDEV_TYPE_POINTER;
+    if (s_press_ptr) lv_indev_get_point(in, &s_press_pt);
+}
+static bool press_moved(lv_event_t* e) {
+    if (!s_press_ptr) return false;
+    lv_indev_t* in = lv_event_get_indev(e);
+    if (!in || lv_indev_get_type(in) != LV_INDEV_TYPE_POINTER) return false;
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    const int32_t dx = (int32_t)p.x - s_press_pt.x, dy = (int32_t)p.y - s_press_pt.y;
+    return dx * dx + dy * dy > MW_CLICK_SLOP_PX * MW_CLICK_SLOP_PX;
+}
 static void row_click_guard_cb(lv_event_t* e) {
     if (lv_tick_elaps(s_list_scroll_ms) < MW_SCROLL_CLICK_GUARD_MS) {
         MW_LOGD("ui", "row click right after a scroll: ignored");
+        lv_event_stop_processing(e);
+    } else if (press_moved(e)) {
+        MW_LOGD("ui", "row click after the finger moved: ignored");
+        lv_event_stop_processing(e);
+    }
+}
+static void button_click_guard_cb(lv_event_t* e) {
+    if (press_moved(e)) {
+        MW_LOGD("ui", "button click after the finger moved: ignored");
         lv_event_stop_processing(e);
     }
 }
@@ -453,6 +492,7 @@ lv_obj_t* mw_ui_list_row(lv_obj_t* list, const char* icon, const char* text,
     lv_obj_add_style(row, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
     if (cb) {
+        lv_obj_add_event_cb(row, press_note_cb, LV_EVENT_PRESSED, NULL);
         lv_obj_add_event_cb(row, row_click_guard_cb, LV_EVENT_CLICKED, NULL);  // first
         lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user);
     }

@@ -62,6 +62,9 @@ typedef struct {
     // TZ 5.8: this word is the one a failed checksum / RS code points at, so
     // the keyboard marks it in the danger colour instead of the plain counter.
     bool            highlight;
+    // 0.3.6, free text only: the text the keyboard opens with (back from the
+    // "is this the passphrase?" page); NULL = empty.
+    const char*     initial;
 } mw_kb_ctx_t;
 
 // Runs one word / one string of input. Returns MW_OK and fills `out`, or
