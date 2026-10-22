@@ -228,7 +228,8 @@ explicit confirmation on the device screen. The PC program is only a courier.
   shows is in [`tools/docs/security.md`](tools/docs/security.md) §4a.
 - **USB is enabled only after the correct password.** Before it nothing at all
   appears on USB (the builds use *CDC On Boot: Disabled*, and since 0.3.6 the
-  chip's USB-JTAG/serial unit lets go of the pins at start); after it the
+  chip's USB-JTAG/serial unit lets go of the pins at start), and a lock
+  (manual or autolock) takes the device off the bus again; after it the
   device enumerates as "Monero Cold Wallet" with its HID link (and, built
   with `MW_USE_SERIAL 1`, its own CDC port), and the console stays on UART0.
 - Autolock (default 5 minutes): keys and passphrase are wiped from memory.

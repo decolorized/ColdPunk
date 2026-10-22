@@ -63,6 +63,7 @@ extern "C" {
 mw_err_t mw_usb_link_init(void);
 void     mw_usb_link_stop(void);
 bool     mw_usb_link_running(void);
+void     mw_usb_link_bus(bool on);
 }
 
 // app_config.h: MW_USE_HID / MW_USE_SERIAL leave a transport out entirely.
@@ -578,6 +579,22 @@ extern "C" mw_err_t mw_usb_link_init(void) {
     MW_LOGI("link", "up:%s%s", (caps & MW_LINK_CAP_SERIAL) ? " serial" : "",
             (caps & MW_LINK_CAP_HID) ? " hid" : "");
     return MW_OK;
+}
+
+#if defined(MW_USB_TINYUSB) && (MW_LINK_HAVE_HID || MW_LINK_OWN_CDC || MW_CDC_ON_BOOT)
+#  include "esp32-hal-tinyusb.h"      // tusb.h: tud_connect / tud_disconnect
+#endif
+// 0.3.6: the device leaves the USB bus while it is locked and comes back
+// after the next correct password (the link task and its buffers stay).
+// TinyUSB's soft disconnect: D+ pull-up off, the host sees it unplugged.
+extern "C" void mw_usb_link_bus(bool on) {
+#if defined(MW_USB_TINYUSB) && (MW_LINK_HAVE_HID || MW_LINK_OWN_CDC || MW_CDC_ON_BOOT)
+    if (!g_link.running) return;
+    const bool ok = on ? tud_connect() : tud_disconnect();
+    MW_LOGI("link", "usb %s%s", on ? "attached" : "detached (locked)", ok ? "" : " - failed");
+#else
+    (void)on;
+#endif
 }
 
 extern "C" void mw_usb_link_stop(void) {

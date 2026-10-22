@@ -540,7 +540,7 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_JTAG_LOCKED]   = "Перепрошивка уже запрещена.",
     [XSTR_JTAG_FAIL]     = "eFuse не прожжены: %s",
     [XSTR_SET_GAME]      = "Сапёр при включении",
-    [XSTR_GAME_HOWTO]    = "Устройство будет включаться\nкак игра «Сапёр».\n\nКак открыть экран пароля:\n1. Наступите на мину.\n2. Нажмите на взорванную мину\n   3 раза за 2 секунды\n   (кнопками: выберите её и\n   3 раза нажмите SELECT).\n\nЗапомните это: без жеста\nэкрана пароля не будет.",
+    [XSTR_GAME_HOWTO]    = "Устройство будет включаться\nкак игра \"Сапёр\".\n\nКак открыть экран пароля:\n1. Наступите на мину.\n2. Нажмите на взорванную мину\n   3 раза за 2 секунды\n   (кнопками: выберите её и\n   3 раза нажмите SELECT).\n\nЗапомните это: без жеста\nэкрана пароля не будет.",
     [XSTR_GAME_TURN_ON]  = "Включить",
     [XSTR_WL_OPEN_PP]    = "Открыть с passphrase",
     [XSTR_TXL_RECEIVED]  = "Получено (новые сверху)",
@@ -567,7 +567,7 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_KI_SAVED_ADDED] = "Добавлено %u сохранённых\n"
                             "key images (выходы #%u-#%u).\n"
                             "Выходы до #%u в файл не вошли.",
-    [XSTR_PP_REVIEW]        = "Passphrase (%u симв.):\n«%s»",
+    [XSTR_PP_REVIEW]        = "Passphrase (%u симв.):\n\"%s\"",
     [XSTR_PP_REVIEW_EMPTY]  = "Passphrase пустая.",
     [XSTR_PP_OPEN]          = "Войти",
     [XSTR_BOOTONLY]         = "Прошивка только с BOOT",
@@ -976,7 +976,7 @@ static const char* const X_EN[XSTR_COUNT] = {
                             "(outputs #%u-#%u).\n"
                             "Outputs before #%u are not\n"
                             "in the file.",
-    [XSTR_PP_REVIEW]        = "Passphrase (%u chars):\n«%s»",
+    [XSTR_PP_REVIEW]        = "Passphrase (%u chars):\n\"%s\"",
     [XSTR_PP_REVIEW_EMPTY]  = "The passphrase is empty.",
     [XSTR_PP_OPEN]          = "Open",
     [XSTR_BOOTONLY]         = "Flash only with BOOT",

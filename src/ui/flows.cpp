@@ -2288,6 +2288,9 @@ extern "C" void mw_shell_link_install(void) {
 static void* ops_alloc(size_t n)         { return big_alloc(n); }
 static void  ops_free(void* p, size_t n) { big_free(p, n); }
 
+extern "C" mw_err_t mw_usb_link_init(void);
+extern "C" bool     mw_usb_link_running(void);
+extern "C" void     mw_usb_link_bus(bool on);
 static void lock_device(void) {
     mw_ui_autolock_arm(false);
     mw_ki_cache_close();
@@ -2300,16 +2303,23 @@ static void lock_device(void) {
     }
     link_state(MW_LINK_STATE_LOCKED);
     MW_LOGI("shell", "device locked");
+#if defined(ARDUINO) && !defined(MW_HOST_BUILD)
+    // 0.3.6: off the USB bus while locked. A moment first, so the program on
+    // the PC still gets the "locked" state.
+    mw_delay_ms(150);
+    mw_usb_link_bus(false);
+#endif
 }
 
-// USB comes up only after the first correct device password (user request:
-// no USB link while the device is locked at power-on). Started once; a later
-// lock keeps the transport but the link state refuses every file/request.
-extern "C" mw_err_t mw_usb_link_init(void);
-extern "C" bool     mw_usb_link_running(void);
+// USB comes up only after a correct device password (user request: no USB
+// link while the device is locked). Started at the first unlock; a lock
+// takes the device off the bus (lock_device) and the next unlock puts it back.
 static void ensure_usb_link(void) {
 #if defined(ARDUINO) && !defined(MW_HOST_BUILD)
-    if (mw_usb_link_running()) return;
+    if (mw_usb_link_running()) {
+        mw_usb_link_bus(true);
+        return;
+    }
     const mw_err_t e = mw_usb_link_init();
     MW_LOGI("shell", "usb link started after unlock -> %s", mw_err_str(e));
 #endif

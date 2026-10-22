@@ -143,7 +143,8 @@ mw_err_t mw_screen_passphrase_open_run(const char* wallet_name, char* out,
         out[n] = '\0';
         mw_session_wipe_input();
 
-        // Quotes mark spaces at the ends; the length catches the rest.
+        // ASCII quotes (the fonts have no « ») mark spaces at the ends; the length
+        // catches the rest.
         static char body[256 + 96];          // MW_KB_TEXT_MAX (keyboard.h) + text
         if (n) snprintf(body, sizeof(body), TX(XSTR_PP_REVIEW), (unsigned)n, out);
         else   snprintf(body, sizeof(body), "%s", TX(XSTR_PP_REVIEW_EMPTY));
