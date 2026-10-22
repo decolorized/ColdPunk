@@ -345,6 +345,15 @@ lv_obj_t* mw_ui_page_footer(mw_page_t* p) {
     return f;
 }
 
+// 0.3.6: the row the user came back to is focused (highlighted) AND scrolled
+// into view - on touch screens too, where rows do not scroll on focus.
+void mw_ui_focus_show(lv_obj_t* row) {
+    if (!row) return;
+    lv_obj_update_layout(lv_obj_get_screen(row));
+    lv_group_focus_obj(row);
+    lv_obj_scroll_to_view_recursive(row, LV_ANIM_OFF);
+}
+
 void mw_ui_focus_add(mw_page_t* p, lv_obj_t* obj) {
     if (!p || !p->group || !obj) return;
     lv_group_add_obj(p->group, obj);
@@ -397,9 +406,27 @@ lv_obj_t* mw_ui_button(lv_obj_t* parent, const char* text,
     return b;
 }
 
+// 0.3.6: a finger that scrolls a list and slides off the glass must not
+// open a row. Every scroll of a list stamps the time; a click on a row that
+// comes within MW_SCROLL_CLICK_GUARD_MS of it is dropped (with some touch
+// chips the lift at the edge arrives as a fresh tap, see hal/touch.cpp).
+#define MW_SCROLL_CLICK_GUARD_MS 300u
+static uint32_t s_list_scroll_ms;
+static void list_scroll_cb(lv_event_t* e) {
+    MW_UNUSED(e);
+    s_list_scroll_ms = lv_tick_get();
+}
+static void row_click_guard_cb(lv_event_t* e) {
+    if (lv_tick_elaps(s_list_scroll_ms) < MW_SCROLL_CLICK_GUARD_MS) {
+        MW_LOGD("ui", "row click right after a scroll: ignored");
+        lv_event_stop_processing(e);
+    }
+}
+
 lv_obj_t* mw_ui_list(lv_obj_t* parent) {
     const mw_metrics_t* m = mw_metrics();
     lv_obj_t* list = lv_list_create(parent);
+    lv_obj_add_event_cb(list, list_scroll_cb, LV_EVENT_SCROLL, NULL);
     lv_obj_set_width(list, lv_pct(100));
     lv_obj_set_flex_grow(list, 1);
     lv_obj_set_style_bg_color(list, mw_palette()->bg, LV_PART_MAIN);
@@ -425,7 +452,10 @@ lv_obj_t* mw_ui_list_row(lv_obj_t* list, const char* icon, const char* text,
     lv_obj_add_style(row, mw_style_focus(), LV_PART_MAIN | LV_STATE_FOCUSED);
     lv_obj_add_style(row, mw_style_pressed(), LV_PART_MAIN | LV_STATE_PRESSED);
     lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
-    if (cb) lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user);
+    if (cb) {
+        lv_obj_add_event_cb(row, row_click_guard_cb, LV_EVENT_CLICKED, NULL);  // first
+        lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, user);
+    }
     return row;
 }
 
@@ -926,7 +956,9 @@ static void choose_build(void* arg) {
 
     lv_obj_t* list = mw_ui_list(c->page.body);
     lv_obj_t* focus_row = NULL;
-    const int focus_target = mw_ui_focus_restore(MW_FOCUS_CHOOSE);
+    // The current value when the caller gives one, else the last pick.
+    const int focus_target = (c->initial >= 0 && c->initial < c->count)
+                                 ? c->initial : mw_ui_focus_restore(MW_FOCUS_CHOOSE);
 
     for (int i = 0; i < c->count; i++) {
         lv_obj_t* row = mw_ui_list_row(list, NULL, c->items[i], choose_item_cb,
@@ -942,7 +974,7 @@ static void choose_build(void* arg) {
         mw_ui_focus_add(&c->page, b);
     }
 
-    if (focus_row)      lv_group_focus_obj(focus_row);
+    if (focus_row)      mw_ui_focus_show(focus_row);
     else if (c->count)  lv_group_focus_obj(lv_obj_get_child(list, 0));
 }
 

@@ -409,20 +409,30 @@ bool mw_touch_read(mw_touch_state_t* out)
     // afterwards are ignored: the same lift is used once (s_lift_used), and
     // a new one is recognised by a real release (no contact) in between or
     // by another point.
-    static bool    s_was_down  = false;
-    static bool    s_lift_used = true;
-    static int32_t s_lu = -1000, s_lv = -1000;
+    //
+    // 0.3.6: a lift that comes soon after a contact ends THAT gesture, never
+    // a new tap. A finger that scrolls a list and slides off the glass makes
+    // some chips report "no contact", then the lift at the edge point - which
+    // the rule above took for a missed tap and LVGL clicked whatever row was
+    // under it ("a random menu item opens").
+    static bool     s_was_down  = false;
+    static bool     s_lift_used = true;
+    static int32_t  s_lu = -1000, s_lv = -1000;
+    static uint32_t s_contact_ms = 0;
+    const uint32_t  now = millis();
     int32_t u = 0, v = 0;
     const int r = raw_read(&u, &v);
     bool down = (r == RAW_CONTACT);
     if (r == RAW_LIFT) {
-        const bool moved = abs(u - s_lu) > 6 || abs(v - s_lv) > 6;
-        if (!s_was_down && (!s_lift_used || moved)) down = true;  // missed tap
+        const bool moved  = abs(u - s_lu) > 6 || abs(v - s_lv) > 6;
+        const bool recent = (uint32_t)(now - s_contact_ms) < 250u;
+        if (!s_was_down && !recent && (!s_lift_used || moved)) down = true;  // missed tap
         s_lift_used = true;
         s_lu = u; s_lv = v;
     } else if (r == RAW_CONTACT) {
         s_lift_used = true;              // its own lift is not a new tap
         s_lu = u; s_lv = v;
+        s_contact_ms = now;
     } else {
         s_lift_used = false;             // a real release: next lift is new
     }

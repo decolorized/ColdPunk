@@ -1893,7 +1893,7 @@ static void wallet_balance(uint32_t id) {
         m.items = items;
         m.icons = icons;
         m.count = manual ? 3 : 2;
-        m.initial = focus < m.count ? focus : 0;
+        m.initial = focus;
         m.back = true;
         m.with_status = true;
         const int r = mw_ui_menu_run(&m);
@@ -2197,7 +2197,8 @@ static void wallets_menu(void) {
                 // "Open passphrase" closes the session and opens the
                 // passphrase wallet of the same record.
                 while (wallet_home(ids[r], &keys, variant)) variant = 1;
-                focus = 0;
+                // 0.3.6: back on the wallet just closed (the menu clamps
+                // the row when it was deleted).
             }
             mw_memzero(&keys, sizeof(keys));
         } else if (r == n_wallets) {

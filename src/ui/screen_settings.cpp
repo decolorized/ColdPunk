@@ -214,7 +214,7 @@ static void settings_build(void* arg) {
 
     if (focus_row) {
         MW_LOGD("settings", "restore focus to row %d", focus_target);
-        lv_group_focus_obj(focus_row);
+        mw_ui_focus_show(focus_row);
     }
 }
 

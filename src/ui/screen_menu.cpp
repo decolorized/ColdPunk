@@ -87,6 +87,10 @@ static void menu_build(void* arg) {
 
     lv_obj_t* list = mw_ui_list(c->page.body);
     lv_obj_t* focus_row = NULL;
+    // A row that is gone (e.g. a deleted wallet) falls back to the last one.
+    int initial = m->initial;
+    if (initial >= m->count) initial = m->count - 1;
+    if (initial >= MW_MENU_MAX) initial = MW_MENU_MAX - 1;
     for (int i = 0; i < m->count && i < MW_MENU_MAX; i++) {
         lv_obj_t* row = mw_ui_list_row(list, m->icons ? m->icons[i] : NULL,
                                        m->items[i], row_cb, (void*)(intptr_t)i);
@@ -97,7 +101,7 @@ static void menu_build(void* arg) {
             lv_obj_set_style_text_color(row, mw_palette()->danger, LV_PART_MAIN);
         }
         mw_ui_focus_add(&c->page, row);
-        if (i == m->initial) focus_row = row;
+        if (i == initial) focus_row = row;
     }
 
     if (m->footnote && m->footnote[0]) {
@@ -125,7 +129,8 @@ static void menu_build(void* arg) {
             lv_obj_add_flag(lv_obj_get_child(list, (int32_t)i), LV_OBJ_FLAG_SCROLL_ON_FOCUS);
         }
     }
-    if (focus_row) lv_group_focus_obj(focus_row);
+    // The row the user came back from: highlighted and in view.
+    if (focus_row) mw_ui_focus_show(focus_row);
 
     c->timer = m->wake ? lv_timer_create(wake_timer_cb, 120, NULL) : NULL;
 }

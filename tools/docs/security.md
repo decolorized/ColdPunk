@@ -719,7 +719,8 @@ tamper-proof.
 **Flash only with BOOT (0.3.6).** Firmware side, always on: with TinyUSB
 (the build profiles) the firmware switches the internal USB PHY to the
 (not yet started) OTG controller and clears `USB_SERIAL_JTAG_USB_PAD_ENABLE`
-— in a constructor and again at the start of `setup()`, because ESP-IDF's
+— as the very first step of ESP-IDF's core init (`ESP_SYSTEM_INIT_FN`,
+before PSRAM), in a constructor and again at the start of `setup()`, because ESP-IDF's
 secondary-console init (`init_vfs_usj_sec`) runs after the constructors and
 takes the unit back — so the USB-Serial-JTAG unit, through which esptool
 resets the chip into the download mode without a button and whose JTAG half

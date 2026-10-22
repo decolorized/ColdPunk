@@ -290,6 +290,8 @@ typedef enum {
 } mw_focus_slot_t;
 
 void mw_ui_focus_remember(mw_focus_slot_t slot, int index);
+// Focus a row and scroll it into view (0.3.6: also on touch screens).
+void mw_ui_focus_show(lv_obj_t* row);
 int  mw_ui_focus_restore (mw_focus_slot_t slot);
 
 // ===========================================================================

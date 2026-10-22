@@ -129,7 +129,7 @@ static void sd_build(void* arg) {
         lv_obj_set_flex_grow(b, 1);
         mw_ui_focus_add(&c->page, b);
     }
-    if (focus_row)             lv_group_focus_obj(focus_row);
+    if (focus_row)             mw_ui_focus_show(focus_row);
     else if (c->count && list) lv_group_focus_obj(lv_obj_get_child(list, 0));
     c->poll = c->changed ? lv_timer_create(sd_poll_cb, 250, c) : NULL;
 }

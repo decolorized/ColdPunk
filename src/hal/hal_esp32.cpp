@@ -137,6 +137,15 @@ static void mw_usb_jtag_release(void)
     SET_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG, RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL);
     CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
 }
+// The earliest point the application has: the first step of ESP-IDF's core
+// init, before PSRAM and the rest (0.3.6, shortens the moment the port shows
+// up at power-on). The constructor repeats it after the IDF console init.
+#  include <esp_private/startup_internal.h>
+ESP_SYSTEM_INIT_FN(mw_usb_jtag_release_first, CORE, BIT(0), 1)
+{
+    mw_usb_jtag_release();
+    return ESP_OK;
+}
 __attribute__((constructor(101))) static void mw_usb_jtag_release_early(void)
 {
     mw_usb_jtag_release();
