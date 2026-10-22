@@ -717,10 +717,14 @@ a custom firmware from guessing at full speed; it does not make the counter
 tamper-proof.
 
 **Flash only with BOOT (0.3.6).** Firmware side, always on: with TinyUSB
-(the build profiles) a constructor clears `USB_SERIAL_JTAG_USB_PAD_ENABLE`
-before `app_main`, so the USB-Serial-JTAG unit — through which esptool
-resets the chip into the download mode without a button, and whose JTAG
-half can write the flash — leaves the bus; our CDC ports run with
+(the build profiles) the firmware switches the internal USB PHY to the
+(not yet started) OTG controller and clears `USB_SERIAL_JTAG_USB_PAD_ENABLE`
+— in a constructor and again at the start of `setup()`, because ESP-IDF's
+secondary-console init (`init_vfs_usj_sec`) runs after the constructors and
+takes the unit back — so the USB-Serial-JTAG unit, through which esptool
+resets the chip into the download mode without a button and whose JTAG half
+can write the flash, leaves the bus (the port shows up for a moment at
+power-on and disappears); our CDC ports run with
 `enableReboot(false)` (no 1200-baud / DTR-RTS reboot into the bootloader);
 DFU runtime is never enabled. Build with `-DMW_KEEP_USB_JTAG` to keep the
 unit. What stays: the ROM and the second-stage bootloader have the unit for

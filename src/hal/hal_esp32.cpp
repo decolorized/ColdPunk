@@ -113,24 +113,36 @@
 // (the "USB JTAG/serial debug unit" port). esptool resets the chip into the
 // download mode through it with no button pressed, and its JTAG half can
 // write the flash too. With TinyUSB (USB Mode = USB-OTG, the build profiles)
-// the firmware never uses that unit: it lets go of the pins at once, before
-// app_main, and the host sees the port vanish. The ROM and the second-stage
-// bootloader still have it for the fraction of a second before this runs;
-// Settings -> "Flash only with BOOT" (eFuse: JTAG off, DIS_FORCE_DOWNLOAD)
-// closes what an eFuse can close. Our own USB CDC port does not reboot into
-// the bootloader on the "1200 baud" / DTR-RTS requests either
-// (usb_link_arduino.cpp, enableReboot(false)).
+// the firmware never uses that unit, so it takes the pins away from it:
+//   * the internal USB PHY is switched to the OTG controller, which is not
+//     started before the password (no D+ pull-up: the host sees the device
+//     unplugged); TinyUSB later switches it the same way when it starts;
+//   * the unit's own pad function off.
+// It runs twice: as a constructor (early), and from mw_hal_init(), because
+// ESP-IDF's secondary-console setup (init_vfs_usj_sec) runs AFTER the
+// constructors and takes the unit back. The ROM and the second-stage
+// bootloader still have it for well under a second; Settings -> "Flash only
+// with BOOT" (eFuse: JTAG off, DIS_FORCE_DOWNLOAD) closes what an eFuse can.
+// Our own USB CDC port does not reboot into the bootloader on the "1200 baud"
+// / DTR-RTS requests either (usb_link_arduino.cpp, enableReboot(false)).
+// Build with -DMW_KEEP_USB_JTAG to keep the unit.
 // ---------------------------------------------------------------------------
 #if defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0) && !defined(MW_KEEP_USB_JTAG)
 #  include <soc/usb_serial_jtag_reg.h>
+#  include <soc/rtc_cntl_reg.h>
 #  include <soc/soc.h>
-__attribute__((constructor(101))) static void mw_usb_jtag_release(void)
+#  define MW_RELEASE_USB_JTAG 1
+static void mw_usb_jtag_release(void)
 {
-    // The USB-Serial-JTAG unit's own pad enable off: the pins go back to
-    // plain GPIO with no D+ pull-up, the host sees a disconnect. TinyUSB
-    // later takes the PHY for the OTG controller through its own wrapper.
+    SET_PERI_REG_MASK(RTC_CNTL_USB_CONF_REG, RTC_CNTL_SW_HW_USB_PHY_SEL | RTC_CNTL_SW_USB_PHY_SEL);
     CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
 }
+__attribute__((constructor(101))) static void mw_usb_jtag_release_early(void)
+{
+    mw_usb_jtag_release();
+}
+#else
+#  define MW_RELEASE_USB_JTAG 0
 #endif
 
 static SemaphoreHandle_t s_log_mutex = NULL;
@@ -335,6 +347,9 @@ uint32_t mw_stack_free_min(void)
 mw_err_t mw_hal_init(void)
 {
     if (s_hal_ready) return MW_OK;
+#if MW_RELEASE_USB_JTAG
+    mw_usb_jtag_release();          // again: the IDF console took it back
+#endif
     crash_capture();
 #if defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0) && \
     defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)
@@ -346,6 +361,11 @@ mw_err_t mw_hal_init(void)
     MW_LOG_INIT();
     MW_LOG("");
     MW_LOG("%s %s on %s", MW_FIRMWARE_NAME, MW_FIRMWARE_VERSION, BOARD_NAME);
+#if MW_RELEASE_USB_JTAG
+    MW_LOG("USB-JTAG released (usb_conf %08lx, usj conf0 %08lx)",
+           (unsigned long)REG_READ(RTC_CNTL_USB_CONF_REG),
+           (unsigned long)REG_READ(USB_SERIAL_JTAG_CONF0_REG));
+#endif
 
     // --- 1. TRNG (TZ 8.2) -------------------------------------------------
     mw_rng_status_t rng = mw_random_init();
