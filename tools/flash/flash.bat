@@ -5,8 +5,9 @@ rem   flash.bat                 asks for the port (Enter: esptool finds it)
 rem   flash.bat COM5            this port
 rem   flash.bat COM5 460800     a lower speed, if 921600 fails
 rem
-rem The port is the board's USB-UART bridge (CH340 / CP210x, UART0), not the
-rem native USB of the wallet; Device Manager -> Ports shows it. Only the
+rem The port: the board's USB-UART bridge (CH340 / CP210x) if it has one;
+rem otherwise the native USB in the ROM download mode - hold BOOT, plug in
+rem (or press RESET), release BOOT: "USB JTAG/serial debug unit" appears. Only the
 rem bootloader, the partition table and the program are written: the wallets
 rem (NVS) and the storage partition are kept, exactly as with an upload from
 rem the Arduino IDE.
@@ -45,7 +46,17 @@ if not "%PORT%"=="" set "PORT_ARGS=--port %PORT%"
 set "BAUD=%~2"
 if "%BAUD%"=="" set "BAUD=921600"
 
-"%ESPTOOL%" --chip esp32s3 %PORT_ARGS% --baud %BAUD% --before default-reset --after hard-reset write-flash -z --flash-mode keep --flash-freq keep --flash-size keep 0x0 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 coldpunk.bin
+rem 0.3.6: a board without a USB-UART bridge is put into the ROM download
+rem mode by hand: hold BOOT, plug in or press RESET, release BOOT. The chip
+rem then already waits, and esptool must not reset it first - after "Flash
+rem only with BOOT" (DIS_FORCE_DOWNLOAD) a reset from the host may not bring
+rem it back into the download mode. So: talk to it as it is; only if nothing
+rem answers, let esptool reset it the usual way (USB-UART auto-reset).
+set "BEFORE=no-reset"
+"%ESPTOOL%" --chip esp32s3 %PORT_ARGS% --no-stub --connect-attempts 2 --before no-reset --after no-reset get-security-info >nul 2>nul || set "BEFORE=default-reset"
+if "%BEFORE%"=="default-reset" echo Not in the download mode yet: esptool resets the board ^(or hold BOOT and press RESET, then run this again^).
+
+"%ESPTOOL%" --chip esp32s3 %PORT_ARGS% --baud %BAUD% --before %BEFORE% --after hard-reset write-flash -z --flash-mode keep --flash-freq keep --flash-size keep 0x0 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 coldpunk.bin
 if errorlevel 1 goto :fail
 
 echo.

@@ -119,12 +119,22 @@ if not defined PORT (
 set "PORT_ARGS="
 if defined PORT set "PORT_ARGS=--port %PORT%"
 
+rem 0.3.6: a board without a USB-UART bridge is put into the ROM download
+rem mode by hand: hold BOOT, plug in or press RESET, release BOOT. The chip
+rem then already waits, and esptool must not reset it first - after "Flash
+rem only with BOOT" (DIS_FORCE_DOWNLOAD) a reset from the host may not bring
+rem it back into the download mode. So: talk to it as it is; only if nothing
+rem answers, let esptool reset it the usual way (USB-UART auto-reset).
+set "BEFORE=no-reset"
+"%ESPTOOL%" --chip esp32s3 %PORT_ARGS% --no-stub --connect-attempts 2 --before no-reset --after no-reset get-security-info >nul 2>nul || set "BEFORE=default-reset"
+if "%BEFORE%"=="default-reset" echo Not in the download mode yet: esptool resets the board ^(or hold BOOT and press RESET, then run this again^).
+
 if "%FULL%"=="1" (
     set "IMAGES=0x0 update\bootloader.bin 0x8000 update\partitions.bin 0xe000 update\boot_app0.bin 0x10000 update\coldpunk.bin"
 ) else (
     set "IMAGES=0x10000 update\coldpunk.bin"
 )
-"%ESPTOOL%" --chip esp32s3 %PORT_ARGS% --baud %BAUD% --no-stub --before default-reset --after hard-reset write-flash --force -z --flash-mode keep --flash-freq keep --flash-size keep %IMAGES%
+"%ESPTOOL%" --chip esp32s3 %PORT_ARGS% --baud %BAUD% --no-stub --before %BEFORE% --after hard-reset write-flash --force -z --flash-mode keep --flash-freq keep --flash-size keep %IMAGES%
 if errorlevel 1 goto :fail
 
 if "%FULL%"=="1" if exist "%REG%" powershell -NoProfile -ExecutionPolicy Bypass -File devices.ps1 set "%REG%" %DIGEST% %BLSHA%

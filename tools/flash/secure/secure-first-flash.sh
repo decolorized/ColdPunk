@@ -54,11 +54,25 @@ PORT_ARGS=""
 [ -n "${1:-}" ] && PORT_ARGS="--port $1"
 BAUD=${2:-921600}
 
+# 0.3.6: a board without a USB-UART bridge is put into the ROM download mode
+# by hand: hold BOOT, plug in or press RESET, release BOOT. The chip then
+# already waits, and esptool must not reset it first - after "Flash only with
+# BOOT" (DIS_FORCE_DOWNLOAD) a reset from the host may not bring it back into
+# the download mode. So: talk to it as it is; only if nothing answers, let
+# esptool reset it the usual way (USB-UART auto-reset).
+BEFORE=no-reset
+# shellcheck disable=SC2086
+if ! ./esptool --chip esp32s3 $PORT_ARGS --no-stub --connect-attempts 2 --before no-reset --after no-reset \
+        get-security-info >/dev/null 2>&1; then
+    BEFORE=default-reset
+    echo "Not in the download mode yet: esptool resets the board (or hold BOOT and press RESET, then run this again)."
+fi
+
 # ---- the chip's state ----------------------------------------------------------
 state=$(mktemp)
 trap 'rm -f "$state"' EXIT
 # shellcheck disable=SC2086
-./espefuse --chip esp32s3 $PORT_ARGS summary --format json --file "$state" >/dev/null ||
+./espefuse --chip esp32s3 $PORT_ARGS --before "$BEFORE" --after no-reset summary --format json --file "$state" >/dev/null ||
     die "cannot read the eFuses (port? BOOT button? see README.txt)"
 # efv NAME FIELD: one field of one eFuse from the JSON summary.
 efv() {
@@ -129,12 +143,12 @@ DEVNAME=$(printf %s "${DEVNAME:-device}" | tr '\t' ' ')
 # ---- burn the key, write the images ------------------------------------------------
 if [ -n "$burn_block" ]; then
     # shellcheck disable=SC2086
-    ./espefuse --chip esp32s3 $PORT_ARGS burn-key "BLOCK_KEY$burn_block" "$FE_KEY" XTS_AES_128_KEY ||
+    ./espefuse --chip esp32s3 $PORT_ARGS --before no-reset --after no-reset burn-key "BLOCK_KEY$burn_block" "$FE_KEY" XTS_AES_128_KEY ||
         die "burning the key failed or was cancelled - nothing was written to the flash"
 fi
 # shellcheck disable=SC2086
 ./esptool --chip esp32s3 $PORT_ARGS --baud "$BAUD" \
-    --before default-reset --after hard-reset \
+    --before no-reset --after hard-reset \
     write-flash -z --flash-mode keep --flash-freq keep --flash-size keep \
     0x0 first/bootloader.bin \
     0x8000 first/partitions.bin \

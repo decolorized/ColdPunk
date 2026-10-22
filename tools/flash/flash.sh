@@ -5,8 +5,9 @@
 #   ./flash.sh /dev/ttyUSB0     this port
 #   ./flash.sh /dev/ttyUSB0 460800    a lower speed, if 921600 fails
 #
-# The port is the board's USB-UART bridge (CH340 / CP210x, UART0), not the
-# native USB of the wallet. Only the bootloader, the partition table and the
+# The port: the board's USB-UART bridge (CH340 / CP210x) if it has one;
+# otherwise the native USB in the ROM download mode - hold BOOT, plug in (or
+# press RESET), release BOOT: "USB JTAG/serial debug unit" appears. Only the bootloader, the partition table and the
 # program are written: the wallets (NVS) and the storage partition are kept,
 # exactly as with an upload from the Arduino IDE.
 #
@@ -38,9 +39,23 @@ PORT_ARGS=""
 [ -n "${1:-}" ] && PORT_ARGS="--port $1"
 BAUD=${2:-921600}
 
+# 0.3.6: a board without a USB-UART bridge is put into the ROM download mode
+# by hand: hold BOOT, plug in or press RESET, release BOOT. The chip then
+# already waits, and esptool must not reset it first - after "Flash only with
+# BOOT" (DIS_FORCE_DOWNLOAD) a reset from the host may not bring it back into
+# the download mode. So: talk to it as it is; only if nothing answers, let
+# esptool reset it the usual way (USB-UART auto-reset).
+BEFORE=no-reset
+# shellcheck disable=SC2086
+if ! "$ESPTOOL" --chip esp32s3 $PORT_ARGS --no-stub --connect-attempts 2 --before no-reset --after no-reset \
+        get-security-info >/dev/null 2>&1; then
+    BEFORE=default-reset
+    echo "Not in the download mode yet: esptool resets the board (or hold BOOT and press RESET, then run this again)."
+fi
+
 # shellcheck disable=SC2086
 "$ESPTOOL" --chip esp32s3 $PORT_ARGS --baud "$BAUD" \
-    --before default-reset --after hard-reset \
+    --before "$BEFORE" --after hard-reset \
     write-flash -z --flash-mode keep --flash-freq keep --flash-size keep \
     0x0 bootloader.bin \
     0x8000 partitions.bin \

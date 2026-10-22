@@ -358,7 +358,11 @@ bootloader: hold **BOOT**, plug the cable in (or press and release **RESET**
 while holding BOOT), release BOOT. A new port appears (*USB JTAG/serial debug
 unit*); flash to it, then press RESET. Since 0.3.6 this is the only way on
 the native port: the running firmware releases that unit and never reboots
-into the bootloader on request.
+into the bootloader on request. The flash scripts first talk to a chip that
+already waits in the download mode (`--before no-reset`) and fall back to
+esptool's usual reset only when nothing answers (boards with a USB-UART
+bridge), so a board flashed with the BOOT button keeps working after
+"Flash only with BOOT".
 
 #### 5. Flash
 

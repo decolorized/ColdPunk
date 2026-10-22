@@ -71,9 +71,19 @@ if not "%PORT%"=="" set "PORT_ARGS=--port %PORT%"
 set "BAUD=%~2"
 if "%BAUD%"=="" set "BAUD=921600"
 
+rem 0.3.6: a board without a USB-UART bridge is put into the ROM download
+rem mode by hand: hold BOOT, plug in or press RESET, release BOOT. The chip
+rem then already waits, and esptool must not reset it first - after "Flash
+rem only with BOOT" (DIS_FORCE_DOWNLOAD) a reset from the host may not bring
+rem it back into the download mode. So: talk to it as it is; only if nothing
+rem answers, let esptool reset it the usual way (USB-UART auto-reset).
+set "BEFORE=no-reset"
+"esptool.exe" --chip esp32s3 %PORT_ARGS% --no-stub --connect-attempts 2 --before no-reset --after no-reset get-security-info >nul 2>nul || set "BEFORE=default-reset"
+if "%BEFORE%"=="default-reset" echo Not in the download mode yet: esptool resets the board ^(or hold BOOT and press RESET, then run this again^).
+
 rem ---- the chip's state --------------------------------------------------------
 set "STATE=%TEMP%\coldpunk-efuse-%RANDOM%.json"
-espefuse.exe --chip esp32s3 %PORT_ARGS% summary --format json --file "%STATE%" >nul
+espefuse.exe --chip esp32s3 %PORT_ARGS% --before %BEFORE% --after no-reset summary --format json --file "%STATE%" >nul
 if errorlevel 1 (
     echo Cannot read the eFuses ^(port? BOOT button? see README.txt^).
     goto :fail
@@ -137,13 +147,13 @@ if not defined DEVNAME set "DEVNAME=device"
 
 rem ---- burn the key, write the images ------------------------------------------
 if not defined BURN_BLOCK goto :write
-espefuse.exe --chip esp32s3 %PORT_ARGS% burn-key BLOCK_KEY%BURN_BLOCK% "%FE_KEY%" XTS_AES_128_KEY
+espefuse.exe --chip esp32s3 %PORT_ARGS% --before no-reset --after no-reset burn-key BLOCK_KEY%BURN_BLOCK% "%FE_KEY%" XTS_AES_128_KEY
 if errorlevel 1 (
     echo Burning the key failed or was cancelled - nothing was written to the flash.
     goto :fail
 )
 :write
-esptool.exe --chip esp32s3 %PORT_ARGS% --baud %BAUD% --before default-reset --after hard-reset write-flash -z --flash-mode keep --flash-freq keep --flash-size keep 0x0 first\bootloader.bin 0x8000 first\partitions.bin 0xe000 first\boot_app0.bin 0x10000 first\coldpunk.bin
+esptool.exe --chip esp32s3 %PORT_ARGS% --baud %BAUD% --before no-reset --after hard-reset write-flash -z --flash-mode keep --flash-freq keep --flash-size keep 0x0 first\bootloader.bin 0x8000 first\partitions.bin 0xe000 first\boot_app0.bin 0x10000 first\coldpunk.bin
 if errorlevel 1 (
     echo Writing failed. Run this script again ^(the key is kept^), or flash a normal build to undo.
     goto :fail
