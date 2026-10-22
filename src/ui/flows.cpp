@@ -64,6 +64,7 @@
 #include "../wallet/wallet_ops.h"
 #include "../wallet/wallet_store.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -984,6 +985,7 @@ static void result_ready(void) {
 // How long a success message stays up. It closes itself (or on a tap / key)
 // so the device is back in the wallet screen without an extra OK.
 #define MW_SUCCESS_MS 2500
+#define MW_NOTE_MS    8000       // the success message with notes (0.3.6)
 
 // Progress of the long operations: a repaint per few percent and on every new
 // stage. Also leaves a crash crumb (op/stage enums only) and, in debug mode,
@@ -1114,30 +1116,49 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
     // A typed-in balance holds until the next sync.
     if (s_open.open) (void)mw_wallet_set_manual_balance(s_open.id, false, 0);
     result_ready();
-    if (sink->saved_as) snprintf(body, sizeof(body), TX(XSTR_SD_SAVED), sink->saved_as);
-    else                snprintf(body, sizeof(body), TX(XSTR_KI_DONE),
-                                 (unsigned)(info.count + saved.saved));
-    mw_ui_message_timeout(T(STR_SUCCESS), body, MW_SUCCESS_MS);
+    // 0.3.6: ONE message that closes itself. The notes that used to follow
+    // it in windows of their own (what "All saved key images" added, the
+    // "export ALL outputs" hint after every partial export) wait for a tap
+    // and kept the result screen up; they are part of it now, shown a
+    // little longer.
+    static char msg[640];
+    size_t ml = 0;
+    if (sink->saved_as) ml = (size_t)snprintf(msg, sizeof(msg), TX(XSTR_SD_SAVED), sink->saved_as);
+    else                ml = (size_t)snprintf(msg, sizeof(msg), TX(XSTR_KI_DONE),
+                                              (unsigned)(info.count + saved.saved));
+    bool notes = false;
+    auto add_note = [&](const char* fmt, ...) {
+        if (ml + 2 >= sizeof(msg)) return;
+        ml += (size_t)snprintf(msg + ml, sizeof(msg) - ml, "\n\n");
+        if (ml >= sizeof(msg)) { ml = sizeof(msg) - 1; return; }
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = vsnprintf(msg + ml, sizeof(msg) - ml, fmt, ap);
+        va_end(ap);
+        if (n > 0) ml += (size_t)n;
+        if (ml >= sizeof(msg)) ml = sizeof(msg) - 1;
+        notes = true;
+    };
     if (all_saved) {
         // What the cache added: from which transfer, or why nothing.
         if (info.offset == 0)
-            snprintf(body, sizeof(body), "%s", TX(XSTR_KI_SAVED_FULL));
+            add_note("%s", TX(XSTR_KI_SAVED_FULL));
         else if (saved.saved == 0)
-            snprintf(body, sizeof(body), TX(XSTR_KI_SAVED_NONE), (unsigned)info.offset);
+            add_note(TX(XSTR_KI_SAVED_NONE), (unsigned)info.offset);
         else
-            snprintf(body, sizeof(body), TX(XSTR_KI_SAVED_ADDED), (unsigned)saved.saved,
-                     (unsigned)saved.start, (unsigned)(info.offset - 1),
-                     (unsigned)saved.start);
-        mw_ui_message(T(STR_KI_SYNC), body);
+            add_note(TX(XSTR_KI_SAVED_ADDED), (unsigned)saved.saved, (unsigned)saved.start,
+                     (unsigned)(info.offset - 1), (unsigned)saved.start);
     }
-    cache_full_warning();
     // 0.3.5: an incremental export (not from the first transfer) cannot tell
     // the amounts the device is still missing; a full one can.
     if (info.offset != 0 && !(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE)) {
         uint32_t unknown = 0;
         if (mw_ki_cache_balance(NULL, NULL, &unknown) == MW_OK && unknown)
-            mw_ui_message(TX(XSTR_WL_BALANCE), TX(XSTR_TXL_HINT_FULL));
+            add_note("%s", TX(XSTR_TXL_HINT_FULL));
     }
+    mw_ui_message_timeout(T(STR_SUCCESS), msg, notes ? MW_NOTE_MS : MW_SUCCESS_MS);
+    mw_memzero(msg, sizeof(msg));
+    cache_full_warning();
 }
 
 // The signed transactions go to the wallet's list (v0.3; nothing is kept
