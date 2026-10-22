@@ -353,6 +353,17 @@ const lock_fuse_t kLockFuses[] = {
     { ESP_EFUSE_DIS_DIRECT_BOOT,    ESP_EFUSE_WR_DIS_DIS_DIRECT_BOOT,    "DIS_DIRECT_BOOT" },
 };
 
+// 0.3.6 "flashing only with BOOT": JTAG off (it can write the flash on its
+// own) and DIS_FORCE_DOWNLOAD (software can no longer send the chip into the
+// ROM download mode: the USB CDC "reset to bootloader" and the like). The
+// download mode itself stays: GPIO0 (BOOT) low at reset still enters it.
+const lock_fuse_t kBootOnlyFuses[] = {
+    { ESP_EFUSE_DIS_PAD_JTAG,  ESP_EFUSE_WR_DIS_DIS_PAD_JTAG,  "DIS_PAD_JTAG" },
+    { ESP_EFUSE_DIS_USB_JTAG,  ESP_EFUSE_WR_DIS_DIS_USB_JTAG,  "DIS_USB_JTAG" },
+    { ESP_EFUSE_SOFT_DIS_JTAG, ESP_EFUSE_WR_DIS_SOFT_DIS_JTAG, "SOFT_DIS_JTAG" },
+    { ESP_EFUSE_DIS_FORCE_DOWNLOAD, ESP_EFUSE_WR_DIS_DIS_FORCE_DOWNLOAD, "DIS_FORCE_DOWNLOAD" },
+};
+
 // Every bit of the field set.
 bool fuse_full(const esp_efuse_desc_t** f) {
     const int bits = esp_efuse_get_field_size(f);
@@ -399,19 +410,22 @@ extern "C" bool mw_secure_boot_digest(char hex[65])
     return false;
 }
 
-extern "C" bool mw_secure_flashing_locked(void)
+namespace {
+template <size_t N>
+bool fuses_settled(const lock_fuse_t (&set)[N])
 {
-    for (const lock_fuse_t& l : kLockFuses)
+    for (const lock_fuse_t& l : set)
         if (!fuse_settled(l)) return false;
     return true;
 }
 
-extern "C" mw_err_t mw_secure_lock_flashing(void)
+template <size_t N>
+mw_err_t fuses_burn(const lock_fuse_t (&set)[N], const char* what)
 {
-    if (mw_secure_flashing_locked()) return MW_OK;
+    if (fuses_settled(set)) return MW_OK;
     if (esp_efuse_batch_write_begin() != ESP_OK) return MW_ERR_IO;
     bool ok = true;
-    for (const lock_fuse_t& l : kLockFuses) {
+    for (const lock_fuse_t& l : set) {
         if (fuse_settled(l)) {
             if (!fuse_full(l.field)) MW_LOGI("efuse", "%s is write-protected, skipped", l.name);
             continue;
@@ -429,9 +443,30 @@ extern "C" mw_err_t mw_secure_lock_flashing(void)
         return MW_ERR_IO;
     }
     if (esp_efuse_batch_write_commit() != ESP_OK) return MW_ERR_IO;
-    const bool done = mw_secure_flashing_locked();
-    MW_LOGI("efuse", "debug and download interfaces %s", done ? "locked" : "NOT fully locked");
+    const bool done = fuses_settled(set);
+    MW_LOGI("efuse", "%s %s", what, done ? "locked" : "NOT fully locked");
     return done ? MW_OK : MW_ERR_IO;
+}
+}  // namespace
+
+extern "C" bool mw_secure_flashing_locked(void)
+{
+    return fuses_settled(kLockFuses);
+}
+
+extern "C" mw_err_t mw_secure_lock_flashing(void)
+{
+    return fuses_burn(kLockFuses, "debug and download interfaces");
+}
+
+extern "C" bool mw_secure_boot_only_locked(void)
+{
+    return fuses_settled(kBootOnlyFuses);
+}
+
+extern "C" mw_err_t mw_secure_lock_boot_only(void)
+{
+    return fuses_burn(kBootOnlyFuses, "JTAG and forced download");
 }
 
 // ---------------------------------------------------------------------------

@@ -210,6 +210,14 @@ explicit confirmation on the device screen. The PC program is only a courier.
   received, grouped by transaction, newest first; the transactions signed on
   this device marked `*`; what was spent elsewhere and outputs of unknown
   amount marked `?`.
+- **Flash only with BOOT** (0.3.6): the firmware never sends the chip into
+  the download mode itself (no "reset to bootloader" over USB, the
+  USB-JTAG/serial unit is released at start); the Settings item burns the
+  eFuses that switch JTAG off and forbid entering the download mode from
+  software, so flashing needs the BOOT button held (irreversible; updates
+  still work with the button). A board whose USB-UART bridge works BOOT and
+  RESET by itself is not stopped by this: for the chip that circuit is the
+  button.
 - **Lock firmware updates**: burns the eFuses that switch JTAG and the
   USB/UART download mode off for good (irreversible).
 - Power-loss-safe storage (**LittleFS**; FAT storage of older firmware is
@@ -219,7 +227,8 @@ explicit confirmation on the device screen. The PC program is only a courier.
   for showing only part of the funds under coercion; what a flash dump still
   shows is in [`tools/docs/security.md`](tools/docs/security.md) §4a.
 - **USB is enabled only after the correct password.** Before it nothing at all
-  appears on USB (the builds use *CDC On Boot: Disabled*); after it the
+  appears on USB (the builds use *CDC On Boot: Disabled*, and since 0.3.6 the
+  chip's USB-JTAG/serial unit lets go of the pins at start); after it the
   device enumerates as "Monero Cold Wallet" with its HID link (and, built
   with `MW_USE_SERIAL 1`, its own CDC port), and the console stays on UART0.
 - Autolock (default 5 minutes): keys and passphrase are wiped from memory.
@@ -347,7 +356,9 @@ UART / COM.
 A board with **only the native USB port** is flashed through the chip's ROM
 bootloader: hold **BOOT**, plug the cable in (or press and release **RESET**
 while holding BOOT), release BOOT. A new port appears (*USB JTAG/serial debug
-unit*); flash to it, then press RESET.
+unit*); flash to it, then press RESET. Since 0.3.6 this is the only way on
+the native port: the running firmware releases that unit and never reboots
+into the bootloader on request.
 
 #### 5. Flash
 

@@ -73,6 +73,16 @@ mw_err_t mw_secure_lock_flashing(void);
 // Whether all of those eFuses are burned.
 bool     mw_secure_flashing_locked(void);
 
+// 0.3.6: flashing only with the BOOT button. Burns JTAG off (pad and USB,
+// hard and soft) and DIS_FORCE_DOWNLOAD: software can no longer send the
+// chip into the ROM download mode, so it is entered only with GPIO0 (BOOT)
+// held low at reset. The download mode itself is kept: holding BOOT, the
+// device is flashed as before. A USB-UART bridge whose DTR/RTS drive EN and
+// GPIO0 (auto-reset circuit) pulls GPIO0 low like the button: no eFuse can
+// tell the two apart. Included in mw_secure_lock_flashing().
+mw_err_t mw_secure_lock_boot_only(void);
+bool     mw_secure_boot_only_locked(void);
+
 // Secure boot (build-secure): the digest of the signing key the chip holds,
 // as 64 hex digits (secure_boot_key_digest.txt of a build-secure folder).
 // false when secure boot is off or no digest is burned.

@@ -919,6 +919,7 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 ### 14.3 Settings
 - **New wallets' network** (was "Network").
 - **Balance tracking: On/Off** (per account). Off asks "Switch balance tracking off? …" and erases the amounts, the lists and the typed-in balances.
+- **Flash only with BOOT** (0.3.6, shows "On" once burned or when Lock firmware updates is on): two warnings and the last-warning page (Next / Cancel), the confirmation code, the account password, then "Done. Flashing needs the BOOT button now." or "eFuses not burned: …".
 - **Lock firmware updates** (shows "On" once burned): three warnings (Next / Cancel), the confirmation code, the account password, then "Done. Firmware updates and debugging are locked." or "eFuses not burned: …".
 - Add account: the capacity is 16..24 per chip.
 

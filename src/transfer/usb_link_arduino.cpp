@@ -536,6 +536,11 @@ extern "C" mw_err_t mw_usb_link_init(void) {
 #if MW_LINK_HAVE_SERIAL
     MW_LINK_SERIAL.begin(115200);
     MW_LINK_SERIAL.setTimeout(5);
+#  if defined(MW_USB_TINYUSB) && (MW_LINK_OWN_CDC || MW_CDC_ON_BOOT)
+    // 0.3.6: no "reset to bootloader" from the host (Arduino's 1200 baud
+    // touch, esptool's DTR/RTS sequence): flashing needs the BOOT button.
+    MW_LINK_SERIAL.enableReboot(false);
+#  endif
     caps |= MW_LINK_CAP_SERIAL;
 #endif
 #if MW_LINK_HAVE_HID

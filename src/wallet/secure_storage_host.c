@@ -230,6 +230,9 @@ static bool s_flash_locked;
 bool     mw_secure_flashing_locked(void) { return s_flash_locked; }
 bool     mw_secure_boot_digest(char hex[65]) { hex[0] = 0; return false; }
 mw_err_t mw_secure_lock_flashing(void) { s_flash_locked = true; return MW_OK; }
+static bool s_boot_only;
+bool     mw_secure_boot_only_locked(void) { return s_boot_only || s_flash_locked; }
+mw_err_t mw_secure_lock_boot_only(void) { s_boot_only = true; return MW_OK; }
 
 mw_err_t mw_secure_key_provision(void)
 {

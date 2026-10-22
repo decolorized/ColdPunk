@@ -105,6 +105,34 @@
 
 #define MW_LOG(...)  MW_LOGI("hal", __VA_ARGS__)
 
+// ---------------------------------------------------------------------------
+// 0.3.6: no way into the ROM download mode from the USB port while the
+// firmware runs - flashing needs the BOOT button.
+//
+// After every reset the chip's USB pins belong to the USB-Serial-JTAG unit
+// (the "USB JTAG/serial debug unit" port). esptool resets the chip into the
+// download mode through it with no button pressed, and its JTAG half can
+// write the flash too. With TinyUSB (USB Mode = USB-OTG, the build profiles)
+// the firmware never uses that unit: it lets go of the pins at once, before
+// app_main, and the host sees the port vanish. The ROM and the second-stage
+// bootloader still have it for the fraction of a second before this runs;
+// Settings -> "Flash only with BOOT" (eFuse: JTAG off, DIS_FORCE_DOWNLOAD)
+// closes what an eFuse can close. Our own USB CDC port does not reboot into
+// the bootloader on the "1200 baud" / DTR-RTS requests either
+// (usb_link_arduino.cpp, enableReboot(false)).
+// ---------------------------------------------------------------------------
+#if defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0) && !defined(MW_KEEP_USB_JTAG)
+#  include <soc/usb_serial_jtag_reg.h>
+#  include <soc/soc.h>
+__attribute__((constructor(101))) static void mw_usb_jtag_release(void)
+{
+    // The USB-Serial-JTAG unit's own pad enable off: the pins go back to
+    // plain GPIO with no D+ pull-up, the host sees a disconnect. TinyUSB
+    // later takes the PHY for the OTG controller through its own wrapper.
+    CLEAR_PERI_REG_MASK(USB_SERIAL_JTAG_CONF0_REG, USB_SERIAL_JTAG_USB_PAD_ENABLE);
+}
+#endif
+
 static SemaphoreHandle_t s_log_mutex = NULL;
 
 static void log_lock(void* ctx)   { if (ctx) xSemaphoreTake((SemaphoreHandle_t)ctx, portMAX_DELAY); }
@@ -308,6 +336,12 @@ mw_err_t mw_hal_init(void)
 {
     if (s_hal_ready) return MW_OK;
     crash_capture();
+#if defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0) && \
+    defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)
+    // 0.3.6: "CDC On Boot" builds - the core's port takes no "reset to
+    // bootloader" requests either (see mw_usb_jtag_release above).
+    Serial.enableReboot(false);
+#endif
 
     MW_LOG_INIT();
     MW_LOG("");

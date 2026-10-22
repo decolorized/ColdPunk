@@ -60,7 +60,7 @@ enum {
     SET_BACK = 0, SET_KB, SET_LAYOUT, SET_BRIGHT, SET_AUTOLOCK, SET_CALIB,
     SET_FORMAT, SET_LANG, SET_NET, SET_DEBUG, SET_PASSWORD, SET_ABOUT,
     SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE, SET_ACCOUNT,
-    SET_BALANCE, SET_LOCK_FLASH, SET_GAME
+    SET_BALANCE, SET_LOCK_FLASH, SET_BOOT_ONLY, SET_GAME
 };
 
 // The logged-in account's name, read on the crypto task before each build.
@@ -69,6 +69,7 @@ static char s_account[MW_ACCOUNT_NAME_LEN];
 // read on the crypto task too.
 static bool s_balance_on;
 static bool s_flash_locked;
+static bool s_boot_only;
 
 typedef struct {
     mw_page_t     page;
@@ -199,6 +200,8 @@ static void settings_build(void* arg) {
         add(LV_SYMBOL_SETTINGS, TX(XSTR_EFUSE_BLOCKS), buf, SET_EFUSE);
     }
 
+    add(LV_SYMBOL_USB,      TX(XSTR_BOOTONLY),
+        s_boot_only ? TX(XSTR_ON) : NULL, SET_BOOT_ONLY);
     add(LV_SYMBOL_STOP,     TX(XSTR_JTAG_LOCK),
         s_flash_locked ? TX(XSTR_ON) : NULL, SET_LOCK_FLASH);
     add(LV_SYMBOL_TRASH,    T(STR_SETTINGS_RESET), NULL, SET_RESET);
@@ -767,33 +770,41 @@ static void toggle_balance(void) {
     else            mw_ui_message(T(STR_ERR_GENERIC), mw_err_str(e));
 }
 
-// Burning the eFuses that lock JTAG and the download modes (v0.3): three
-// warnings, a typed number, the account password.
-static void lock_flashing(void) {
-    if (mw_secure_flashing_locked()) {
-        mw_ui_message(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_LOCKED));
+// Burning eFuses from Settings: warnings, a typed number, the account
+// password, then the burn.
+typedef struct {
+    mw_xstr_id_t title, done, already;
+    const mw_xstr_id_t* warn;      // the first is shown again with the number
+    int n_warn;
+    bool (*locked)(void);
+    mw_err_t (*burn)(void);
+    const char* log;
+} efuse_lock_t;
+
+static void efuse_lock_run(const efuse_lock_t* L) {
+    if (L->locked()) {
+        mw_ui_message(TX(L->title), TX(L->already));
         return;
     }
     if (lockout_note()) return;
-    if (!mw_ui_confirm(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W1), T(STR_NEXT), T(STR_CANCEL))) return;
-    if (!mw_ui_confirm(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W2), T(STR_NEXT), T(STR_CANCEL))) return;
-    if (!mw_ui_confirm(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W3), T(STR_NEXT), T(STR_CANCEL))) return;
-    if (!mw_ui_confirm_code(TX(XSTR_JTAG_LOCK), TX(XSTR_JTAG_W1))) return;
+    for (int i = 0; i < L->n_warn; ++i)
+        if (!mw_ui_confirm(TX(L->title), TX(L->warn[i]), T(STR_NEXT), T(STR_CANCEL))) return;
+    if (!mw_ui_confirm_code(TX(L->title), TX(L->warn[0]))) return;
     char pw[MW_DEVICE_PW_MAX + 1];
     memset(pw, 0, sizeof(pw));
     if (ask_password(TX(XSTR_PW_ENTER), pw, sizeof(pw)) == MW_OK) {
-        mw_ui_progress(TX(XSTR_JTAG_LOCK), 0, TX(XSTR_PW_STAGE_CHECK));
-        mw_flow_auth_progress_on(TX(XSTR_JTAG_LOCK));
+        mw_ui_progress(TX(L->title), 0, TX(XSTR_PW_STAGE_CHECK));
+        mw_flow_auth_progress_on(TX(L->title));
         mw_err_t e = mw_device_auth_check(pw);
         mw_flow_auth_progress_off();
         mw_ui_progress_close();
         if (e != MW_OK) {
             show_auth_error(e);
         } else {
-            MW_LOGE("settings", "locking JTAG and the download modes (eFuse)");
-            e = mw_secure_lock_flashing();
+            MW_LOGE("settings", "%s (eFuse)", L->log);
+            e = L->burn();
             if (e == MW_OK) {
-                mw_ui_message(T(STR_SUCCESS), TX(XSTR_JTAG_DONE));
+                mw_ui_message(T(STR_SUCCESS), TX(L->done));
             } else {
                 char msg[96];
                 snprintf(msg, sizeof(msg), TX(XSTR_JTAG_FAIL), mw_err_str(e));
@@ -805,6 +816,27 @@ static void lock_flashing(void) {
     mw_session_wipe_input();
 }
 
+// Burning the eFuses that lock JTAG and the download modes (v0.3).
+static void lock_flashing(void) {
+    static const mw_xstr_id_t warn[] = { XSTR_JTAG_W1, XSTR_JTAG_W2, XSTR_JTAG_W3 };
+    static const efuse_lock_t L = { XSTR_JTAG_LOCK, XSTR_JTAG_DONE, XSTR_JTAG_LOCKED,
+                                    warn, 3, mw_secure_flashing_locked,
+                                    mw_secure_lock_flashing,
+                                    "locking JTAG and the download modes" };
+    efuse_lock_run(&L);
+}
+
+// 0.3.6: flashing only with the BOOT button held (JTAG off, no download
+// mode from software).
+static void lock_boot_only(void) {
+    static const mw_xstr_id_t warn[] = { XSTR_BOOTONLY_W1, XSTR_BOOTONLY_W2, XSTR_JTAG_W3 };
+    static const efuse_lock_t L = { XSTR_BOOTONLY, XSTR_BOOTONLY_DONE, XSTR_BOOTONLY_ALREADY,
+                                    warn, 3, mw_secure_boot_only_locked,
+                                    mw_secure_lock_boot_only,
+                                    "flashing only with BOOT: JTAG and forced download off" };
+    efuse_lock_run(&L);
+}
+
 // ---------------------------------------------------------------------------
 void mw_screen_settings_run(void) {
     s_set.s = *mw_ui_settings();
@@ -814,6 +846,7 @@ void mw_screen_settings_run(void) {
             s_account[0] = 0;
         s_balance_on = !(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE);
         s_flash_locked = mw_secure_flashing_locked();
+        s_boot_only = s_flash_locked || mw_secure_boot_only_locked();
         const int32_t action = mw_ui_modal_call(settings_build, &s_set);
         bool dirty = false;
 
@@ -987,6 +1020,10 @@ void mw_screen_settings_run(void) {
 
         case SET_LOCK_FLASH:
             lock_flashing();
+            break;
+
+        case SET_BOOT_ONLY:
+            lock_boot_only();
             break;
 
         case SET_USER_DELETE:

@@ -2,7 +2,7 @@
 #ifndef MW_APP_CONFIG_H
 #define MW_APP_CONFIG_H
 
-#define MW_FIRMWARE_VERSION      "0.3.5"
+#define MW_FIRMWARE_VERSION      "0.3.6"
 #define MW_FIRMWARE_NAME         "Monero Cold Wallet"
 
 // TZ 7.1. Per user (multi-user, v9): every user has a directory of its own.

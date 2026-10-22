@@ -716,6 +716,30 @@ by hand, guessing through the device's own screen and KDF. Secure boot stops
 a custom firmware from guessing at full speed; it does not make the counter
 tamper-proof.
 
+**Flash only with BOOT (0.3.6).** Firmware side, always on: with TinyUSB
+(the build profiles) a constructor clears `USB_SERIAL_JTAG_USB_PAD_ENABLE`
+before `app_main`, so the USB-Serial-JTAG unit — through which esptool
+resets the chip into the download mode without a button, and whose JTAG
+half can write the flash — leaves the bus; our CDC ports run with
+`enableReboot(false)` (no 1200-baud / DTR-RTS reboot into the bootloader);
+DFU runtime is never enabled. Build with `-DMW_KEEP_USB_JTAG` to keep the
+unit. What stays: the ROM and the second-stage bootloader have the unit for
+the fraction of a second before the constructor runs. Settings → **Flash
+only with BOOT** burns `DIS_PAD_JTAG`, `DIS_USB_JTAG`, `SOFT_DIS_JTAG` and
+`DIS_FORCE_DOWNLOAD` (two warnings, the last-warning page, a typed number,
+the account password): JTAG is gone and the chip ignores every software
+request for the download mode, which is then entered only with GPIO0 (BOOT)
+low at reset; flashing with the button works as before. Not burned on
+purpose: `USB_PHY_SEL` and `DIS_USB_SERIAL_JTAG` would close the boot
+window too, but change which controller the ROM uses for USB download and
+are reported to brick the USB download on some chips. It does not stop: a
+USB-UART bridge with the usual auto-reset circuit (DTR/RTS drive EN and
+GPIO0 — for the chip that is the button; remove the circuit's transistors or
+keep that port unplugged), anyone holding the button, or a programmer on the
+flash chip. What runs after flashing is limited only by secure boot. On a
+`build-secure` device `DIS_FORCE_DOWNLOAD` is write-protected unburned and
+is skipped (counted as done: only signed firmware runs there).
+
 **Lock firmware updates (0.3, Settings).** Burns the eFuses `DIS_PAD_JTAG`,
 `DIS_USB_JTAG`, `SOFT_DIS_JTAG`, `DIS_DOWNLOAD_MODE`,
 `DIS_USB_OTG_DOWNLOAD_MODE`, `DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE`,
