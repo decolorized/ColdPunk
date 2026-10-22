@@ -181,6 +181,17 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
                                      uint8_t* out, size_t out_cap, size_t* out_len,
                                      const mw_ops_cb_t* cb, mw_ops_error_t* er)
 {
+    return mw_ops_outputs_to_keyimages_x(keys, plain, plain_len, false, out, out_cap,
+                                         out_len, NULL, cb, er);
+}
+
+mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
+                                       const uint8_t* plain, size_t plain_len,
+                                       bool all_saved,
+                                       uint8_t* out, size_t out_cap, size_t* out_len,
+                                       mw_ki_saved_info_t* saved,
+                                       const mw_ops_cb_t* cb, mw_ops_error_t* er)
+{
     mw_ff_diag_t d;
     mw_outputs_iter_t it;
     mw_err_t e;
@@ -188,6 +199,7 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
     memset(&d, 0, sizeof d);
     if (!keys || !plain || !out || !out_len) return MW_ERR_INVALID_ARG;
     *out_len = 0;
+    if (saved) memset(saved, 0, sizeof *saved);
     g_cache_overflow = 0;
     g_cache_save_err = MW_OK;
 
@@ -195,31 +207,49 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
     if (e != MW_OK) return diag_fail(er, e, &d, "outputs: bad header");
 
     const size_t off = mw_ops_seal_offset(&MW_FILE_KEYIMAGES);
-    const size_t pt_len = 4u + 64u + (size_t)it.count * 96u;
+    size_t pt_len = 4u + 64u + (size_t)it.count * 96u;
     if (off + pt_len + MW_SIG_LEN > out_cap)
         return fail(er, MW_ERR_TOO_MANY, "key image file of %u bytes does not fit",
                     (unsigned)(off + pt_len + MW_SIG_LEN));
 
+    // 0.3.5 "all saved key images": room for the transfers before the
+    // file's offset; which ones is decided after the file's records went
+    // into the cache (an output listed in the file at another index takes
+    // its index from the cache's view first).
+    size_t room = 0;
+    if (all_saved && it.offset > 0 && it.offset <= 0xFFFFFFFFu) {
+        room = (out_cap - off - pt_len - MW_SIG_LEN) / 96u;
+        if (room > 0xFFFFFFFFu) room = 0xFFFFFFFFu;
+    }
+    if (saved) {
+        saved->offset = it.offset;
+        saved->start = (uint32_t)it.offset;
+    }
+
     // The plaintext is written where mw_file_seal() encrypts it in place.
     uint8_t* pt = out + off;
-    const uint32_t offset32 = (uint32_t)it.offset;
-    pt[0] = (uint8_t)offset32;         pt[1] = (uint8_t)(offset32 >> 8);
-    pt[2] = (uint8_t)(offset32 >> 16); pt[3] = (uint8_t)(offset32 >> 24);
     memcpy(pt + 4, keys->pub.spend.b, 32);
     memcpy(pt + 36, keys->pub.view.b, 32);
     uint8_t* rec = pt + 68;
 
     const uint32_t total = (uint32_t)it.count;
+    // 0.3.5: an export from the first transfer is the whole wallet.
+    const bool snapshot = it.offset == 0;
+    if (snapshot) mw_ki_cache_snapshot_begin();
     for (uint32_t i = 0; ; ++i) {
         mw_exported_output_t o;
         mw_exported_key_image_t ki;
         bool done = false;
         e = mw_outputs_next(&it, &o, &done, &d);
-        if (e != MW_OK) return diag_fail(er, e, &d, "outputs: bad record");
+        if (e != MW_OK) {
+            if (snapshot) (void)mw_ki_cache_snapshot_end();
+            return diag_fail(er, e, &d, "outputs: bad record");
+        }
         if (done) break;
 
         e = mw_key_image_from_output(keys, &o, &ki);
         if (e != MW_OK) {
+            if (snapshot) (void)mw_ki_cache_snapshot_end();
             mw_memzero(out, off + pt_len);
             return fail(er, e == MW_ERR_KEY_MISMATCH ? MW_ERR_KEY_MISMATCH : e,
                         "output #%u (global index %llu, subaddress %u/%u) does not "
@@ -244,10 +274,52 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
         // has seen it spent (m_flags bit 0).
         ce.amount = o.amount;
         ce.bal = (uint8_t)(MW_KI_B_AMOUNT | ((o.flags & 0x01u) ? MW_KI_B_SPENT : 0));
+        ce.tx_pub = o.tx_pub_key;             // 0.3.5: the transaction list
+        ce.gidx = o.global_output_index;
+        // 0.3.5: its index in the online wallet and the signature, for a
+        // later "all saved key images".
+        if (it.offset + i < 0xFFFFFFFFu) {
+            ce.tidx1 = (uint32_t)(it.offset + i) + 1u;
+            memcpy(ce.sig, ki.sig.c.b, 32);
+            memcpy(ce.sig + 32, ki.sig.r.b, 32);
+        }
         cache_put(&ce);                       // no-op when the cache is closed
 
         if ((i & 7u) == 0 || i + 1 == total) progress(cb, "key images", i + 1, total);
     }
+    if (snapshot) {
+        const uint32_t stale = mw_ki_cache_snapshot_end();
+        if (stale)
+            MW_LOGI("ops", "full outputs export: %u old output(s) of unknown amount "
+                           "not in it, left out of the balance", (unsigned)stale);
+    }
+
+    // The saved run goes in front of the file's records.
+    uint32_t first = (uint32_t)it.offset, n_saved = 0;
+    if (room) {
+        n_saved = mw_ki_cache_run_before((uint32_t)it.offset, (uint32_t)room, NULL, &first);
+        if (n_saved) {
+            uint8_t* r0 = pt + 68;
+            memmove(r0 + (size_t)n_saved * 96u, r0, (size_t)(rec - r0));
+            uint32_t s2 = 0;
+            if (mw_ki_cache_run_before((uint32_t)it.offset, n_saved, r0, &s2) != n_saved ||
+                s2 != first) {
+                mw_memzero(out, off + pt_len + (size_t)n_saved * 96u);
+                return fail(er, MW_ERR_FORMAT, "saved key images changed while reading");
+            }
+            pt_len += (size_t)n_saved * 96u;
+            MW_LOGI("ops", "key images %u..%u from the cache, %u..%u from the file",
+                    (unsigned)first, (unsigned)(it.offset - 1), (unsigned)it.offset,
+                    (unsigned)(it.offset + it.count - 1));
+        }
+    }
+    if (saved) {
+        saved->start = first;
+        saved->saved = n_saved;
+    }
+    const uint32_t offset32 = room ? first : (uint32_t)it.offset;
+    pt[0] = (uint8_t)offset32;         pt[1] = (uint8_t)(offset32 >> 8);
+    pt[2] = (uint8_t)(offset32 >> 16); pt[3] = (uint8_t)(offset32 >> 24);
 
     size_t sealed = 0;
     progress(cb, "sealing", 0, 1000u);
@@ -648,6 +720,18 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             ce.major = o.subaddr_major;
             ce.minor = o.subaddr_minor;
             ce.flags = MW_KI_F_EXPORTED;
+            // 0.3.5: with the amount - these outputs never come in a later
+            // incremental outputs export (their key images are known by
+            // then), so without it they stayed "amount not known" for good.
+            ce.amount = o.amount;
+            ce.bal = (uint8_t)(MW_KI_B_AMOUNT | ((o.flags & 0x01u) ? MW_KI_B_SPENT : 0));
+            ce.tx_pub = o.tx_pub_key;
+            ce.gidx = o.global_output_index;
+            if (it.offset + i < 0xFFFFFFFFu) {
+                ce.tidx1 = (uint32_t)(it.offset + i) + 1u;
+                memcpy(ce.sig, ki.sig.c.b, 32);
+                memcpy(ce.sig + 32, ki.sig.r.b, 32);
+            }
             cache_put(&ce);
             if ((i & 7u) == 0 || i + 1 == total) progress(cb, "requested key images", i + 1, total);
         }

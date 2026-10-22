@@ -223,10 +223,14 @@ MW_TEST(test_cupcake_encrypted_restore)
     CHECK_EQ_MEM(cake.sec.view.b, plain.sec.view.b, 32);
     CHECK_EQ_MEM(cake.pub.spend.b, plain.pub.spend.b, 32);
 
-    // No passphrase: refused, not a silently foreign wallet.
-    mw_account_keys_t none;
-    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, "", &none), MW_ERR_DECRYPT);
-    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, NULL, &none), MW_ERR_DECRYPT);
+    // No passphrase (0.3.5): the masked phrase as it is - some valid wallet,
+    // neither the real one nor an error, so it does not show that a
+    // passphrase is needed. The same each time.
+    mw_account_keys_t none, none2;
+    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, "", &none), MW_OK);
+    CHECK_EQ_INT(keys_of(CUPCAKE_PHRASE, NULL, &none2), MW_OK);
+    CHECK(memcmp(none.pub.spend.b, plain.pub.spend.b, 32) != 0);
+    CHECK_EQ_MEM(none.pub.spend.b, none2.pub.spend.b, 32);
 
     // A wrong passphrase gives another (valid) wallet - polyseed cannot tell.
     mw_account_keys_t wrong;

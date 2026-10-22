@@ -47,6 +47,7 @@
 #include "../monero/keys.h"
 #include "../monero/mnemonic.h"
 #include "../crypto/hash.h"
+#include "../crypto/aes_gcm.h"
 #include "../crypto/memzero.h"
 #include "../crypto/random.h"
 #include "file_store.h"
@@ -118,17 +119,24 @@ mw_err_t mw_store_blob_erase(const char* key);
 //   record[184] the 140 bytes of the NVS record; v0.3: [140] network
 //               (MW_WNET_*) [141] balance flags [144..151] manual balance;
 //               then the passphrase hint [152..183] (NUL-ended)
+// Version 3 (0.3.5): the same header, record[248] = the version 2 record and
+//               the passphrase record [184..247] (wallet_entry_t.pp_rec).
 // Version 1 (v9.1, read and converted): header[64] (no generation),
 // record[152] (per-wallet generations at 140..147, no hint).
-// The file has the same size whatever it holds, like the decoys.
+// The file has the same size whatever it holds, like the decoys; files of an
+// older size (directories and decoys) are brought to the current one by
+// slots_scan(), a padded directory keeps its older sealed length inside.
 #define DIR_PREFIX     "u"
 #define DIR_TAG        "mw.user.dir.v1"
 #define DIR_LABEL      "mw.dir.v1"
-#define DIR_VERSION    2
+#define DIR_VERSION    3
 #define DIR_HDR        128
-#define DIR_REC        184
+#define DIR_REC        248
 #define DIR_PT_LEN     (DIR_HDR + MAX_WALLETS * DIR_REC)
 #define DIR_FILE_LEN   (32 + DIR_PT_LEN)
+#define DIR2_REC       184
+#define DIR2_PT_LEN    (DIR_HDR + MAX_WALLETS * DIR2_REC)
+#define DIR2_FILE_LEN  (32 + DIR2_PT_LEN)
 #define DIR1_HDR       64
 #define DIR1_REC       152
 #define DIR1_PT_LEN    (DIR1_HDR + MAX_WALLETS * DIR1_REC)
@@ -150,6 +158,8 @@ static uint8_t        g_dir_flags;
 static uint8_t        g_dir_other[32];
 // The loaded directory is in the v9.1 format (converted by upgrade()).
 static bool           g_dir_v1;
+// The loaded directory's version (written as DIR_VERSION by the next save).
+static int            g_dir_ver;
 
 // ---------------------------------------------------------------------------
 // Little-endian helpers
@@ -374,6 +384,7 @@ static void dir_serialize(const wallet_store_t* s, uint32_t next_id, uint8_t fla
         put_u32(r + 148, (uint32_t)(w->bal_manual >> 32));
         memcpy(r + 152, w->pp_hint, MW_PP_HINT_LEN);
         r[152 + MW_PP_HINT_LEN - 1] = 0;
+        memcpy(r + 184, w->pp_rec, MW_PP_REC_LEN);
     }
 }
 
@@ -383,7 +394,7 @@ static mw_err_t dir_deserialize(wallet_store_t* s, uint32_t* next_id, uint8_t* f
 {
     uint32_t i, count;
     const size_t hdr = ver == 1 ? DIR1_HDR : DIR_HDR;
-    const size_t rec = ver == 1 ? DIR1_REC : DIR_REC;
+    const size_t rec = ver == 1 ? DIR1_REC : ver == 2 ? DIR2_REC : DIR_REC;
     if (memcmp(pt, "MWUD", 4) != 0) return MW_ERR_MAGIC;
     if (pt[4] != ver) return MW_ERR_VERSION;
     count = pt[5];
@@ -417,7 +428,8 @@ static mw_err_t dir_deserialize(wallet_store_t* s, uint32_t* next_id, uint8_t* f
         w->wallet_type    = r[136];
         w->is_view_only   = (r[137] != 0);
         w->is_hidden      = (r[138] != 0);
-        w->pp_state       = (r[139] <= MW_PP_SET) ? r[139] : MW_PP_UNKNOWN;
+        w->pp_state       = (r[139] <= MW_PP_REC) ? r[139] : MW_PP_UNKNOWN;
+        if (ver >= 3) memcpy(w->pp_rec, r + 184, MW_PP_REC_LEN);
         if (ver != 1) {
             memcpy(w->pp_hint, r + 152, MW_PP_HINT_LEN);
             w->pp_hint[MW_PP_HINT_LEN - 1] = 0;
@@ -432,7 +444,7 @@ static mw_err_t dir_deserialize(wallet_store_t* s, uint32_t* next_id, uint8_t* f
 }
 
 // Seals and writes `s` as the directory of the installed user key (always
-// version 2).
+// version DIR_VERSION).
 static mw_err_t dir_write(const wallet_store_t* s, uint32_t next_id, uint8_t flags,
                           const uint8_t other[32])
 {
@@ -454,13 +466,13 @@ static mw_err_t dir_write(const wallet_store_t* s, uint32_t next_id, uint8_t fla
     return e;
 }
 
-// Reads the directory of the installed user key (version 2, or 1 - then
-// *v1 is set when v1 is not NULL).
+// Reads the directory of the installed user key (version 3, 2 or 1 - then
+// *v1 is set when v1 is not NULL; *ver_out gets the version).
 //   MW_ERR_IO       there is no such file
 //   MW_ERR_DECRYPT  a file of that name does not open (damaged)
 //   MW_ERR_FORMAT   it exists but could not be read (never "no file")
-static mw_err_t dir_read_v(wallet_store_t* s, uint32_t* next_id, uint8_t* flags,
-                           uint8_t other[32], bool* v1)
+static mw_err_t dir_read_vv(wallet_store_t* s, uint32_t* next_id, uint8_t* flags,
+                            uint8_t other[32], bool* v1, int* ver_out)
 {
     char name[MW_FSTORE_NAME_MAX + 1];
     size_t len = 0;
@@ -468,8 +480,9 @@ static mw_err_t dir_read_v(wallet_store_t* s, uint32_t* next_id, uint8_t* flags,
     mw_err_t e = dir_name(name);
     if (e != MW_OK) return e;
     if (mw_fstore_size(name, &len) != MW_OK) return MW_ERR_IO;
-    if (len != DIR_FILE_LEN && len != DIR1_FILE_LEN) return MW_ERR_FORMAT;
-    const int ver = len == DIR1_FILE_LEN ? 1 : 2;
+    if (len != DIR_FILE_LEN && len != DIR2_FILE_LEN && len != DIR1_FILE_LEN)
+        return MW_ERR_FORMAT;
+    const int ver = len == DIR1_FILE_LEN ? 1 : len == DIR2_FILE_LEN ? 2 : 3;
     const size_t fl = len, pl = len - 32;
     uint8_t* pt = (uint8_t*)dir_alloc(pl);
     uint8_t* f  = (uint8_t*)dir_alloc(fl);
@@ -484,17 +497,29 @@ static mw_err_t dir_read_v(wallet_store_t* s, uint32_t* next_id, uint8_t* flags,
     int used = ver;
     if (e == MW_OK) {
         e = mw_unseal(DIR_LABEL, f + 32, pl, f, f + 16, pt, pl);
-        if (e == MW_ERR_DECRYPT && ver == 2) {
-            // A v9.1 directory padded to the current size (slots_scan).
+        if (e == MW_ERR_DECRYPT && ver == 3) {
+            // A version 2 directory padded to the current size (slots_scan).
+            e = mw_unseal(DIR_LABEL, f + 32, DIR2_PT_LEN, f, f + 16, pt, DIR2_PT_LEN);
+            used = 2;
+        }
+        if (e == MW_ERR_DECRYPT && ver >= 2) {
+            // A v9.1 directory padded to a later size (slots_scan).
             e = mw_unseal(DIR_LABEL, f + 32, DIR1_PT_LEN, f, f + 16, pt, DIR1_PT_LEN);
             used = 1;
         }
     }
     if (e == MW_OK) e = dir_deserialize(s, next_id, flags, other, pt, used);
     if (e == MW_OK && v1) *v1 = used == 1;
+    if (e == MW_OK && ver_out) *ver_out = used;
     dir_free(pt, pl);
     dir_free(f, fl);
     return e;
+}
+
+static mw_err_t dir_read_v(wallet_store_t* s, uint32_t* next_id, uint8_t* flags,
+                           uint8_t other[32], bool* v1)
+{
+    return dir_read_vv(s, next_id, flags, other, v1, NULL);
 }
 
 static mw_err_t dir_read(wallet_store_t* s, uint32_t* next_id, uint8_t* flags,
@@ -526,7 +551,8 @@ static mw_err_t ensure_loaded(void)
     g_next_id = 1;
     g_dir_flags = 0;
     mw_memzero(g_dir_other, sizeof g_dir_other);
-    e = dir_read_v(&g_store, &g_next_id, &g_dir_flags, g_dir_other, &g_dir_v1);
+    g_dir_ver = DIR_VERSION;
+    e = dir_read_vv(&g_store, &g_next_id, &g_dir_flags, g_dir_other, &g_dir_v1, &g_dir_ver);
     if (e == MW_ERR_IO) {
         // No directory yet: an empty one, written by the first change.
         memset(&g_store, 0, sizeof g_store);
@@ -692,10 +718,158 @@ static void pp_check_of(const mw_account_keys_t* keys, uint8_t out[MW_PP_CHECK_L
     mw_memzero(h, sizeof h);
 }
 
+
+// ---- the passphrase record (0.3.5) ----------------------------------------
+// wallet_entry_t.pp_rec: [0] version [1..3] 0 [4..15] IV [16..47] the
+// passphrase wallet's private spend key under AES-256-GCM [48..63] tag.
+// Key: pp_kdf() below. A wallet without a passphrase gets the version byte
+// and random bytes; opening it runs exactly the same derivation and the same
+// decryption, which fails like a wrong passphrase.
+#define PP_REC_V1   1
+#define PP_IV_OFF   4
+#define PP_CT_OFF   16
+#define PP_TAG_OFF  48
+
+static mw_wallet_pp_progress_fn g_pp_prog;
+static void*                    g_pp_prog_ctx;
+static uint32_t                 g_pp_prog_base;
+
+void mw_wallet_pp_set_progress(mw_wallet_pp_progress_fn fn, void* ctx)
+{
+    g_pp_prog = fn;
+    g_pp_prog_ctx = ctx;
+}
+
+static void pp_prog_tick(uint32_t done, void* ctx)
+{
+    (void)ctx;
+    if (!g_pp_prog) return;
+    uint64_t d = (uint64_t)g_pp_prog_base + done;
+    if (d > MW_PP_KDF_ROUNDS) d = MW_PP_KDF_ROUNDS;
+    g_pp_prog((int)(d * 1000u / MW_PP_KDF_ROUNDS), g_pp_prog_ctx);
+}
+
+// out = HW_HMAC(tag || step || state): the eFuse key of this chip.
+static mw_err_t pp_hw_step(const char* tag, uint8_t step, const uint8_t state[32],
+                           uint8_t out[32])
+{
+    uint8_t msg[24 + 1 + 32];
+    const size_t tl = strlen(tag);
+    bool bound = false;
+    memcpy(msg, tag, tl);
+    msg[tl] = step;
+    memcpy(msg + tl + 1, state, 32);
+    mw_err_t e = mw_secure_hw_hmac(msg, tl + 1 + 32, out, &bound);
+    mw_memzero(msg, sizeof msg);
+    return e;
+}
+
+// The record key of wallet `id` for `passphrase`. Always the full work.
+static mw_err_t pp_kdf(const char* passphrase, uint32_t id, const uint8_t uid[16],
+                       uint8_t key[32])
+{
+    uint8_t salt[12 + 16 + 4 + 1], state[32], next_pw[64], h[32];
+    const unsigned steps = MW_PP_KDF_HW_STEPS;
+    const uint32_t per = MW_PP_KDF_ROUNDS / MW_PP_KDF_HW_STEPS;
+    mw_err_t e = MW_OK;
+
+    memcpy(salt, "mw.pp.kdf.v1", 12);
+    memcpy(salt + 12, uid, 16);
+    put_u32(salt + 28, id);
+    salt[32] = 0;
+    g_pp_prog_base = 0;
+    mw_pbkdf2_set_progress(g_pp_prog ? pp_prog_tick : NULL, NULL);
+    mw_pbkdf2_sha256((const uint8_t*)passphrase, strlen(passphrase), salt, sizeof salt, per,
+                     state, sizeof state);
+    for (unsigned i = 1; i < steps && e == MW_OK; ++i) {
+        e = pp_hw_step("mw.pp.hw", (uint8_t)i, state, h);
+        if (e != MW_OK) break;
+        memcpy(next_pw, state, 32);
+        memcpy(next_pw + 32, h, 32);
+        salt[32] = (uint8_t)i;
+        g_pp_prog_base = per * i;
+        pp_prog_tick(0, NULL);
+        mw_pbkdf2_sha256(next_pw, sizeof next_pw, salt, sizeof salt, per, state, sizeof state);
+    }
+    if (e == MW_OK) e = pp_hw_step("mw.pp.hw.final", 0, state, h);
+    if (e == MW_OK) mw_hmac_sha256(h, sizeof h, state, sizeof state, key);
+    mw_pbkdf2_set_progress(NULL, NULL);
+    g_pp_prog_base = MW_PP_KDF_ROUNDS;
+    pp_prog_tick(0, NULL);
+    mw_memzero(state, sizeof state);
+    mw_memzero(next_pw, sizeof next_pw);
+    mw_memzero(h, sizeof h);
+    mw_memzero(salt, sizeof salt);
+    return e;
+}
+
+static void pp_aad(uint32_t id, const uint8_t uid[16], uint8_t aad[12 + 4 + 16])
+{
+    memcpy(aad, "mw.pp.rec.v1", 12);
+    put_u32(aad + 12, id);
+    memcpy(aad + 16, uid, 16);
+}
+
+// A record that opens to nothing.
+static void pp_rec_random(uint8_t rec[MW_PP_REC_LEN])
+{
+    mw_random_bytes(rec, MW_PP_REC_LEN);
+    rec[0] = PP_REC_V1;
+    rec[1] = rec[2] = rec[3] = 0;
+}
+
+// The record of wallet `id` holding `spend` (the passphrase wallet's key).
+static mw_err_t pp_rec_make(uint32_t id, const char* passphrase, const mw_seckey_t* spend,
+                            uint8_t rec[MW_PP_REC_LEN])
+{
+    uint8_t uid[16], key[32], aad[32];
+    mw_err_t e = mw_wallet_store_account_uid(uid);
+    if (e == MW_OK) e = pp_kdf(passphrase, id, uid, key);
+    if (e == MW_OK) {
+        pp_rec_random(rec);                              // version, IV
+        pp_aad(id, uid, aad);
+        if (mw_aes256_gcm_encrypt(key, rec + PP_IV_OFF, 12, aad, sizeof aad,
+                                  spend->b, 32, rec + PP_CT_OFF, rec + PP_TAG_OFF)
+            != MW_AES_GCM_OK)
+            e = MW_ERR_FORMAT;
+    }
+    mw_memzero(key, sizeof key);
+    return e;
+}
+
+// Opens `rec`: MW_OK with keys_out, MW_ERR_DECRYPT when the passphrase is
+// not the record's (or the record holds nothing).
+static mw_err_t pp_rec_open(uint32_t id, const char* passphrase,
+                            const uint8_t rec[MW_PP_REC_LEN], mw_account_keys_t* keys_out)
+{
+    uint8_t uid[16], key[32], aad[32], spend[32];
+    mw_err_t e = mw_wallet_store_account_uid(uid);
+    if (e == MW_OK) e = pp_kdf(passphrase, id, uid, key);
+    if (e == MW_OK) {
+        pp_aad(id, uid, aad);
+        if (rec[0] != PP_REC_V1 ||
+            mw_aes256_gcm_decrypt(key, rec + PP_IV_OFF, 12, aad, sizeof aad,
+                                  rec + PP_CT_OFF, 32, rec + PP_TAG_OFF, spend)
+                != MW_AES_GCM_OK)
+            e = MW_ERR_DECRYPT;
+    }
+    if (e == MW_OK) {
+        // spend = sc_reduce32(key32) of the seed offset scheme; the view key
+        // follows from it exactly as mw_seed_to_keys() derives it.
+        mw_keys_from_legacy_seed(spend, keys_out);
+        e = mw_keys_derive_public(keys_out);
+    }
+    mw_memzero(spend, sizeof spend);
+    mw_memzero(key, sizeof key);
+    if (e != MW_OK) mw_memzero(keys_out, sizeof *keys_out);
+    return e;
+}
+
+// `pp_pass` and `pp_keys`: the passphrase and its wallet (both or neither).
 static mw_err_t create_entry(const char* name, uint8_t wallet_type, bool view_only,
                              const uint8_t* payload, size_t payload_len,
-                             uint32_t restore_height, const uint8_t* pp_check,
-                             uint32_t* id_out)
+                             uint32_t restore_height, const char* pp_pass,
+                             const mw_account_keys_t* pp_keys, uint32_t* id_out)
 {
     uint8_t  plain[MW_SEAL_PLAIN_LEN];
     char     label[40];
@@ -720,18 +894,21 @@ static mw_err_t create_entry(const char* name, uint8_t wallet_type, bool view_on
     mw_random_bytes(plain, sizeof plain);
     if ((err = plain_from_payload(wallet_type, payload, payload_len, plain)) != MW_OK)
         goto done;
-    if (pp_check) {
-        if (wallet_type != MW_WT_LEGACY && wallet_type != MW_WT_POLYSEED) {
-            err = MW_ERR_INVALID_ARG;            // raw keys have no passphrase
-            goto done;
-        }
-        plain[MW_PP_REC_OFF]     = MW_PP_REC_MARKER;
-        plain[MW_PP_REC_OFF + 1] = MW_PP_REC_VERSION;
-        memcpy(plain + MW_PP_REC_OFF + 2, pp_check, MW_PP_CHECK_LEN);
+    // 0.3.5: no passphrase mark inside the sealed seed any more (bytes 48..63
+    // stay random padding) - the record below is the same for every wallet.
+    if (pp_keys && wallet_type != MW_WT_LEGACY && wallet_type != MW_WT_POLYSEED) {
+        err = MW_ERR_INVALID_ARG;                // raw keys have no passphrase
+        goto done;
     }
 
     w = &g_store.wallets[g_store.count];
     memset(w, 0, sizeof *w);
+    if (pp_keys) {
+        err = pp_rec_make(id, pp_pass, &pp_keys->sec.spend, w->pp_rec);
+        if (err != MW_OK) { memset(w, 0, sizeof *w); goto done; }
+    } else {
+        pp_rec_random(w->pp_rec);
+    }
     seed_label(id, label, sizeof label);
     err = mw_seal(label, plain, sizeof plain, w->seed_iv, w->seed_tag,
                   w->encrypted_seed, sizeof w->encrypted_seed);
@@ -743,7 +920,7 @@ static mw_err_t create_entry(const char* name, uint8_t wallet_type, bool view_on
     w->wallet_type    = wallet_type;
     w->is_view_only   = view_only;
     w->is_hidden      = false;
-    w->pp_state       = pp_check ? MW_PP_SET : MW_PP_NONE;
+    w->pp_state       = MW_PP_REC;
     // The device's network setting now: the wallet keeps it from here on.
     {
         mw_settings_t st;
@@ -779,25 +956,22 @@ mw_err_t mw_wallet_create(const char* name, mw_seed_type_t type,
     else if (type == MW_SEED_POLYSEED)  wt = MW_WT_POLYSEED;
     else                                return MW_ERR_INVALID_ARG;
     return create_entry(name, wt, false, seed_material, seed_len,
-                        restore_height, NULL, id_out);
+                        restore_height, NULL, NULL, id_out);
 }
 
 mw_err_t mw_wallet_create_pp(const char* name, mw_seed_type_t type,
                              const uint8_t* seed_material, size_t seed_len,
-                             uint32_t restore_height,
+                             uint32_t restore_height, const char* passphrase,
                              const mw_account_keys_t* pp_keys, uint32_t* id_out)
 {
     uint8_t wt;
-    uint8_t check[MW_PP_CHECK_LEN];
-    mw_err_t err;
     if (type == MW_SEED_MONERO_LEGACY)  wt = MW_WT_LEGACY;
     else if (type == MW_SEED_POLYSEED)  wt = MW_WT_POLYSEED;
     else                                return MW_ERR_INVALID_ARG;
-    if (pp_keys) pp_check_of(pp_keys, check);
-    err = create_entry(name, wt, false, seed_material, seed_len, restore_height,
-                       pp_keys ? check : NULL, id_out);
-    mw_memzero(check, sizeof check);
-    return err;
+    const bool with_pp = pp_keys && passphrase && passphrase[0];
+    if (pp_keys && !with_pp) return MW_ERR_INVALID_ARG;
+    return create_entry(name, wt, false, seed_material, seed_len, restore_height,
+                        with_pp ? passphrase : NULL, with_pp ? pp_keys : NULL, id_out);
 }
 
 uint8_t mw_wallet_pp_state(uint32_t id)
@@ -884,7 +1058,7 @@ mw_err_t mw_wallet_create_from_keys(const char* name, const mw_seckey_t* spend,
     }
 
     err = create_entry(name, wt, view_only, payload, payload_len,
-                       restore_height, NULL, id_out);
+                       restore_height, NULL, NULL, id_out);
 
 done:
     mw_memzero(payload, sizeof payload);
@@ -1003,7 +1177,55 @@ done:
     return err;
 }
 
-// task 3 item 5: open the base wallet or the passphrase wallet of a record.
+// 0.3.5: the passphrase wallet from the record (wallet_store.h).
+mw_err_t mw_wallet_open_pp(uint32_t id, const char* passphrase,
+                           mw_account_keys_t* keys_out)
+{
+    if (!keys_out || !passphrase) return MW_ERR_INVALID_ARG;
+    mw_err_t err = ensure_loaded();
+    if (err != MW_OK) return err;
+    const int idx = find_index(id);
+    if (idx < 0) return MW_ERR_INVALID_ARG;
+
+    uint8_t rec[MW_PP_REC_LEN];
+    memcpy(rec, g_store.wallets[idx].pp_rec, sizeof rec);
+    const uint8_t state = g_store.wallets[idx].pp_state;
+    const bool    seed  = g_store.wallets[idx].wallet_type == MW_WT_LEGACY ||
+                          g_store.wallets[idx].wallet_type == MW_WT_POLYSEED;
+    // The same work for every wallet and every passphrase (an empty one too).
+    err = pp_rec_open(id, passphrase, rec, keys_out);
+    if (err == MW_OK || err != MW_ERR_DECRYPT) return err;
+
+    // A record from before 0.3.5 that was made with a passphrase: no record
+    // yet. Opened the old way once (CryptoNight seed offset; checked when the
+    // seed carries a check), then given its record so the next time is like
+    // every other wallet.
+    if (!passphrase[0] || !seed || rec[0] != 0 ||
+        (state != MW_PP_SET && state != MW_PP_UNKNOWN))
+        return MW_ERR_DECRYPT;
+    bool verified = false;
+    err = mw_wallet_open(id, passphrase, keys_out, &verified);
+    if (err != MW_OK) return err;
+    // MW_PP_UNKNOWN (no check in the seed): any passphrase opens some wallet,
+    // so binding a record to it could lock out the right one - such a record
+    // keeps being opened the old way.
+    if (!verified) return MW_OK;
+    err = pp_rec_make(id, passphrase, &keys_out->sec.spend, rec);
+    if (err == MW_OK) {
+        const int i2 = find_index(id);
+        if (i2 >= 0) {
+            memcpy(g_store.wallets[i2].pp_rec, rec, sizeof rec);
+            g_store.wallets[i2].pp_state = MW_PP_REC;
+            (void)persist();                 // tried again next time if this fails
+        }
+        MW_LOGI("wallet", "passphrase record created");
+    }
+    mw_memzero(rec, sizeof rec);
+    return MW_OK;
+}
+
+// task 3 item 5: open the base wallet or (records from before 0.3.5 only) the
+// passphrase wallet the old way.
 mw_err_t mw_wallet_open(uint32_t id, const char* passphrase,
                         mw_account_keys_t* keys_out, bool* verified)
 {
@@ -1025,7 +1247,12 @@ mw_err_t mw_wallet_open(uint32_t id, const char* passphrase,
     w = &g_store.wallets[idx];
 
     const uint8_t state = mw_wallet_pp_state(id);
-    if (with_pp && state == MW_PP_NONE) return MW_ERR_INVALID_ARG;
+    if (with_pp && state != MW_PP_SET && state != MW_PP_UNKNOWN) {
+        // 0.3.5 records (and raw-key wallets): only through the record.
+        err = mw_wallet_open_pp(id, passphrase, keys_out);
+        if (err == MW_OK && verified) *verified = true;
+        return err;
+    }
 
     err = mw_wallet_load_keys(id, with_pp ? passphrase : "", keys_out);
     if (err != MW_OK || !with_pp) {
@@ -1368,7 +1595,8 @@ static struct {
 } g_dc[DECOY_CACHE];
 static unsigned g_dc_next;
 
-// A decoy of either directory size (v9.1 decoys are DIR1_FILE_LEN).
+// A decoy of any directory size (v9.1 decoys are DIR1_FILE_LEN, those of
+// 0.3.0..0.3.4 DIR2_FILE_LEN).
 static bool is_decoy(const char* name, uint8_t* f, bool* old_size)
 {
     size_t len = 0;
@@ -1382,7 +1610,8 @@ static bool is_decoy(const char* name, uint8_t* f, bool* old_size)
         }
     }
     bool d = false;
-    if (mw_fstore_size(name, &len) == MW_OK && (len == DIR_FILE_LEN || len == DIR1_FILE_LEN) &&
+    if (mw_fstore_size(name, &len) == MW_OK &&
+        (len == DIR_FILE_LEN || len == DIR2_FILE_LEN || len == DIR1_FILE_LEN) &&
         mw_fstore_read(name, f, len, &len) == MW_OK && decoy_tag(f, tag) == MW_OK) {
         d = mw_ct_equal(tag, f + 16, 16) != 0;
         if (d && old_size) *old_size = len != DIR_FILE_LEN;
@@ -1432,14 +1661,16 @@ static int slots_scan(int* decoys)
             }
             continue;
         }
-        // An account of the v9.1 size that has not logged in since the
+        // An account of an older size that has not logged in since the
         // update: padded to the current size (dir_read_v() reads it), so it
         // does not stand out among the converted slots.
-        if (mw_fstore_size(g_slot_names[i], &len) == MW_OK && len == DIR1_FILE_LEN &&
-            mw_fstore_read(g_slot_names[i], f, DIR1_FILE_LEN, &len) == MW_OK &&
-            len == DIR1_FILE_LEN) {
-            mw_random_bytes(f + DIR1_FILE_LEN, DIR_FILE_LEN - DIR1_FILE_LEN);
-            (void)mw_fstore_write(g_slot_names[i], f, DIR_FILE_LEN);
+        if (mw_fstore_size(g_slot_names[i], &len) == MW_OK &&
+            (len == DIR1_FILE_LEN || len == DIR2_FILE_LEN)) {
+            const size_t old = len;
+            if (mw_fstore_read(g_slot_names[i], f, old, &len) == MW_OK && len == old) {
+                mw_random_bytes(f + old, DIR_FILE_LEN - old);
+                (void)mw_fstore_write(g_slot_names[i], f, DIR_FILE_LEN);
+            }
         }
         // Every slot has its container file; an account without one gets
         // random bytes until it logs in (an unreadable container is empty).
@@ -1722,6 +1953,41 @@ mw_err_t mw_wallet_store_decoys_ensure(void)
     return e;
 }
 
+
+#ifdef MW_HOST_BUILD
+// Host tests: turns a wallet back into a record of firmware before 0.3.5 -
+// no passphrase record, and (pp_keys != NULL) the old sealed check with
+// state MW_PP_SET, else MW_PP_NONE.
+mw_err_t mw_host_wallet_make_old(uint32_t id, const mw_account_keys_t* pp_keys);
+mw_err_t mw_host_wallet_make_old(uint32_t id, const mw_account_keys_t* pp_keys)
+{
+    uint8_t plain[MW_SEAL_PLAIN_LEN];
+    char label[40];
+    mw_err_t e = ensure_loaded();
+    if (e != MW_OK) return e;
+    const int idx = find_index(id);
+    if (idx < 0) return MW_ERR_INVALID_ARG;
+    wallet_entry_t* w = &g_store.wallets[idx];
+    seed_label(id, label, sizeof label);
+    e = mw_unseal(label, w->encrypted_seed, sizeof w->encrypted_seed, w->seed_iv, w->seed_tag,
+                  plain, sizeof plain);
+    if (e != MW_OK) return e;
+    if (pp_keys) {
+        plain[MW_PP_REC_OFF]     = MW_PP_REC_MARKER;
+        plain[MW_PP_REC_OFF + 1] = MW_PP_REC_VERSION;
+        pp_check_of(pp_keys, plain + MW_PP_REC_OFF + 2);
+    }
+    e = mw_seal(label, plain, sizeof plain, w->seed_iv, w->seed_tag, w->encrypted_seed,
+                sizeof w->encrypted_seed);
+    mw_memzero(plain, sizeof plain);
+    if (e != MW_OK) return e;
+    memset(w->pp_rec, 0, sizeof w->pp_rec);
+    w->pp_state = pp_keys ? MW_PP_SET : MW_PP_NONE;
+    g_dir_ver = 2;
+    return persist();
+}
+#endif
+
 mw_err_t mw_wallet_store_upgrade(void)
 {
     uint32_t i;
@@ -1729,6 +1995,27 @@ mw_err_t mw_wallet_store_upgrade(void)
     if (e != MW_OK) return e;
     // Done before (0.3.2): only the container must exist. Wallets added
     // since never had files of an older format.
+    // 0.3.5: every wallet without a passphrase record gets a random one - all
+    // but the pre-0.3.5 passphrase wallets, which get theirs at their first
+    // mw_wallet_open_pp() - and the directory is written in the current
+    // version.
+    {
+        bool changed = g_dir_ver < DIR_VERSION;
+        for (i = 0; i < g_store.count && i < MAX_WALLETS; i++) {
+            wallet_entry_t* w = &g_store.wallets[i];
+            const bool seed = w->wallet_type == MW_WT_LEGACY || w->wallet_type == MW_WT_POLYSEED;
+            if (w->pp_rec[0] != 0) continue;
+            if (seed && (w->pp_state == MW_PP_SET || w->pp_state == MW_PP_UNKNOWN)) continue;
+            pp_rec_random(w->pp_rec);
+            w->pp_state = MW_PP_REC;
+            changed = true;
+        }
+        if (changed) {
+            e = persist();
+            if (e != MW_OK) return e;
+            g_dir_ver = DIR_VERSION;
+        }
+    }
     if (!g_dir_v1 && g_store.fmt >= DIR_FMT) return mw_ki_store_create();
     if (g_dir_v1) {
         // v9.1 -> v2: the same records, the hint empty; per-wallet key image

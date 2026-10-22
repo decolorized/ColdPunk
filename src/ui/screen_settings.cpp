@@ -60,7 +60,7 @@ enum {
     SET_BACK = 0, SET_KB, SET_LAYOUT, SET_BRIGHT, SET_AUTOLOCK, SET_CALIB,
     SET_FORMAT, SET_LANG, SET_NET, SET_DEBUG, SET_PASSWORD, SET_ABOUT,
     SET_EFUSE, SET_RESET, SET_TOUCH_TEST, SET_USER_ADD, SET_USER_DELETE, SET_ACCOUNT,
-    SET_BALANCE, SET_LOCK_FLASH
+    SET_BALANCE, SET_LOCK_FLASH, SET_GAME
 };
 
 // The logged-in account's name, read on the crypto task before each build.
@@ -180,6 +180,8 @@ static void settings_build(void* arg) {
 
     add(LV_SYMBOL_LIST,     TX(XSTR_DEBUG_LOG),
         c->s.debug_log ? TX(XSTR_ON) : TX(XSTR_OFF), SET_DEBUG);
+    add(LV_SYMBOL_EYE_CLOSE, TX(XSTR_SET_GAME),
+        c->s.game ? TX(XSTR_ON) : TX(XSTR_OFF), SET_GAME);
 
     add(LV_SYMBOL_CHARGE,   TX(XSTR_PW_CHANGE), NULL, SET_PASSWORD);
     add(LV_SYMBOL_EDIT,     TX(XSTR_ACCOUNT_NAME), s_account, SET_ACCOUNT);
@@ -949,6 +951,24 @@ void mw_screen_settings_run(void) {
             break;
         }
 
+        case SET_GAME: {
+            const char* items[] = { TX(XSTR_OFF), TX(XSTR_ON) };
+            const int i = mw_ui_choose(TX(XSTR_SET_GAME), items, 2, s_set.s.game ? 1 : 0);
+            if (i == 1 && !s_set.s.game) {
+                // Turned on only after the user has seen how to get past it.
+                if (mw_ui_confirm(TX(XSTR_SET_GAME), TX(XSTR_GAME_HOWTO),
+                                  TX(XSTR_GAME_TURN_ON), T(STR_CANCEL))) {
+                    s_set.s.game = true;
+                    dirty = true;
+                }
+            } else if (i == 0 && s_set.s.game) {
+                s_set.s.game = false;
+                dirty = true;
+            }
+            if (dirty) MW_LOGI("settings", "minesweeper at start %s", s_set.s.game ? "on" : "off");
+            break;
+        }
+
         case SET_PASSWORD:
             change_password();
             break;
@@ -977,14 +997,20 @@ void mw_screen_settings_run(void) {
             break;
 
         case SET_ABOUT: {
-            char body[256];
+            char body[320];
             const mw_hal_caps_t* c = mw_hal_caps();
+            // Secure boot: the signing key digest, to compare with
+            // secure_boot_key_digest.txt before an update (flash.sh/.bat of
+            // a build-secure folder print it too).
+            char dg[65], sb[48] = "";
+            if (mw_secure_boot_digest(dg))
+                snprintf(sb, sizeof(sb), "\nSB key %.8s...%.8s", dg, dg + 56);
             snprintf(body, sizeof(body),
-                     "%s %s\ncommit %s\n%s\n%ux%u%s\n%s",
+                     "%s %s\ncommit %s\n%s\n%ux%u%s%s\n%s",
                      TX(XSTR_APP_NAME), MW_FIRMWARE_VERSION, MW_BUILD_COMMIT,
                      c->board_name ? c->board_name : "",
                      (unsigned)c->width, (unsigned)c->height,
-                     c->monochrome ? " mono" : "",
+                     c->monochrome ? " mono" : "", sb,
                      (mw_secure_key_status() == MW_OK) ? ""
                                                        : TX(XSTR_EFUSE_MISSING));
             mw_ui_message(TX(XSTR_SETTINGS_ABOUT), body);

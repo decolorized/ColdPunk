@@ -22,11 +22,16 @@
 // framed like every other message they cannot corrupt the protocol on the
 // serial port, and the host program shows them in its console.
 //
-// USB.begin() ordering: with "CDC On Boot" the core starts USB before
-// setup(); the HID interface is still picked up because the USBHID/HID device
-// objects below are globals whose constructors register the interface during
-// static initialisation, i.e. before app_main(). Without "CDC On Boot" the
-// sketch has to start USB itself, which mw_usb_link_init() does.
+// USB.begin() ordering (0.3.5): the build profiles use "CDC On Boot:
+// Disabled", so nothing appears on USB before the account password - no
+// Espressif CDC port, no device name - and USB starts in mw_usb_link_init()
+// after the unlock, with the device's own VID/PID and "Monero" / "Cold
+// Wallet" strings. The serial transport then is a TinyUSB CDC port of our
+// own (g_cdc below), started together with the HID interface; UART0 stays the
+// console. The USBHID/USBCDC objects are globals whose constructors register
+// their interfaces during static initialisation, before USB.begin().
+// With "CDC On Boot: Enabled" (an IDE build) the core starts USB before
+// setup() under Espressif's identity and `Serial` is that CDC port.
 //
 // NOTE: like the rest of the device layer this file has not been compiled in
 // this workspace (no ESP32 core here). Core API relied upon: Stream-style
@@ -73,9 +78,34 @@ bool     mw_usb_link_running(void);
 #endif
 #define MW_LINK_HAVE_SERIAL (MW_USE_SERIAL ? 1 : 0)
 
-// `Serial` is UART0 when the IDE routes the USB CDC nowhere; then the
-// protocol owns UART0 and hal_esp32.cpp installs no UART console.
-#define MW_LINK_SERIAL Serial
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)
+#  define MW_CDC_ON_BOOT 1
+#else
+#  define MW_CDC_ON_BOOT 0
+#endif
+
+#if MW_LINK_HAVE_SERIAL && defined(MW_USB_TINYUSB) && !MW_CDC_ON_BOOT
+// Our own TinyUSB CDC port, enumerated only after the unlock (above).
+#  include <USB.h>
+#  include <USBCDC.h>
+static USBCDC g_cdc(0);
+#  define MW_LINK_SERIAL  g_cdc
+#  define MW_LINK_OWN_CDC 1
+#else
+// `Serial`: the core's CDC port with "CDC On Boot", or UART0 without TinyUSB
+// (then the protocol owns UART0 and hal_esp32.cpp installs no UART console).
+#  define MW_LINK_SERIAL  Serial
+#  define MW_LINK_OWN_CDC 0
+#endif
+
+// hal_esp32.cpp (mw_usb_connected): a host has opened our CDC port.
+extern "C" bool mw_usb_link_host_open(void) {
+#if MW_LINK_OWN_CDC
+    return (bool)g_cdc;
+#else
+    return false;
+#endif
+}
 
 namespace {
 
@@ -512,7 +542,9 @@ extern "C" mw_err_t mw_usb_link_init(void) {
     memset(&g_ring, 0, sizeof(g_ring));
     g_hid.begin();
     caps |= MW_LINK_CAP_HID;
-#  if !(defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1))
+#endif
+#if MW_LINK_HAVE_HID || MW_LINK_OWN_CDC
+#  if !MW_CDC_ON_BOOT
     // Nobody started USB yet: set the identity and start it here. With CDC On
     // Boot the core has already done so and the calls below are no-ops.
     USB.VID(MW_USB_VID);

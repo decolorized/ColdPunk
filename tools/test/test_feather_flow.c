@@ -64,8 +64,8 @@ MW_TEST(test_two_wallets_per_seed)
     CHECK(!mw_point_eq(&g_base.pub.spend, &g_pp.pub.spend));
 
     CHECK_EQ_INT(mw_wallet_create_pp("borya", MW_SEED_MONERO_LEGACY, g_seed, 32, 3100000,
-                                     &g_pp, &g_id), MW_OK);
-    CHECK_EQ_INT(mw_wallet_pp_state(g_id), MW_PP_SET);
+                                     "correct horse", &g_pp, &g_id), MW_OK);
+    CHECK_EQ_INT(mw_wallet_pp_state(g_id), MW_PP_REC);
 
     mw_account_keys_t k;
     bool verified = false;
@@ -86,19 +86,36 @@ MW_TEST(test_two_wallets_per_seed)
         CHECK_EQ_MEM(&k, zero, sizeof k);
     }
 
-    // A wallet created without a passphrase never asks and refuses one.
+    // 0.3.5: a wallet created without a passphrase looks the same and
+    // answers any passphrase with "wrong passphrase".
     uint32_t id2 = 0;
     uint8_t seed2[32];
     memset(seed2, 0x31, sizeof seed2);
-    CHECK_EQ_INT(mw_wallet_create_pp("plain", MW_SEED_MONERO_LEGACY, seed2, 32, 0, NULL, &id2),
-                 MW_OK);
-    CHECK_EQ_INT(mw_wallet_pp_state(id2), MW_PP_NONE);
-    CHECK_EQ_INT(mw_wallet_open(id2, "x", &k, &verified), MW_ERR_INVALID_ARG);
+    CHECK_EQ_INT(mw_wallet_create_pp("plain", MW_SEED_MONERO_LEGACY, seed2, 32, 0, "", NULL,
+                                     &id2), MW_OK);
+    CHECK_EQ_INT(mw_wallet_pp_state(id2), MW_PP_REC);
+    CHECK_EQ_INT(mw_wallet_open(id2, "x", &k, &verified), MW_ERR_DECRYPT);
+    CHECK_EQ_INT(mw_wallet_open_pp(id2, "correct horse", &k), MW_ERR_DECRYPT);
     CHECK_EQ_INT(mw_wallet_open(id2, "", &k, &verified), MW_OK);
+    {
+        const wallet_entry_t* a = mw_wallet_get(g_id);
+        const wallet_entry_t* b = mw_wallet_get(id2);
+        static const uint8_t z[MW_PP_REC_LEN - 4] = {0};
+        CHECK(a && b);
+        CHECK_EQ_INT(a->pp_rec[0], b->pp_rec[0]);
+        CHECK(memcmp(a->pp_rec + 4, z, sizeof z) != 0);
+        CHECK(memcmp(b->pp_rec + 4, z, sizeof z) != 0);
+        CHECK_EQ_INT(a->pp_state, b->pp_state);
+    }
+    // The record alone opens the passphrase wallet.
+    CHECK_EQ_INT(mw_wallet_open_pp(g_id, "correct horse", &k), MW_OK);
+    CHECK_EQ_MEM(k.pub.spend.b, g_pp.pub.spend.b, 32);
+    CHECK_EQ_MEM(k.pub.view.b, g_pp.pub.view.b, 32);
+    CHECK_EQ_INT(mw_wallet_open_pp(g_id, "", &k), MW_ERR_DECRYPT);
 
     // The state survives a reload of the directory, and a rekey.
     CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
-    CHECK_EQ_INT(mw_wallet_pp_state(g_id), MW_PP_SET);
+    CHECK_EQ_INT(mw_wallet_pp_state(g_id), MW_PP_REC);
     {
         uint8_t nk[32];
         memset(nk, 0x5a, sizeof nk);
@@ -119,8 +136,8 @@ MW_TEST(test_two_wallets_per_seed)
         CHECK_EQ_INT(mw_polyseed_create(ent, sizeof ent, 1700000000ULL, 0, &ps), MW_OK);
         CHECK_EQ_INT(mw_polyseed_pack(&ps, blob, sizeof blob, &blen), MW_OK);
         CHECK_EQ_INT(mw_seed_to_keys(MW_SEED_POLYSEED, blob, blen, "pp", &pk), MW_OK);
-        CHECK_EQ_INT(mw_wallet_create_pp("poly", MW_SEED_POLYSEED, blob, blen, 0, &pk, &id3),
-                     MW_OK);
+        CHECK_EQ_INT(mw_wallet_create_pp("poly", MW_SEED_POLYSEED, blob, blen, 0, "pp", &pk,
+                                         &id3), MW_OK);
         CHECK_EQ_INT(mw_wallet_open(id3, "pp", &k, &verified), MW_OK);
         CHECK(verified);
         CHECK_EQ_INT(mw_wallet_open(id3, "pq", &k, &verified), MW_ERR_DECRYPT);
@@ -1225,6 +1242,248 @@ MW_TEST(test_delete_wipes_cache)
     mw_host_store_reset();
 }
 
+
+// 0.3.5: records of older firmware. A passphrase wallet without a record is
+// opened the old way once and then has one; a wallet without a passphrase
+// gets a random record from upgrade().
+
+// 0.3.5: the transaction key and the global index are kept (container
+// version 3), and a full outputs export leaves entries it did not list out
+// of the "amount unknown" count.
+MW_TEST(test_tx_keys_and_snapshot)
+{
+    CHECK(mw_ki_cache_is_open());
+    mw_ki_entry_t e, got;
+    uint64_t total = 0;
+    uint32_t outs = 0, unknown0 = 0, unknown = 0;
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown0), MW_OK);
+
+    memset(&e, 0, sizeof e);
+    e.out_pub.b[0] = 0xD1;
+    e.image.b[0] = 0xD2;
+    e.flags = MW_KI_F_EXPORTED;
+    e.amount = 777;
+    e.bal = MW_KI_B_AMOUNT;
+    e.tx_pub.b[0] = 0xD3;
+    e.gidx = 123456789;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    // An old entry: no amount, no transaction.
+    mw_ki_entry_t old;
+    memset(&old, 0, sizeof old);
+    old.out_pub.b[0] = 0xE1;
+    old.image.b[0] = 0xE2;
+    old.flags = MW_KI_F_EXPORTED;
+    CHECK_EQ_INT(mw_ki_cache_put(&old), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    CHECK_EQ_INT(unknown, unknown0 + 1);
+
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    bool found = false;
+    for (uint32_t i = 0; i < mw_ki_cache_count(); i++) {
+        CHECK(mw_ki_cache_get(i, &got));
+        if (got.out_pub.b[0] == 0xD1) {
+            found = true;
+            CHECK_EQ_INT(got.tx_pub.b[0], 0xD3);
+            CHECK(got.gidx == 123456789u);
+            CHECK_EQ_INT((int)got.amount, 777);
+        }
+    }
+    CHECK(found);
+
+    // A full export that lists only 0xD1: the old entry is stale now.
+    mw_ki_cache_snapshot_begin();
+    e.tx_pub.b[0] = 0;                        // a record without the key keeps it
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK(mw_ki_cache_snapshot_end() >= 1);
+    CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
+    CHECK(unknown < unknown0 + 1);
+    for (uint32_t i = 0; i < mw_ki_cache_count(); i++) {
+        CHECK(mw_ki_cache_get(i, &got));
+        if (got.out_pub.b[0] == 0xD1) CHECK_EQ_INT(got.tx_pub.b[0], 0xD3);
+        if (got.out_pub.b[0] == 0xE1) CHECK(got.bal & MW_KI_B_STALE);
+        CHECK(!(got.bal & 0x80));
+    }
+    // A later record with an amount brings it back.
+    old.amount = 5;
+    old.bal = MW_KI_B_AMOUNT;
+    CHECK_EQ_INT(mw_ki_cache_put(&old), MW_OK);
+    for (uint32_t i = 0; i < mw_ki_cache_count(); i++) {
+        CHECK(mw_ki_cache_get(i, &got));
+        if (got.out_pub.b[0] == 0xE1) CHECK(!(got.bal & MW_KI_B_STALE));
+    }
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+}
+
+// 0.3.5: "All saved key images": the key image file starts before the
+// outputs file with the cache's run of transfer indices ending right before
+// its offset; every record verifies against its output.
+static void ki_x(const fx_output_t* outs, int n, uint64_t offset, bool all,
+                 size_t cap, mw_ki_saved_info_t* sv, size_t* kl)
+{
+    mw_ops_error_t er;
+    mw_ki_export_info_t info;
+    size_t flen = 0, pl = 0, olen = 0;
+    memset(&er, 0, sizeof er);
+    size_t plen = fx_outputs_plain(&g_base, outs, n, offset, offset + (uint64_t)n,
+                                   g_plain, sizeof g_plain);
+    CHECK_EQ_INT(mw_file_seal(&MW_FILE_OUTPUTS, g_plain, plen, &g_base, g_file,
+                              sizeof g_file, &flen), MW_OK);
+    CHECK_EQ_INT(mw_ops_outputs_inspect(&g_base, g_file, flen, &pl, &info, &er), MW_OK);
+    CHECK_EQ_INT(mw_ops_outputs_to_keyimages_x(&g_base, g_file, pl, all, g_out,
+                                               cap ? cap : sizeof g_out, &olen, sv,
+                                               NULL, &er), MW_OK);
+    *kl = 0;
+    CHECK_EQ_INT(mw_file_open(&MW_FILE_KEYIMAGES, g_out, olen, &g_base, g_plain,
+                              sizeof g_plain, kl), MW_OK);
+}
+static void ki_check(const fx_output_t* const* want, int n, uint32_t first, size_t kl)
+{
+    CHECK_EQ_INT((int)kl, 68 + n * 96);
+    const uint32_t off = (uint32_t)g_plain[0] | (uint32_t)g_plain[1] << 8 |
+                         (uint32_t)g_plain[2] << 16 | (uint32_t)g_plain[3] << 24;
+    CHECK_EQ_INT((int)off, (int)first);
+    for (int i = 0; i < n && 68 + (size_t)(i + 1) * 96 <= kl; ++i) {
+        mw_keyimage_t ki;
+        mw_ring_sig_t sig;
+        memcpy(ki.b, g_plain + 68 + 96 * i, 32);
+        memcpy(sig.c.b, g_plain + 68 + 96 * i + 32, 32);
+        memcpy(sig.r.b, g_plain + 68 + 96 * i + 64, 32);
+        CHECK_EQ_INT(mw_check_key_image_signature(&want[i]->one_time, &ki, &sig), MW_OK);
+    }
+}
+
+MW_TEST(test_ki_all_saved)
+{
+    CHECK(mw_ki_cache_is_open());
+    static fx_output_t a[6], b[1], c[1];
+    for (int i = 0; i < 6; ++i)
+        fx_make_output(&g_base, (uint32_t)i, 0, (uint32_t)(i & 1), 1000000ULL + (uint64_t)i,
+                       900 + (uint64_t)i, &a[i]);
+    fx_make_output(&g_base, 0, 0, 0, 42, 950, &b[0]);
+    fx_make_output(&g_base, 0, 0, 0, 43, 951, &c[0]);
+    mw_ki_saved_info_t sv;
+    size_t kl = 0;
+
+    // Transfers 50..55 exported once: the cache knows their index now.
+    ki_x(a, 6, 50, false, 0, &sv, &kl);
+    CHECK_EQ_INT((int)sv.saved, 0);
+    CHECK_EQ_INT((int)sv.start, 50);
+    {
+        const fx_output_t* w[6] = { &a[0], &a[1], &a[2], &a[3], &a[4], &a[5] };
+        ki_check(w, 6, 50, kl);
+    }
+    // ... and survives a reopen (container version 4).
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+
+    // An incremental export from 54: without the checkbox only 54..56.
+    const fx_output_t inc[3] = { a[4], a[5], b[0] };
+    ki_x(inc, 3, 54, false, 0, &sv, &kl);
+    {
+        const fx_output_t* w[3] = { &a[4], &a[5], &b[0] };
+        ki_check(w, 3, 54, kl);
+    }
+    // With it: 50..53 from the cache first, the file starts at 50.
+    ki_x(inc, 3, 54, true, 0, &sv, &kl);
+    CHECK_EQ_INT((int)sv.saved, 4);
+    CHECK_EQ_INT((int)sv.start, 50);
+    CHECK_EQ_INT((int)sv.offset, 54);
+    {
+        const fx_output_t* w[7] = { &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &b[0] };
+        ki_check(w, 7, 50, kl);
+    }
+    // A file that only fits one more record takes the nearest one (53).
+    {
+        size_t base_len = 0, pl = 0, flen = 0;
+        mw_ops_error_t er;
+        mw_ki_export_info_t info;
+        memset(&er, 0, sizeof er);
+        size_t plen = fx_outputs_plain(&g_base, inc, 3, 54, 57, g_plain, sizeof g_plain);
+        CHECK_EQ_INT(mw_file_seal(&MW_FILE_OUTPUTS, g_plain, plen, &g_base, g_file,
+                                  sizeof g_file, &flen), MW_OK);
+        CHECK_EQ_INT(mw_ops_outputs_inspect(&g_base, g_file, flen, &pl, &info, &er), MW_OK);
+        CHECK_EQ_INT(mw_ops_outputs_to_keyimages_x(&g_base, g_file, pl, false, g_out,
+                                                   sizeof g_out, &base_len, NULL, NULL,
+                                                   &er), MW_OK);
+        ki_x(inc, 3, 54, true, base_len + 96, &sv, &kl);
+        CHECK_EQ_INT((int)sv.saved, 1);
+        const fx_output_t* w[4] = { &a[3], &a[4], &a[5], &b[0] };
+        ki_check(w, 4, 53, kl);
+    }
+
+    // A gap: nothing is known at 57, so nothing is added before 58.
+    ki_x(c, 1, 58, true, 0, &sv, &kl);
+    CHECK_EQ_INT((int)sv.saved, 0);
+    CHECK_EQ_INT((int)sv.start, 58);
+    {
+        const fx_output_t* w[1] = { &c[0] };
+        ki_check(w, 1, 58, kl);
+    }
+
+    // The online wallet renumbered: a[0] is transfer 53 now. It takes the
+    // index from a[3] and leaves 50 empty: only 51..52 come before it.
+    ki_x(&a[0], 1, 53, true, 0, &sv, &kl);
+    CHECK_EQ_INT((int)sv.saved, 2);
+    CHECK_EQ_INT((int)sv.start, 51);
+    {
+        const fx_output_t* w[3] = { &a[1], &a[2], &a[0] };
+        ki_check(w, 3, 51, kl);
+    }
+    // A full export (offset 0) has nothing before it.
+    ki_x(a, 2, 0, true, 0, &sv, &kl);
+    CHECK_EQ_INT((int)sv.saved, 0);
+    CHECK_EQ_INT((int)sv.start, 0);
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+}
+
+mw_err_t mw_host_wallet_make_old(uint32_t id, const mw_account_keys_t* pp_keys);
+MW_TEST(test_pp_record_migration)
+{
+    fresh_store();
+    uint8_t seed[32];
+    mw_account_keys_t pp, k;
+    uint32_t id = 0, id2 = 0;
+    memset(seed, 0x52, sizeof seed);
+    CHECK_EQ_INT(mw_seed_to_keys(MW_SEED_MONERO_LEGACY, seed, 32, "old pass", &pp), MW_OK);
+    CHECK_EQ_INT(mw_wallet_create_pp("old", MW_SEED_MONERO_LEGACY, seed, 32, 0, "old pass",
+                                     &pp, &id), MW_OK);
+    memset(seed, 0x53, sizeof seed);
+    CHECK_EQ_INT(mw_wallet_create_pp("old2", MW_SEED_MONERO_LEGACY, seed, 32, 0, "", NULL,
+                                     &id2), MW_OK);
+    CHECK_EQ_INT(mw_host_wallet_make_old(id, &pp), MW_OK);
+    CHECK_EQ_INT(mw_host_wallet_make_old(id2, NULL), MW_OK);
+    CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
+    CHECK_EQ_INT(mw_wallet_pp_state(id), MW_PP_SET);
+    CHECK_EQ_INT(mw_wallet_get(id)->pp_rec[0], 0);
+
+    // upgrade(): the wallet without a passphrase gets its record now, the
+    // passphrase wallet keeps waiting for its passphrase.
+    CHECK_EQ_INT(mw_wallet_store_upgrade(), MW_OK);
+    CHECK_EQ_INT(mw_wallet_pp_state(id2), MW_PP_REC);
+    CHECK(mw_wallet_get(id2)->pp_rec[0] != 0);
+    CHECK_EQ_INT(mw_wallet_pp_state(id), MW_PP_SET);
+
+    // A wrong passphrase: refused by the old check, no record written.
+    CHECK_EQ_INT(mw_wallet_open_pp(id, "old pasz", &k), MW_ERR_DECRYPT);
+    CHECK_EQ_INT(mw_wallet_get(id)->pp_rec[0], 0);
+    // The right one: opened, and the record exists from now on.
+    CHECK_EQ_INT(mw_wallet_open_pp(id, "old pass", &k), MW_OK);
+    CHECK_EQ_MEM(k.pub.spend.b, pp.pub.spend.b, 32);
+    CHECK_EQ_INT(mw_wallet_pp_state(id), MW_PP_REC);
+    CHECK(mw_wallet_get(id)->pp_rec[0] != 0);
+    CHECK_EQ_INT(mw_wallet_store_init(), MW_OK);
+    CHECK_EQ_INT(mw_wallet_open_pp(id, "old pass", &k), MW_OK);
+    CHECK_EQ_MEM(k.pub.view.b, pp.pub.view.b, 32);
+    CHECK_EQ_INT(mw_wallet_open_pp(id, "old pasz", &k), MW_ERR_DECRYPT);
+    CHECK_EQ_INT(mw_wallet_delete(id), MW_OK);
+    CHECK_EQ_INT(mw_wallet_delete(id2), MW_OK);
+    mw_memzero(&k, sizeof k);
+    mw_memzero(&pp, sizeof pp);
+}
+
 int main(void)
 {
     mw_random_init();
@@ -1243,8 +1502,11 @@ int main(void)
     RUN_TEST(test_viewonly_text);
     RUN_TEST(test_ki_cache_rollback_and_full);
     RUN_TEST(test_balance_and_tx_list);
+    RUN_TEST(test_tx_keys_and_snapshot);
+    RUN_TEST(test_ki_all_saved);
     RUN_TEST(test_ki_container_v1_read);
     RUN_TEST(test_delete_wipes_cache);
+    RUN_TEST(test_pp_record_migration);
 
     mw_bpp_free();
     return mw_test_summary();

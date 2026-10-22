@@ -66,8 +66,9 @@ extern "C" {
 #define MW_NVS_NAMESPACE      "mwallet"
 #define MW_SETTINGS_BLOB_KEY  "settings"
 // v2 (task2): usb_mode is gone, kb_layout and debug_log were added.
-#define MW_SETTINGS_VERSION   2
-#define MW_SETTINGS_BLOB_LEN  40
+#define MW_SETTINGS_VERSION   3
+#define MW_SETTINGS_V2_LEN    40   // older firmware: no options byte
+#define MW_SETTINGS_BLOB_LEN  44
 
 // ---------------------------------------------------------------------------
 // eFuse key block
@@ -371,6 +372,33 @@ bool fuse_settled(const lock_fuse_t& l) {
 }  // namespace
 
 // Locked: every field settled (above).
+extern "C" bool mw_secure_boot_digest(char hex[65])
+{
+    hex[0] = 0;
+    if (!esp_secure_boot_enabled()) return false;
+    // The first non-revoked key block whose purpose is a secure boot digest.
+    for (int i = 0; i < 6; ++i) {
+        const esp_efuse_block_t blk = (esp_efuse_block_t)(EFUSE_BLK_KEY0 + i);
+        const esp_efuse_purpose_t p = esp_efuse_get_key_purpose(blk);
+        unsigned n;
+        if (p == ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST0)      n = 0;
+        else if (p == ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST1) n = 1;
+        else if (p == ESP_EFUSE_KEY_PURPOSE_SECURE_BOOT_DIGEST2) n = 2;
+        else continue;
+        if (esp_efuse_get_digest_revoke(n)) continue;
+        uint8_t d[32];
+        if (esp_efuse_read_block(blk, d, 0, 256) != ESP_OK) return false;
+        static const char HX[] = "0123456789abcdef";
+        for (int k = 0; k < 32; ++k) {
+            hex[2 * k]     = HX[d[k] >> 4];
+            hex[2 * k + 1] = HX[d[k] & 15];
+        }
+        hex[64] = 0;
+        return true;
+    }
+    return false;
+}
+
 extern "C" bool mw_secure_flashing_locked(void)
 {
     for (const lock_fuse_t& l : kLockFuses)
@@ -640,6 +668,7 @@ static void settings_defaults(mw_settings_t* s)
     s->touch_calibrated = false;
     s->network          = MW_DEFAULT_NETWORK;
     s->debug_log        = false;
+    s->game             = false;
     s->version          = MW_SETTINGS_VERSION;
 }
 
@@ -671,14 +700,17 @@ static void settings_serialize(const mw_settings_t* s, uint8_t b[MW_SETTINGS_BLO
     b[11] = (uint8_t)s->network;
     for (int i = 0; i < 6; i++) put_i32(b + 12 + 4 * i, s->touch_calib[i]);
     b[36] = s->debug_log ? 1u : 0u;
-    memcpy(b + 37, s->touch_cal_tag, 3);   // touch calibration tag
+    memcpy(b + 37, s->touch_cal_tag, 3);
+    b[40] = s->game ? 1u : 0u;              // v3: options (bit 0: game)   // touch calibration tag
 }
 
 static mw_err_t settings_deserialize(mw_settings_t* s, const uint8_t* b, size_t len)
 {
-    if (len != MW_SETTINGS_BLOB_LEN) return MW_ERR_FORMAT;
+    // v3 (44 bytes) or the v2 blob of older firmware (40 bytes, no options).
+    const bool v2 = (len == MW_SETTINGS_V2_LEN);
+    if (len != MW_SETTINGS_BLOB_LEN && !v2) return MW_ERR_FORMAT;
     if (b[0] != 'M' || b[1] != 'W' || b[2] != 'S' || b[3] != 'T') return MW_ERR_MAGIC;
-    if (b[4] != MW_SETTINGS_VERSION) return MW_ERR_VERSION;
+    if (b[4] != (v2 ? 2u : (uint8_t)MW_SETTINGS_VERSION)) return MW_ERR_VERSION;
     memset(s, 0, sizeof *s);
     s->keyboard         = (b[5] == (uint8_t)KEYBOARD_FULL) ? KEYBOARD_FULL : KEYBOARD_SCROLL;
     s->kb_layout        = (b[6] == (uint8_t)KB_LAYOUT_ABC) ? KB_LAYOUT_ABC : KB_LAYOUT_QWERTY;
@@ -689,6 +721,8 @@ static mw_err_t settings_deserialize(mw_settings_t* s, const uint8_t* b, size_t 
     for (int i = 0; i < 6; i++) s->touch_calib[i] = get_i32(b + 12 + 4 * i);
     s->debug_log        = (b[36] != 0);
     memcpy(s->touch_cal_tag, b + 37, 3);
+    // Older firmware always started with the game: keep it for such a device.
+    s->game             = v2 ? true : ((b[40] & 1u) != 0);
     s->version          = MW_SETTINGS_VERSION;
     return MW_OK;
 }

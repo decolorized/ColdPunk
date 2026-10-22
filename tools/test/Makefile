@@ -42,7 +42,8 @@ CORE_SRC := $(sort $(wildcard $(SRC)/crypto/*.c) \
                    $(SRC)/hal/hal_host.c \
                    $(SRC)/hal/log.c \
                    $(wildcard $(SRC)/hal/touch_map.c) \
-                   $(wildcard $(SRC)/ui/game_model.c))
+                   $(wildcard $(SRC)/ui/game_model.c) \
+                   $(wildcard $(SRC)/ui/keyboard_nav.c))
 
 CORE_OBJ := $(patsubst $(ROOT)/%.c,$(BUILD)/%.o,$(CORE_SRC))
 

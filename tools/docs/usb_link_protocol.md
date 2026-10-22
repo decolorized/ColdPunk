@@ -26,13 +26,18 @@ Boot (task2 п. 3). Недоступный транспорт просто не 
 
 | USB Mode | CDC On Boot | `Serial` = | Serial-линк | HID | Консоль UART0 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| USB-OTG (TinyUSB) | Enabled | USB CDC | да | да | да (Serial0) |
-| USB-OTG (TinyUSB) | Disabled | UART0 | да, по UART0 | да | нет — UART0 занят протоколом |
+| USB-OTG (TinyUSB) | Enabled | USB CDC ядра | да | да | да (Serial0) |
+| USB-OTG (TinyUSB) | Disabled | UART0 | да, по **своему** USB CDC (0.3.5) | да | да (Serial0) |
 | Hardware CDC and JTAG | Enabled | USB-Serial/JTAG | да | нет | да (Serial0) |
 | Hardware CDC and JTAG | Disabled | UART0 | да, по UART0 | нет | нет |
 
-Рекомендуемая связка для ES3C28P: **USB-OTG + CDC On Boot Enabled** — COM-порт
-и HID на одном кабеле, консоль на UART0 (GPIO43/44, `MW_SERIAL_USE_UART0`).
+Рекомендуемая связка (0.3.5, профили `sketch.yaml`): **USB-OTG + CDC On Boot
+Disabled**. До пароля на USB нет ничего; после входа `mw_usb_link_init()`
+запускает USB с VID/PID и строками устройства («Monero» / «Cold Wallet»):
+HID и собственный CDC-порт (`USBCDC` в `usb_link_arduino.cpp`) на одном
+кабеле, консоль на UART0 (GPIO43/44). С CDC On Boot Enabled ядро поднимает
+USB ещё до `setup()` под именем и PID Espressif — так было в сборках до
+0.3.5 («USB Espressif» вместо «Monero Cold Wallet» в диспетчере устройств).
 
 Кроме настроек меню, транспорт можно исключить при сборке: `MW_USE_SERIAL` и
 `MW_USE_HID` в `src/config/app_config.h` (подробно — `build_arduino.md` §2a).
@@ -270,7 +275,8 @@ STATUS раз в секунду).
 - При загрузке в лог пишутся причина сброса и свободная внутренняя куча
   (всего и наибольший блок).
 - PID `0x4024` (CDC + HID), `0x4025` (только CDC); при CDC On Boot ядро само
-  задаёт PID `0x1001` — `mwlink.py` знает все три.
+  задаёт PID `0x1001` — `mwlink.py` знает все три. В сборках 0.3.5 (CDC On
+  Boot Disabled) CDC-порт и HID появляются только после ввода пароля.
 
 ## 9. Программа на ПК
 

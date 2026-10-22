@@ -45,6 +45,10 @@ extern "C" {
 #define MW_KI_B_AMOUNT    0x01   // `amount` is known
 #define MW_KI_B_SPENT     0x02   // spent: by the last outputs export, or by a
                                  // transaction this device signed since
+#define MW_KI_B_STALE     0x04   // 0.3.5: amount unknown and absent from a full
+                                 // outputs export - not the online wallet's;
+                                 // left out of the balance (cleared by any
+                                 // later record with an amount)
 
 typedef struct {
     mw_pubkey_t   out_pub;       // the output's one-time public key
@@ -56,6 +60,18 @@ typedef struct {
     // without only adds MW_KI_B_SPENT (an input of a signed transaction).
     uint64_t      amount;        // piconero
     uint8_t       bal;           // MW_KI_B_*
+    // 0.3.5, from the outputs export: the transaction the output came in
+    // (its public key R; all zero = not known, e.g. change of a transaction
+    // signed here before it was exported) and the output's global index,
+    // which grows with the block height. Kept when a later record lacks them.
+    mw_pubkey_t   tx_pub;
+    uint64_t      gidx;
+    // 0.3.5, for "all saved key images": the output's index in the online
+    // wallet's transfers PLUS ONE (0 = not known) and the key image's
+    // signature (c || r) as the key image file carries it. Set by every
+    // outputs export; a later output at the same index takes it over.
+    uint32_t      tidx1;
+    uint8_t       sig[64];
 } mw_ki_entry_t;
 
 // A transaction this device signed (v0.3), for the list next to the balance.
@@ -115,6 +131,26 @@ bool     mw_ki_cache_dirty(void);
 // outputs whose amount is not known (synchronised before 0.3, or with the
 // estimate off). MW_ERR_NOT_SUPPORTED when the cache is closed.
 mw_err_t mw_ki_cache_balance(uint64_t* total, uint32_t* outputs, uint32_t* unknown);
+// 0.3.5: "all saved key images". Writes the key image records (image(32) ||
+// c(32) || r(32), the key image file's layout) of the online wallet's
+// transfers start..offset-1 from the cache: the longest run of consecutive
+// indices that ends at offset-1, at most `max` records. *start gets its first
+// index (= offset when there is none). Returns the number written; `out`
+// needs 96 bytes each (NULL: count only).
+uint32_t mw_ki_cache_run_before(uint32_t offset, uint32_t max, uint8_t* out,
+                                uint32_t* start);
+
+// 0.3.5: an outputs export from the hot wallet's first transfer (offset 0)
+// lists every output it has. begin() before its records are put, end()
+// after: entries it did not list and whose amount is unknown are marked
+// MW_KI_B_STALE. Returns how many were marked.
+void     mw_ki_cache_snapshot_begin(void);
+uint32_t mw_ki_cache_snapshot_end(void);
+
+// Entry i of the open cache (0 .. mw_ki_cache_count()-1), in the order they
+// were added. false when out of range or closed.
+bool     mw_ki_cache_get(uint32_t i, mw_ki_entry_t* out);
+
 // The signed transactions of the open cache, newest last.
 uint32_t mw_ki_cache_tx_count(void);
 bool     mw_ki_cache_tx_get(uint32_t i, mw_ki_tx_t* out);

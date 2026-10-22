@@ -221,6 +221,10 @@ The crypto task runs `mw_shell_run()` (`flows.cpp`); every screen below is a
 page run from it. The root screen is only a neutral background
 (`screen_main.cpp`), it never names the wallet.
 
+Minesweeper is shown only with Settings → **Minesweeper at start** on (off by
+default, on for settings saved by firmware before 0.3.4); off, the loop goes
+straight to the password screen.
+
 ```
  power on / lock / autolock
         │
@@ -449,7 +453,7 @@ wallet menu reacts to what the PC sends.
 
 | PC sends | Device shows | Result for the PC |
 | :--- | :--- | :--- |
-| outputs export | "Сгенерировать key images для N выходов? (уже известны: M)" → progress | key image export |
+| outputs export | "Сгенерировать key images для N выходов? (уже известны: M)" with the checkbox "Все сохранённые key images" (always shown, off) → progress; with the checkbox a message: how many saved key images were added (outputs #a-#b), none before #offset, or the file is already complete | key image export |
 | unsigned tx set | per transaction the review screen of 5.7 (and a warning first when inputs were spent by an earlier signed tx) → progress | signed tx set |
 | REQ address | "ПК запрашивает адрес кошелька. Отправить?" | JSON with the address |
 | REQ view-only | the view key warning + a typed four-digit code | JSON with the address and the private view key |
@@ -867,7 +871,7 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 ## 12. v8 changes (2026-10-09)
 
 ### 12.1 eFuse key first
-- Right after the game gesture and before the password, a chip without the wallet key shows "First start..." and the two provisioning confirmations, which name the block (`BLOCK_KEY%d`). Declining returns to the game. With no free key block the device lists the blocks and goes back to the game.
+- Right after the game gesture and before the password, a chip without the wallet key shows "First start..." and the two provisioning confirmations, which name the block (`BLOCK_KEY%d`). Declining goes back to the start (the game, or the password screen when the game is off). With no free key block the device lists the blocks and goes back to the start.
 - The key goes to the highest free block (KEY5 down); an existing HMAC_UP read-protected block (e.g. KEY0 from older firmware) is used as it is.
 - Settings: "eFuse key blocks  KEYn" opens a read-only list `KEYi * PURPOSE R` (`*` the wallet key, `R` read-protected).
 
@@ -917,6 +921,19 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - **Balance tracking: On/Off** (per account). Off asks "Switch balance tracking off? …" and erases the amounts, the lists and the typed-in balances.
 - **Lock firmware updates** (shows "On" once burned): three warnings (Next / Cancel), the confirmation code, the account password, then "Done. Firmware updates and debugging are locked." or "eFuses not burned: …".
 - Add account: the capacity is 16..24 per chip.
+
+### 14.6 v0.3.4
+- Settings: **Minesweeper at start: Off/On** (device-wide, kept in the settings blob, version 3: one options byte; a version 2 blob of older firmware reads as On). Choosing On shows the confirm page "Minesweeper at start" with the gesture ("The device will start as a Minesweeper game. To reach the password screen: 1. Step on a mine. 2. Tap the exploded mine 3 times within 2 seconds (buttons: select it and press SELECT 3 times). Remember this…") and the buttons Cancel / **Turn on**; only Turn on switches it on. Off is applied at once.
+- Off: power-on, lock and autolock go straight to the password screen; Cancel on the password screen shows it again.
+
+### 14.7 v0.3.5
+- Wallet list: no passphrase mark ("*" and its footnote are gone). Selecting a wallet opens it without a passphrase at once (no passphrase prompt, no hint).
+- Wallet menu: **Open passphrase** in every wallet of a session opened without a passphrase (icon keyboard, after "View key to SD card"). It shows the hint if one is set, asks for the passphrase (the open-passphrase screen), runs a progress page "Unlocking" (~1 s and more), then either closes the session and reopens the same wallet with its passphrase or shows "Wrong passphrase" - the same for every wallet. **Passphrase hint** is in every wallet's menu.
+- Wallet menu subtitle: "With passphrase" only in a passphrase session; nothing in the plain one (then only "view-only" for such wallets and the link state).
+- Balance → **Transactions** (was "Signed transactions"): a scrollable text page (finger; up/down three lines, left/right a page): legend; "Received (newest first)" groups `+amount / N out., spent, change *` or `? transaction not known`; "* Signed on this device" lines; "? Spent elsewhere" sum; "? Amount unknown: N out.".
+- After a key image export from a partial outputs file, with outputs of unknown amount left: a message telling to export ALL outputs (`export_outputs all`).
+- Outputs export confirmation: an always-visible checkbox **All saved key images** (`mw_ui_confirm_check`); the key image file then starts with the cache's key images of the transfers right before the outputs file (by the transfer index remembered from earlier exports), and a message reports what was added.
+- Settings → About: "SB key xxxxxxxx...xxxxxxxx" on a device with secure boot.
 
 ### 14.4 v0.3.1
 - Storage update: the files are read into PSRAM (progress), then the confirmation-code screen "The storage of the previous firmware is converted once (N files, X KB). Do NOT switch off for about a minute…"; declining: "The old storage format stays…". A failure before: "The storage was not updated: <error> (N files, X KB)…". A cut during the write-back: "The storage conversion was interrupted: the wallets are lost…" at the next start.

@@ -93,9 +93,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Built without the serial transport (MW_USE_SERIAL 0): UART0 is free in
-// either USB setting, so it always carries the console.
-#if (defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)) || !MW_USE_SERIAL
+// UART0 carries the console unless the serial transport owns it, which is
+// only the case without TinyUSB and without "CDC On Boot" (with TinyUSB the
+// link has its own USB CDC port, usb_link_arduino.cpp).
+#if (defined(ARDUINO_USB_CDC_ON_BOOT) && (ARDUINO_USB_CDC_ON_BOOT == 1)) || !MW_USE_SERIAL || \
+    (defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0))
 #  define MW_UART_CONSOLE 1
 #else
 #  define MW_UART_CONSOLE 0
@@ -410,6 +412,8 @@ int mw_battery_percent(void)
 #endif
 }
 
+extern "C" bool mw_usb_link_host_open(void);     // usb_link_arduino.cpp
+
 bool mw_usb_connected(void)
 {
 #if USB_VBUS_DET_PIN >= 0
@@ -420,6 +424,8 @@ bool mw_usb_connected(void)
     // opens the port.  Not a VBUS sense, but it answers the question the UI
     // actually asks: "is a computer talking to me?"
     return (bool)Serial;
+#elif defined(ARDUINO_USB_MODE) && (ARDUINO_USB_MODE == 0)
+    return mw_usb_link_host_open();     // our CDC port, after the unlock
 #else
     return false;
 #endif

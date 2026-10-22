@@ -2,7 +2,7 @@
 #ifndef MW_APP_CONFIG_H
 #define MW_APP_CONFIG_H
 
-#define MW_FIRMWARE_VERSION      "0.3.3"
+#define MW_FIRMWARE_VERSION      "0.3.5"
 #define MW_FIRMWARE_NAME         "Monero Cold Wallet"
 
 // TZ 7.1. Per user (multi-user, v9): every user has a directory of its own.
@@ -76,16 +76,19 @@
 // 0 = left out entirely (no code, nothing listens). Change them here or pass
 // -DMW_USE_SERIAL=0 etc. as a build flag. At least one must stay on.
 //
-//   MW_USE_SERIAL  mwlink over `Serial`: the USB CDC port ("USB CDC On Boot:
-//                  Enabled") or UART0 (disabled). Used by tools/mwlink.
+//   MW_USE_SERIAL  mwlink over a USB CDC port: with TinyUSB and "USB CDC On
+//                  Boot: Disabled" (the profiles) the link's own port,
+//                  started after the password (0.3.5); with CDC On Boot the
+//                  core's `Serial`; without TinyUSB UART0. For tools/mwlink
+//                  --serial.
 //   MW_USE_HID     mwlink over USB HID (needs "USB Mode: USB-OTG").
 //                  Used by MoneroPunkSigner.
 //   MW_USE_SD      microSD file exchange, on boards whose header has
 //                  HAS_SD 1 (ES3C28P, Touch-LCD-2). 0 also gives the
 //                  display its own SPI bus back on shared-bus boards.
 //
-// With MW_USE_SERIAL 0, also set "USB CDC On Boot: Disabled" if no COM port
-// should appear at all; UART0 then carries the text log only.
+// With MW_USE_SERIAL 0 (the default) and "USB CDC On Boot: Disabled" no COM
+// port appears at all; UART0 carries the text log.
 // ---------------------------------------------------------------------------
 #ifndef MW_USE_SERIAL
 #define MW_USE_SERIAL 0

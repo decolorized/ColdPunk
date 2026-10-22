@@ -10,12 +10,17 @@
 //                  account(32) || count(u32) || count * entry
 //     account   := keccak256("mw.ki.account" || spend_pub || view_pub)
 //     kind 0    key images; entry := out_pub(32) || image(32) || major(u32) ||
-//               minor(u32) || flags(1) || amount(u64) || bal(1)
-//               (version 1, before 0.3: without amount and bal)
+//               minor(u32) || flags(1) || amount(u64) || bal(1) ||
+//               tx_pub(32) || global index(u64) || transfer index + 1(u32) ||
+//               key image signature(64)
+//               (version 3, 0.3.5 before "all saved key images": without
+//               the transfer index and the signature;
+//               version 2, 0.3..0.3.4: without tx_pub and the index;
+//               version 1, before 0.3: without amount and bal either)
 //     kind 1    signed transactions (v0.3); entry := seq(u32) || sent(u64) ||
 //               fee(u64) || change(u64) || recipients(1) || own only(1) ||
 //               0(2) || address start(16)
-//   Version 1 containers are read and written back as version 2.
+//   Version 1 and 2 containers are read and written back as version 3.
 //
 // The file is named "c" + the 24 hex digits of the user's directory name
 // (wallet_store.h) and is at least 64 KiB; it grows in 64 KiB steps when the
@@ -56,12 +61,14 @@
 #endif
 
 #define KS_MAGIC      "MWKS"
-#define KS_VERSION    2
+#define KS_VERSION    4
 #define KS_LABEL      "mw.kic.v1"
 #define KS_HDR        32
 #define KS_SEC_HDR    (4 + 1 + 3 + 32 + 4)
 #define KI_ENTRY      (32 + 32 + 4 + 4 + 1)       // version 1, and the old files
 #define KI_ENTRY2     (KI_ENTRY + 8 + 1)
+#define KI_ENTRY3     (KI_ENTRY2 + 32 + 8)
+#define KI_ENTRY4     (KI_ENTRY3 + 4 + 64)
 #define TX_ENTRY      48
 #define SEC_KI        0
 #define SEC_TX        1
@@ -174,6 +181,39 @@ static void get_entry2(const uint8_t* p, mw_ki_entry_t* e)
     get_entry(p, e);
     e->amount = get_u64(p + 73);
     e->bal = p[81];
+}
+
+// Version 3 entries (0.3.5).
+static void put_entry3(uint8_t* p, const mw_ki_entry_t* e)
+{
+    put_entry2(p, e);
+    memcpy(p + 82, e->tx_pub.b, 32);
+    put_u64(p + 114, e->gidx);
+}
+static void put_entry4(uint8_t* p, const mw_ki_entry_t* e)
+{
+    put_entry3(p, e);
+    put_u32(p + 122, e->tidx1);
+    memcpy(p + 126, e->sig, 64);
+}
+static void get_entry3(const uint8_t* p, mw_ki_entry_t* e)
+{
+    get_entry2(p, e);
+    memcpy(e->tx_pub.b, p + 82, 32);
+    e->gidx = get_u64(p + 114);
+}
+static void get_entry4(const uint8_t* p, mw_ki_entry_t* e)
+{
+    get_entry3(p, e);
+    e->tidx1 = get_u32(p + 122);
+    memcpy(e->sig, p + 126, 64);
+}
+static void get_entry_v(uint8_t version, const uint8_t* p, mw_ki_entry_t* e)
+{
+    if (version == 1)      get_entry(p, e);
+    else if (version == 2) get_entry2(p, e);
+    else if (version == 3) get_entry3(p, e);
+    else                   get_entry4(p, e);
 }
 
 static void put_tx(uint8_t* p, const mw_ki_tx_t* t)
@@ -303,7 +343,8 @@ static mw_err_t store_read(const char* name, store_t* s)
 // kind this firmware does not know.
 static size_t entry_len(uint8_t version, uint8_t kind)
 {
-    if (kind == SEC_KI) return version == 1 ? KI_ENTRY : KI_ENTRY2;
+    if (kind == SEC_KI) return version == 1 ? KI_ENTRY : version == 2 ? KI_ENTRY2 :
+                                version == 3 ? KI_ENTRY3 : KI_ENTRY4;
     if (kind == SEC_TX && version >= 2) return TX_ENTRY;
     return 0;
 }
@@ -347,8 +388,8 @@ typedef struct {
     bool     strip;          // drop amounts and transaction lists (estimate off)
 } copy_ctx_t;
 
-// Copies a section into a version-2 container (a version-1 one is widened;
-// with `strip` the amounts go and transaction lists are left out).
+// Copies a section into a version-3 container (older ones are widened; with
+// `strip` the amounts go and transaction lists are left out).
 static bool copy_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t kind,
                      uint32_t count, size_t len, uint8_t version, void* ctx)
 {
@@ -356,9 +397,9 @@ static bool copy_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t k
     if (c->skip.active && id == c->skip.id &&
         (c->skip.variant == 0xFF || c->skip.variant == variant)) return true;
     if (kind == SEC_TX && c->strip) return true;
-    if (kind == SEC_KI && (version == 1 || c->strip)) {
+    if (kind == SEC_KI && (version != KS_VERSION || c->strip)) {
         const size_t el = entry_len(version, SEC_KI);
-        const size_t out_len = KS_SEC_HDR + (size_t)count * KI_ENTRY2;
+        const size_t out_len = KS_SEC_HDR + (size_t)count * KI_ENTRY4;
         if (!c->measure) {
             uint8_t* o = c->out + c->off;
             memcpy(o, sec, KS_SEC_HDR);
@@ -366,10 +407,9 @@ static bool copy_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t k
             o[6] = o[7] = 0;
             for (uint32_t i = 0; i < count; i++) {
                 mw_ki_entry_t e;
-                if (version == 1) get_entry(sec + KS_SEC_HDR + i * el, &e);
-                else              get_entry2(sec + KS_SEC_HDR + i * el, &e);
+                get_entry_v(version, sec + KS_SEC_HDR + i * el, &e);
                 if (c->strip) { e.amount = 0; e.bal = 0; }
-                put_entry2(o + KS_SEC_HDR + i * KI_ENTRY2, &e);
+                put_entry4(o + KS_SEC_HDR + i * KI_ENTRY4, &e);
                 mw_memzero(&e, sizeof e);
             }
         }
@@ -395,7 +435,7 @@ static mw_err_t store_write_x(const char* name, const store_t* old, skip_t skip,
         MW_LOGE("kicache", "key image cache container damaged: partly dropped");
     }
     size_t payload = m.off - KS_HDR;
-    if (add && g.count) payload += KS_SEC_HDR + (size_t)g.count * KI_ENTRY2;
+    if (add && g.count) payload += KS_SEC_HDR + (size_t)g.count * KI_ENTRY4;
     if (add && g.ntx) payload += KS_SEC_HDR + (size_t)g.ntx * TX_ENTRY;
     const size_t size = file_size_for(payload);
     const size_t pl = size - KS_SEAL_HDR;
@@ -429,8 +469,8 @@ static mw_err_t store_write_x(const char* name, const store_t* old, skip_t skip,
         memcpy(p + 8, g.account, 32);
         put_u32(p + 40, g.count);
         p += KS_SEC_HDR;
-        for (uint32_t i = 0; i < g.count; i++, p += KI_ENTRY2) put_entry2(p, &g.e[i]);
-        c.off += KS_SEC_HDR + (size_t)g.count * KI_ENTRY2;
+        for (uint32_t i = 0; i < g.count; i++, p += KI_ENTRY4) put_entry4(p, &g.e[i]);
+        c.off += KS_SEC_HDR + (size_t)g.count * KI_ENTRY4;
         c.sections++;
     }
     if (add && g.ntx) {
@@ -592,10 +632,7 @@ static bool load_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t k
         return true;
     }
     const size_t el = entry_len(version, SEC_KI);
-    for (uint32_t i = 0; i < count; i++, p += el) {
-        if (version == 1) get_entry(p, &g.e[i]);
-        else              get_entry2(p, &g.e[i]);
-    }
+    for (uint32_t i = 0; i < count; i++, p += el) get_entry_v(version, p, &g.e[i]);
     g.count = count;
     return true;
 }
@@ -695,6 +732,46 @@ uint32_t mw_ki_cache_known_indices(uint32_t acct, uint32_t* majors, uint32_t* mi
     return n;
 }
 
+// RAM only, between snapshot_begin() and snapshot_end(): not listed yet.
+#define KI_B_UNSEEN 0x80
+
+void mw_ki_cache_snapshot_begin(void)
+{
+    if (!g.open) return;
+    for (uint32_t i = 0; i < g.count; i++) g.e[i].bal |= KI_B_UNSEEN;
+}
+
+uint32_t mw_ki_cache_snapshot_end(void)
+{
+    uint32_t n = 0;
+    if (!g.open) return 0;
+    for (uint32_t i = 0; i < g.count; i++) {
+        mw_ki_entry_t* x = &g.e[i];
+        if (!(x->bal & KI_B_UNSEEN)) continue;
+        x->bal &= (uint8_t)~KI_B_UNSEEN;
+        if (!(x->bal & MW_KI_B_AMOUNT) && !(x->flags & MW_KI_F_SPENT) &&
+            !(x->bal & (MW_KI_B_SPENT | MW_KI_B_STALE))) {
+            x->bal |= MW_KI_B_STALE;
+            g.dirty = true;
+            n++;
+        }
+    }
+    return n;
+}
+
+// A transfer index belongs to one output: an output now listed at `tidx1`
+// takes it from any other entry (the online wallet was rescanned, or it is
+// another wallet that numbers its transfers differently).
+static void tidx_release(uint32_t tidx1, uint32_t keep)
+{
+    for (uint32_t i = 0; i < g.count; i++) {
+        if (i != keep && g.e[i].tidx1 == tidx1) {
+            g.e[i].tidx1 = 0;
+            mw_memzero(g.e[i].sig, 64);
+        }
+    }
+}
+
 mw_err_t mw_ki_cache_put(const mw_ki_entry_t* in)
 {
     if (!g.open) return MW_ERR_NOT_SUPPORTED;
@@ -704,6 +781,19 @@ mw_err_t mw_ki_cache_put(const mw_ki_entry_t* in)
     for (uint32_t i = 0; i < g.count; i++) {
         mw_ki_entry_t* x = &g.e[i];
         if (memcmp(x->out_pub.b, e.out_pub.b, 32) == 0) {
+            x->bal &= (uint8_t)~KI_B_UNSEEN;             // listed by a snapshot
+            if (!mw_ct_is_zero(e.tx_pub.b, 32) &&
+                (memcmp(x->tx_pub.b, e.tx_pub.b, 32) != 0 || x->gidx != e.gidx)) {
+                x->tx_pub = e.tx_pub;
+                x->gidx = e.gidx;
+                g.dirty = true;
+            }
+            if (e.tidx1 && (x->tidx1 != e.tidx1 || memcmp(x->sig, e.sig, 64) != 0)) {
+                if (x->tidx1 != e.tidx1) tidx_release(e.tidx1, i);   // only on a change
+                x->tidx1 = e.tidx1;
+                memcpy(x->sig, e.sig, 64);
+                g.dirty = true;
+            }
             if (memcmp(x->image.b, e.image.b, 32) != 0 || x->major != e.major ||
                 x->minor != e.minor) {
                 x->image = e.image;                  // recomputed: trust the new one
@@ -729,9 +819,44 @@ mw_err_t mw_ki_cache_put(const mw_ki_entry_t* in)
         }
     }
     if (g.count == 0xFFFFFFFFu || !grow(g.count + 1)) return MW_ERR_MEMORY;
+    if (e.tidx1) tidx_release(e.tidx1, g.count);
     g.e[g.count++] = e;
     g.dirty = true;
     return MW_OK;
+}
+
+uint32_t mw_ki_cache_run_before(uint32_t offset, uint32_t max, uint8_t* out,
+                                uint32_t* start)
+{
+    if (start) *start = offset;
+    if (!g.open || offset == 0 || max == 0) return 0;
+    // A run can be no longer than the cache: map only the window
+    // [offset - w, offset), index -> entry, in one pass.
+    uint32_t w = max < offset ? max : offset;
+    if (w > g.count) w = g.count;
+    if (w == 0) return 0;
+    const uint32_t base = offset - w;
+    const size_t bytes = (size_t)w * sizeof(uint32_t);
+    uint32_t* pos = (uint32_t*)ki_alloc(bytes);
+    if (!pos) return 0;
+    memset(pos, 0xFF, bytes);
+    for (uint32_t i = 0; i < g.count; i++) {
+        const uint32_t t = g.e[i].tidx1;
+        if (t > base && t <= offset && !mw_ct_is_zero(g.e[i].sig, 64)) pos[t - 1 - base] = i;
+    }
+    uint32_t n = 0;
+    while (n < w && pos[w - 1 - n] != 0xFFFFFFFFu) n++;
+    const uint32_t first = offset - n;
+    if (out) {
+        for (uint32_t k = 0; k < n; k++) {
+            const mw_ki_entry_t* x = &g.e[pos[w - n + k]];
+            memcpy(out + (size_t)k * 96, x->image.b, 32);
+            memcpy(out + (size_t)k * 96 + 32, x->sig, 64);
+        }
+    }
+    ki_free(pos, bytes);
+    if (start) *start = first;
+    return n;
 }
 
 mw_err_t mw_ki_cache_balance(uint64_t* total, uint32_t* outputs, uint32_t* unknown)
@@ -742,7 +867,7 @@ mw_err_t mw_ki_cache_balance(uint64_t* total, uint32_t* outputs, uint32_t* unkno
     for (uint32_t i = 0; i < g.count; i++) {
         const mw_ki_entry_t* x = &g.e[i];
         if (!(x->bal & MW_KI_B_AMOUNT)) {
-            if (!(x->flags & MW_KI_F_SPENT) && !(x->bal & MW_KI_B_SPENT)) u++;
+            if (!(x->flags & MW_KI_F_SPENT) && !(x->bal & (MW_KI_B_SPENT | MW_KI_B_STALE))) u++;
             continue;
         }
         if (x->bal & MW_KI_B_SPENT) continue;
@@ -756,6 +881,14 @@ mw_err_t mw_ki_cache_balance(uint64_t* total, uint32_t* outputs, uint32_t* unkno
 }
 
 uint32_t mw_ki_cache_tx_count(void) { return g.open ? g.ntx : 0; }
+
+bool mw_ki_cache_get(uint32_t i, mw_ki_entry_t* out)
+{
+    if (!g.open || !out || i >= g.count) return false;
+    *out = g.e[i];
+    out->bal &= (uint8_t)~KI_B_UNSEEN;
+    return true;
+}
 
 bool mw_ki_cache_tx_get(uint32_t i, mw_ki_tx_t* out)
 {

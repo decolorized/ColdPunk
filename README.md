@@ -145,7 +145,10 @@ explicit confirmation on the device screen. The PC program is only a courier.
   (`HMAC-SHA512(trng, dice)`): weak dice cannot make the seed weaker than the
   TRNG alone.
 - Optional **passphrase** (Feather / Monero "seed offset"). One phrase opens two
-  wallets: with and without the passphrase.
+  wallets: with and without the passphrase. A wallet always opens **without**
+  it; the passphrase wallet is reached through **Open passphrase** in the
+  wallet's menu - which every wallet has, so nothing shows which one has a
+  passphrase (see [Passphrases](#passphrases-and-seed-formats)).
 - Restores **Cake Wallet / Cupcake** polyseeds whose phrase is encrypted with
   the passphrase (polyseed "encrypted" flag). Detected automatically from the
   phrase. New wallets are always created in the Feather format.
@@ -155,6 +158,11 @@ explicit confirmation on the device screen. The PC program is only a courier.
 **Operations**
 
 - **Key image sync**: Feather outputs export → key images, with a progress bar.
+  An export of **all** outputs (`export_outputs all` in monero-wallet-cli)
+  also tells the device which old outputs are no longer the wallet's.
+  The **All saved key images** checkbox on the confirmation adds the key
+  images of earlier outputs the device already gave out (by their transfer
+  number in the PC wallet) in front of a partial export.
 - **Transaction signing**: CLSAG ring signatures and Bulletproofs+ range proofs
   computed on the device. Up to 4 transactions per Feather transfer.
 - The signing screen shows amount, fee, change, inputs and outputs, and the
@@ -178,7 +186,9 @@ explicit confirmation on the device screen. The PC program is only a courier.
 
 **Device**
 
-- Disguised as **Minesweeper** at power-on and after every lock.
+- Optional disguise: with **Settings → Minesweeper at start** on, the device
+  shows a Minesweeper game at power-on and after every lock and opens the
+  password screen only after a secret gesture. Off by default.
 - **Account password** (always 8–64 characters; weak ones draw a warning): 200 000
   PBKDF2-HMAC-SHA256 rounds on the SHA accelerator, with the chip's eFuse HMAC
   key mixed in between and at the end. The attempt
@@ -196,17 +206,22 @@ explicit confirmation on the device screen. The PC program is only a courier.
   password.
 - Per wallet: its own **network** (Mainnet / Stagenet / Testnet), **Check
   seed** (does a typed phrase match the wallet?), an estimated **balance**
-  with the list of transactions signed on the device (per account, can be
-  switched off).
+  with a **transaction list** (per account, can be switched off): everything
+  received, grouped by transaction, newest first; the transactions signed on
+  this device marked `*`; what was spent elsewhere and outputs of unknown
+  amount marked `?`.
 - **Lock firmware updates**: burns the eFuses that switch JTAG and the
   USB/UART download mode off for good (irreversible).
 - Power-loss-safe storage (**LittleFS**; FAT storage of older firmware is
   converted once, through PSRAM, after a confirmation).
-- **Passphrase hint** per wallet (optional, shown before the passphrase is
-  asked, only to its own account). Made
+- **Passphrase hint** per wallet (optional, shown on *Open passphrase*, only to
+  its own account; any wallet can have one). Made
   for showing only part of the funds under coercion; what a flash dump still
   shows is in [`tools/docs/security.md`](tools/docs/security.md) §4a.
-- **USB is enabled only after the correct password.**
+- **USB is enabled only after the correct password.** Before it nothing at all
+  appears on USB (the builds use *CDC On Boot: Disabled*); after it the
+  device enumerates as "Monero Cold Wallet" with its HID link (and, built
+  with `MW_USE_SERIAL 1`, its own CDC port), and the console stays on UART0.
 - Autolock (default 5 minutes): keys and passphrase are wiped from memory.
 - LVGL 9 user interface in **English**. Touch screens, and
   4/5/6-button boards with long-press and auto-repeat navigation.
@@ -308,7 +323,7 @@ esptool; the core and the libraries are pinned in
 prints the folder with the result:
 
 ```
-firmware/ColdPunk-0.3.3-ES3C28P/
+firmware/ColdPunk-0.3.4-ES3C28P/
   bootloader.bin  partitions.bin  boot_app0.bin  coldpunk.bin
   SHA256SUMS.txt  esptool(.exe)   flash.bat  flash.sh  README.txt
 ```
@@ -437,9 +452,18 @@ a firmware folder and `keys/` is in `.gitignore`.
    firmware in place, turns JTAG off and the ROM download mode into its secure
    variant. **Up to a minute with a dark screen - do not cut the power.** The
    wallets are kept.
+   The script asks for a name and records the device in `keys/devices.txt`.
 5. From then on update only with `flash.bat` / `flash.sh` from a newer
-   `build-secure` folder made with the same keys (signed and encrypted
-   images, written without esptool's stub). A normal build no longer boots.
+   `build-secure` folder made with the same keys. It writes **only the
+   firmware** by default (`full` also writes the bootloader, partition table
+   and otadata - it says when this folder's bootloader differs from the one
+   recorded for the device). Before writing it checks that the folder is
+   signed and encrypted with the keys in `keys/`, shows the signing key digest
+   and asks you to compare it with **Settings → About → SB key** on the
+   device. The secured chip makes esptool refuse ordinary writes ("flash
+   encryption is enabled ... could brick the device"); the images are already
+   encrypted, so the script writes them with `--force` after its own checks.
+   A normal build no longer boots.
 
 Size note: the Arduino core keeps the partition table at 0x8000, so the
 signed bootloader must fit into 32 KB. With secure boot and flash encryption
@@ -540,21 +564,33 @@ gives the same binary.
 
 ## First start
 
-1. **Hardware key.** Right after the unlock gesture, before the password, a
+1. **Hardware key.** At the first start, before the password, a
    chip without the key offers to burn a random 32-byte key into the highest
    free eFuse key block (`BLOCK_KEY5` on a fresh chip; purpose `HMAC_UP`,
    read-protected) behind two confirmation screens. **This is irreversible.**
-   The device does not work without it; declining returns to the game. Every wallet on the device
+   The device does not work without it; declining goes back to the start. Every wallet on the device
    is sealed with a key derived from it; a firmware image copied to another
    chip cannot open them. Bench provisioning with `espefuse.py` is described in
    [`tools/docs/security.md`](tools/docs/security.md) §4.
-2. **Unlock gesture.** The device starts as Minesweeper. Step on a mine, then
-   tap the exploded mine **three times within 2 seconds**.
-3. **Account password.** Choose one (entered twice). It is needed at every
+2. **Account password.** Choose one (entered twice). It is needed at every
    unlock and also protects the sealed seeds.
-4. **Create or import a wallet**, write the words on paper (they are shown
+3. **Create or import a wallet**, write the words on paper (they are shown
    only once), pass the word check and compare the address with your PC
    wallet.
+
+**Minesweeper disguise (optional).** By default the device starts straight at
+the password screen. **Settings → Minesweeper at start → On** makes it start -
+and return after every lock - as a Minesweeper game that names no wallet.
+Before the option is switched on the device shows how to get past the game:
+
+1. step on a mine (lose the game);
+2. tap the exploded mine **three times within 2 seconds** (button boards:
+   select it and press SELECT three times).
+
+Any other tap resets the count; there is no other way out of the game, so
+remember the gesture. It is a disguise, not a protection - the password is.
+Devices updated from firmware before 0.3.4, which always started with the
+game, keep it on until it is switched off.
 
 ---
 
@@ -568,6 +604,13 @@ gives the same binary.
    into the folder watched by `mwlink_gui.py`.
 3. Confirm on the device. Key images are imported automatically (or saved
    back to the folder for Feather).
+
+After importing key images the watch-only wallet knows which outputs are
+spent (the balance drops accordingly), but it lists the **outgoing
+transactions** only after it scans the blocks again knowing them: rescan
+the blockchain keeping the key images (`rescan_bc keep_ki` in
+monero-wallet-cli; in Feather and the GUI a rescan from the restore
+height). This is the Monero wallet's own behaviour, not the device's.
 
 **Signing:**
 
@@ -632,10 +675,28 @@ The full user guide (in Russian) is
 | Feather / ColdPunk polyseed, legacy 25 words | Monero seed offset: `key = sc_sub(key, cn_slow_hash(passphrase))` | optional; empty = wallet without passphrase |
 | Cake Wallet / Cupcake polyseed (encrypted flag) | decrypts the phrase (`polyseed_crypt`), no seed offset | **required**; detected automatically |
 
-The device never stores the passphrase, only a 14-byte check of the resulting
-public keys inside the sealed record, so a typo is reported as a wrong
-passphrase. For a Cake/Cupcake phrase a wrong passphrase cannot be detected:
-it simply derives another wallet, so always compare the address.
+**How a passphrase wallet is opened (0.3.5).** Selecting a wallet opens it
+without a passphrase, at once. Its menu - every wallet's menu - has **Open
+passphrase**: the same screen, about a second of work (`MW_PP_KDF_ROUNDS` =
+500 000 PBKDF2-HMAC-SHA256 rounds in 8 chunks with the chip's eFuse HMAC
+between them, then AES-256-GCM) and the same answer for every wallet. Only
+the right passphrase of a wallet that has one opens its passphrase wallet;
+anything else - and any passphrase on a wallet without one - says *Wrong
+passphrase*. The "with passphrase" mark is shown only inside that session.
+
+Every wallet has a passphrase record of the same 64 bytes in the sealed
+directory: the passphrase wallet's spend key under a key derived from the
+passphrase, or random bytes. The slow CryptoNight of the seed offset runs
+only once, when the wallet is created or imported. A passphrase is given only
+then; it cannot be added, changed or removed later (import the seed again for
+that). A guess needs this chip (the eFuse HMAC), so a flash dump cannot be
+attacked on a GPU. Wallets of firmware before 0.3.5 that have a passphrase
+are opened the old way once (CryptoNight, checked) and then get their record.
+
+A Cake/Cupcake phrase opened without its passphrase gives some other, empty
+wallet instead of an error - like any seed without its passphrase. A wrong
+passphrase for a Cake/Cupcake phrase cannot be detected at import: it simply
+derives another wallet, so always compare the address.
 
 ---
 

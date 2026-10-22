@@ -594,7 +594,7 @@ MW_TEST(test_change_interrupted_after_rekey)
 // Every user directory / decoy file, to put the file store back as it was.
 #define SNAP_MAX 48
 static char    g_snap_names[SNAP_MAX][MW_FSTORE_NAME_MAX + 1];
-static uint8_t g_snap_data[SNAP_MAX][12 * 1024];
+static uint8_t g_snap_data[SNAP_MAX][17 * 1024];   // a directory file: 16 032 bytes (0.3.5)
 static size_t  g_snap_len[SNAP_MAX];
 static int     g_snap_n;
 

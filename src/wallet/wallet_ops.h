@@ -78,6 +78,24 @@ mw_err_t mw_ops_outputs_to_keyimages(const mw_account_keys_t* keys,
                                      uint8_t* out, size_t out_cap, size_t* out_len,
                                      const mw_ops_cb_t* cb, mw_ops_error_t* er);
 
+// 0.3.5: the same, and with `all_saved` the key image file starts before the
+// outputs file: the online wallet's transfers it does not list again, whose
+// key images the cache keeps from earlier exports (longest run of
+// consecutive indices ending right before the file's offset). The online
+// wallet checks every signature against ITS transfers: a wallet that numbers
+// them differently rejects the whole file (nothing is imported).
+typedef struct {
+    uint64_t offset;      // the outputs file's first transfer
+    uint32_t start;       // the key image file's first transfer
+    uint32_t saved;       // records taken from the cache (offset - start)
+} mw_ki_saved_info_t;
+mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
+                                       const uint8_t* plain, size_t plain_len,
+                                       bool all_saved,
+                                       uint8_t* out, size_t out_cap, size_t* out_len,
+                                       mw_ki_saved_info_t* saved,
+                                       const mw_ops_cb_t* cb, mw_ops_error_t* er);
+
 // ---------------- unsigned -> signed ---------------------------------------
 typedef struct {
     uint32_t        n_txes;

@@ -488,7 +488,7 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_PP_HINT]       = "Подсказка passphrase",
     [XSTR_PP_HINT_ASK]   = "Подсказка (можно пусто)",
     [XSTR_PP_HINT_WARN]  = "Подсказку покажут перед\nвводом passphrase. Её увидит\nкаждый, кто вошёл в этот\nаккаунт: не пишите в неё\nсам passphrase.",
-    [XSTR_PP_HINT_SHOW]  = "Подсказка: %s\n\nПустое поле откроет\nкошелёк без passphrase.",
+    [XSTR_PP_HINT_SHOW]  = "Подсказка: %s",
     [XSTR_PP_HINT_RULES] = "Подсказка: до 31 символа",
     [XSTR_KI_STORAGE_FULL] = "Память устройства заполнена:\nкэш key images не сохранён.\nРезультат верный, но при\nследующей синхронизации\nвыходы придётся выгрузить\nзаново.",
     [XSTR_KI_SAVE_FAIL]  = "Кэш key images не сохранён.\nРезультат верный; при\nследующей синхронизации\nвыгрузите все выходы.",
@@ -522,7 +522,7 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_BAL_UNKNOWN]   = "Сумма %u выходов неизвестна:\nвыгрузите все выходы заново.",
     [XSTR_BAL_MANUAL]    = "%s XMR\n(введено вручную; заменится\nпри следующей синхронизации)",
     [XSTR_BAL_NONE]      = "Выходов пока нет. Обработайте\nвыгрузку выходов из Feather.",
-    [XSTR_BAL_TXS]       = "Подписанные транзакции",
+    [XSTR_BAL_TXS]       = "Транзакции",
     [XSTR_BAL_TX_NONE]   = "Подписанных транзакций нет.",
     [XSTR_BAL_TX_LINE]   = "#%u  %s XMR -> %s...\nкомиссия %s",
     [XSTR_BAL_TX_OWN]    = "#%u  себе, комиссия %s",
@@ -539,6 +539,34 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_JTAG_DONE]     = "Готово. Перепрошивка\nи отладка запрещены.",
     [XSTR_JTAG_LOCKED]   = "Перепрошивка уже запрещена.",
     [XSTR_JTAG_FAIL]     = "eFuse не прожжены: %s",
+    [XSTR_SET_GAME]      = "Сапёр при включении",
+    [XSTR_GAME_HOWTO]    = "Устройство будет включаться\nкак игра «Сапёр».\n\nКак открыть экран пароля:\n1. Наступите на мину.\n2. Нажмите на взорванную мину\n   3 раза за 2 секунды\n   (кнопками: выберите её и\n   3 раза нажмите SELECT).\n\nЗапомните это: без жеста\nэкрана пароля не будет.",
+    [XSTR_GAME_TURN_ON]  = "Включить",
+    [XSTR_WL_OPEN_PP]    = "Открыть с passphrase",
+    [XSTR_TXL_RECEIVED]  = "Получено (новые сверху)",
+    [XSTR_TXL_SENT]      = "* Подписано на устройстве",
+    [XSTR_TXL_ELSEWHERE] = "? Потрачено не здесь",
+    [XSTR_TXL_UNKNOWN]   = "? Сумма неизвестна: %u вых.",
+    [XSTR_TXL_OUTS]      = "%u вых.",
+    [XSTR_TXL_SPENT]     = "потрачено",
+    [XSTR_TXL_CHANGE]    = "сдача *",
+    [XSTR_TXL_NOTX]      = "? транзакция неизвестна",
+    [XSTR_TXL_LEGEND]    = "* - подписано этим устройством\n? - устройство знает не всё",
+    [XSTR_TXL_HINT_FULL] = "Суммы части выходов неизвестны.\n"
+                           "Выгрузите в кошельке на ПК ВСЕ\n"
+                           "outputs (monero-wallet-cli:\n"
+                           "export_outputs all FILE) и\n"
+                           "передайте устройству.",
+    [XSTR_KI_ALL_SAVED]   = "Все сохранённые key images",
+    [XSTR_KI_SAVED_FULL]  = "Файл outputs полный: все\n"
+                            "key images уже в ответе.",
+    [XSTR_KI_SAVED_NONE]  = "Сохранённых key images перед\n"
+                            "выходом #%u нет: отправлены\n"
+                            "только новые. Для всех нужен\n"
+                            "полный экспорт outputs.",
+    [XSTR_KI_SAVED_ADDED] = "Добавлено %u сохранённых\n"
+                            "key images (выходы #%u-#%u).\n"
+                            "Выходы до #%u в файл не вошли.",
 };
 
 static const char* const X_EN[XSTR_COUNT] = {
@@ -860,7 +888,7 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_PP_HINT]       = "Passphrase hint",
     [XSTR_PP_HINT_ASK]   = "Hint (may be empty)",
     [XSTR_PP_HINT_WARN]  = "The hint is shown before the\npassphrase is asked. Anyone\nwho opens this account sees\nit: never write the\npassphrase itself.",
-    [XSTR_PP_HINT_SHOW]  = "Hint: %s\n\nLeave the passphrase empty\nto open the wallet without it.",
+    [XSTR_PP_HINT_SHOW]  = "Hint: %s",
     [XSTR_PP_HINT_RULES] = "Hint: up to 31 characters",
     [XSTR_KI_STORAGE_FULL] = "Device storage is full: the\nkey image cache was not saved.\nThe result is valid; export\nall outputs again at the\nnext sync.",
     [XSTR_KI_SAVE_FAIL]  = "The key image cache was not\nsaved. The result is valid;\nexport all outputs again at\nthe next sync.",
@@ -894,7 +922,7 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_BAL_UNKNOWN]   = "The amount of %u outputs is\nnot known: export all\noutputs again.",
     [XSTR_BAL_MANUAL]    = "%s XMR\n(entered by hand; replaced\nat the next sync)",
     [XSTR_BAL_NONE]      = "No outputs yet. Process an\noutputs export from Feather.",
-    [XSTR_BAL_TXS]       = "Signed transactions",
+    [XSTR_BAL_TXS]       = "Transactions",
     [XSTR_BAL_TX_NONE]   = "No signed transactions.",
     [XSTR_BAL_TX_LINE]   = "#%u  %s XMR -> %s...\nfee %s",
     [XSTR_BAL_TX_OWN]    = "#%u  to this wallet, fee %s",
@@ -911,6 +939,35 @@ static const char* const X_EN[XSTR_COUNT] = {
     [XSTR_JTAG_DONE]     = "Done. Firmware updates and\ndebugging are locked.",
     [XSTR_JTAG_LOCKED]   = "Firmware updates are\nalready locked.",
     [XSTR_JTAG_FAIL]     = "eFuses not burned: %s",
+    [XSTR_SET_GAME]      = "Minesweeper at start",
+    [XSTR_GAME_HOWTO]    = "The device will start as\na Minesweeper game.\n\nTo reach the password screen:\n1. Step on a mine.\n2. Tap the exploded mine\n   3 times within 2 seconds\n   (buttons: select it and\n   press SELECT 3 times).\n\nRemember this: without the\ngesture there is no\npassword screen.",
+    [XSTR_GAME_TURN_ON]  = "Turn on",
+    [XSTR_WL_OPEN_PP]    = "Open passphrase",
+    [XSTR_TXL_RECEIVED]  = "Received (newest first)",
+    [XSTR_TXL_SENT]      = "* Signed on this device",
+    [XSTR_TXL_ELSEWHERE] = "? Spent elsewhere",
+    [XSTR_TXL_UNKNOWN]   = "? Amount unknown: %u out.",
+    [XSTR_TXL_OUTS]      = "%u out.",
+    [XSTR_TXL_SPENT]     = "spent",
+    [XSTR_TXL_CHANGE]    = "change *",
+    [XSTR_TXL_NOTX]      = "? transaction not known",
+    [XSTR_TXL_LEGEND]    = "* - signed on this device\n? - the device does not know all",
+    [XSTR_TXL_HINT_FULL] = "Some output amounts are not\n"
+                           "known. Export ALL outputs in\n"
+                           "the PC wallet (monero-wallet-cli:\n"
+                           "export_outputs all FILE) and\n"
+                           "give the file to the device.",
+    [XSTR_KI_ALL_SAVED]   = "All saved key images",
+    [XSTR_KI_SAVED_FULL]  = "The outputs file is complete:\n"
+                            "all key images are included.",
+    [XSTR_KI_SAVED_NONE]  = "No saved key images before\n"
+                            "output #%u: only the new ones\n"
+                            "were sent. A full outputs\n"
+                            "export gives them all.",
+    [XSTR_KI_SAVED_ADDED] = "Added %u saved key images\n"
+                            "(outputs #%u-#%u).\n"
+                            "Outputs before #%u are not\n"
+                            "in the file.",
 };
 
 /* ------------------------------------------------------------------ */

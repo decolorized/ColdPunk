@@ -351,7 +351,7 @@ MW_TEST(test_setup_and_keyimages)
     fresh_store();
     for (int i = 0; i < 32; ++i) seed[i] = (uint8_t)(0x21 + 3 * i);
     CHECK_EQ_INT(mw_seed_to_keys(MW_SEED_MONERO_LEGACY, seed, 32, "", &g_keys), MW_OK);
-    CHECK_EQ_INT(mw_wallet_create_pp("stack", MW_SEED_MONERO_LEGACY, seed, 32, 0, NULL,
+    CHECK_EQ_INT(mw_wallet_create_pp("stack", MW_SEED_MONERO_LEGACY, seed, 32, 0, "", NULL,
                                      &g_id), MW_OK);
 
     printf("  wallet\n");

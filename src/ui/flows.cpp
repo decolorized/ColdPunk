@@ -12,6 +12,9 @@
 //            ▲            cancel / lock / autolock    │  Settings     │
 //            └────────────────────────────────────────┤  Lock         │
 //                                                     └──────┬────────┘
+//  The Minesweeper box exists only with Settings -> "Minesweeper at start"
+//  on; off (the default) the loop goes straight to the password screen.
+//
 //                  wallet list ─► passphrase (if the wallet has one)
 //                              ─► wallet menu: address / view key (text,
 //                                 QR), rename, delete, close; files and
@@ -461,11 +464,20 @@ static void slow_progress_begin(slow_progress_t* p, const char* title) {
 }
 static void slow_progress_end(void) {
     mw_cn_slow_hash_set_progress(NULL, NULL);
+    mw_wallet_pp_set_progress(NULL, NULL);
     mw_ui_progress_close();
+}
+// The same page for the passphrase record's derivation (0.3.5, ~1 s or
+// more: MW_PP_KDF_ROUNDS) - and for the CryptoNight of an older record.
+static void slow_progress_begin_pp(slow_progress_t* p, const char* title) {
+    slow_progress_begin(p, title);
+    mw_wallet_pp_set_progress(slow_progress_cb, p);
 }
 
 // Stores a seed wallet, recording its passphrase variant (task 3 item 5):
 // with a passphrase the record opens two wallets - "" gives the plain one.
+// 0.3.5: the passphrase wallet is reached only through "Open passphrase" in
+// the wallet's menu, which every wallet has.
 static mw_err_t store_seed_wallet(const char* name, mw_seed_type_t type,
                                   const uint8_t* material, size_t material_len,
                                   uint32_t restore_height, const char* pass,
@@ -475,11 +487,11 @@ static mw_err_t store_seed_wallet(const char* name, mw_seed_type_t type,
     memset(&pp, 0, sizeof(pp));
     const bool with_pp = pass && pass[0];
     slow_progress_t sp;
-    slow_progress_begin(&sp, TX(XSTR_WALLET_UNLOCK));
+    slow_progress_begin_pp(&sp, TX(XSTR_WALLET_UNLOCK));
     e = mw_seed_to_keys(type, material, material_len, with_pp ? pass : "", &pp);
     if (e == MW_OK) {
         e = mw_wallet_create_pp(name, type, material, material_len, restore_height,
-                                with_pp ? &pp : NULL, id);
+                                with_pp ? pass : "", with_pp ? &pp : NULL, id);
     }
     slow_progress_end();
     if (e == MW_OK && shown) *shown = pp;
@@ -611,9 +623,8 @@ static mw_err_t flow_create_wallet(void) {
     }
     if (e != MW_OK) { ui_err(e); goto fail; }
     mw_wallet_set_active(id);
-    MW_LOGI("wallet", "wallet created (%s, %s)",
-            type == MW_SEED_POLYSEED ? "polyseed" : "legacy 25 words",
-            pass[0] ? "with passphrase" : "no passphrase");
+    MW_LOGI("wallet", "wallet created (%s)",
+            type == MW_SEED_POLYSEED ? "polyseed" : "legacy 25 words");
 
     // The address of the wallet the user will use, to compare with Feather.
     show_address_text(&keys);
@@ -914,9 +925,8 @@ static mw_err_t flow_import_wallet(void) {
     }
     if (e != MW_OK) { ui_err(e); goto fail; }
     mw_wallet_set_active(id);
-    MW_LOGI("wallet", "wallet imported (%s, %s)",
-            type == MW_SEED_POLYSEED ? "polyseed" : "legacy 25 words",
-            pass[0] ? "with passphrase" : "no passphrase");
+    MW_LOGI("wallet", "wallet imported (%s)",
+            type == MW_SEED_POLYSEED ? "polyseed" : "legacy 25 words");
 
     show_address_text(&keys);
     mw_ui_message(T(STR_SUCCESS), TX(XSTR_WALLET_CREATED));
@@ -1076,7 +1086,11 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
     char body[192];
     snprintf(body, sizeof(body), TX(XSTR_KI_CONFIRM), (unsigned)info.count,
              (unsigned)info.known);
-    if (!mw_ui_confirm(T(STR_KI_SYNC), body, TX(XSTR_YES), TX(XSTR_NO))) {
+    // 0.3.5: the checkbox is always there: the cache may hold some of the
+    // earlier transfers and not others; what it adds is reported afterwards.
+    bool all_saved = false;
+    if (!mw_ui_confirm_check(T(STR_KI_SYNC), body, TX(XSTR_YES), TX(XSTR_NO),
+                             TX(XSTR_KI_ALL_SAVED), &all_saved)) {
         MW_LOGI("file", "key image export declined on the device");
         return;
     }
@@ -1085,23 +1099,45 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
     mw_ops_cb_t cb = { ops_progress, &p };
     size_t out_len = 0;
     mw_ui_progress(T(STR_KI_SYNC), 0, NULL);
-    e = mw_ops_outputs_to_keyimages(keys, file, plain_len, out, MW_FLOW_FILE_CAP,
-                                    &out_len, &cb, &er);
+    mw_ki_saved_info_t saved;
+    e = mw_ops_outputs_to_keyimages_x(keys, file, plain_len, all_saved, out,
+                                      MW_FLOW_FILE_CAP, &out_len, &saved, &cb, &er);
     mw_ui_progress_close();
     if (e != MW_OK) { show_refusal(TX(XSTR_KI_REFUSED), &er); return; }
 
     e = sink->put(sink, MW_FILE_KIND_KEYIMAGES, out, out_len);
     mw_memzero(out, out_len);
     if (e != MW_OK) { ui_err(e); return; }
-    MW_LOGI("file", "key images ready: %u records, %u bytes (cache: %u)",
-            (unsigned)info.count, (unsigned)out_len, (unsigned)mw_ki_cache_count());
+    MW_LOGI("file", "key images ready: %u records + %u saved, %u bytes (cache: %u)",
+            (unsigned)info.count, (unsigned)saved.saved, (unsigned)out_len,
+            (unsigned)mw_ki_cache_count());
     // A typed-in balance holds until the next sync.
     if (s_open.open) (void)mw_wallet_set_manual_balance(s_open.id, false, 0);
     result_ready();
     if (sink->saved_as) snprintf(body, sizeof(body), TX(XSTR_SD_SAVED), sink->saved_as);
-    else                snprintf(body, sizeof(body), TX(XSTR_KI_DONE), (unsigned)info.count);
+    else                snprintf(body, sizeof(body), TX(XSTR_KI_DONE),
+                                 (unsigned)(info.count + saved.saved));
     mw_ui_message_timeout(T(STR_SUCCESS), body, MW_SUCCESS_MS);
+    if (all_saved) {
+        // What the cache added: from which transfer, or why nothing.
+        if (info.offset == 0)
+            snprintf(body, sizeof(body), "%s", TX(XSTR_KI_SAVED_FULL));
+        else if (saved.saved == 0)
+            snprintf(body, sizeof(body), TX(XSTR_KI_SAVED_NONE), (unsigned)info.offset);
+        else
+            snprintf(body, sizeof(body), TX(XSTR_KI_SAVED_ADDED), (unsigned)saved.saved,
+                     (unsigned)saved.start, (unsigned)(info.offset - 1),
+                     (unsigned)saved.start);
+        mw_ui_message(T(STR_KI_SYNC), body);
+    }
     cache_full_warning();
+    // 0.3.5: an incremental export (not from the first transfer) cannot tell
+    // the amounts the device is still missing; a full one can.
+    if (info.offset != 0 && !(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE)) {
+        uint32_t unknown = 0;
+        if (mw_ki_cache_balance(NULL, NULL, &unknown) == MW_OK && unknown)
+            mw_ui_message(TX(XSTR_WL_BALANCE), TX(XSTR_TXL_HINT_FULL));
+    }
 }
 
 // The signed transactions go to the wallet's list (v0.3; nothing is kept
@@ -1690,29 +1726,134 @@ static bool parse_xmr(const char* in, uint64_t* out) {
     return true;
 }
 
+// 0.3.5: every transaction the device knows of, from the key image cache:
+//   received - the outputs of the outputs exports, grouped by the
+//              transaction they came in (its public key), newest first by
+//              the outputs' global index; change of a transaction signed
+//              here is marked "*", an output without a known transaction "?"
+//   signed   - the transactions signed on this device ("*")
+//   ?        - outputs spent by transactions not signed here (only their sum
+//              is known) and outputs whose amount is not known
+typedef struct {
+    mw_pubkey_t tx;
+    uint64_t    amount, gidx;
+    uint16_t    outs, spent;
+    bool        change, notx;
+} txl_group_t;
+
+static int txl_cmp(const void* a, const void* b) {
+    const txl_group_t* x = (const txl_group_t*)a;
+    const txl_group_t* y = (const txl_group_t*)b;
+    return x->gidx < y->gidx ? 1 : x->gidx > y->gidx ? -1 : 0;     // newest first
+}
+
+static int txl_cmp_tx(const void* a, const void* b) {
+    const txl_group_t* x = (const txl_group_t*)a;
+    const txl_group_t* y = (const txl_group_t*)b;
+    if (x->notx != y->notx) return x->notx ? 1 : -1;
+    return memcmp(x->tx.b, y->tx.b, 32);
+}
+
 static void show_signed_txs(void) {
-    const uint32_t n = mw_ki_cache_tx_count();
-    if (!n) { mw_ui_message(TX(XSTR_BAL_TXS), TX(XSTR_BAL_TX_NONE)); return; }
-    const size_t cap = (size_t)n * 96u + 16u;
+    const uint32_t ne = mw_ki_cache_count();
+    const uint32_t nt = mw_ki_cache_tx_count();
+    uint64_t total = 0;
+    uint32_t outs = 0, unknown = 0;
+    (void)mw_ki_cache_balance(&total, &outs, &unknown);
+
+    txl_group_t* g = ne ? (txl_group_t*)big_alloc((size_t)ne * sizeof(txl_group_t)) : NULL;
+    if (ne && !g) { ui_err(MW_ERR_MEMORY); return; }
+    uint32_t ng = 0, else_n = 0;
+    uint64_t else_amt = 0;
+    // One group per output first, then sorted by transaction key and merged
+    // (n log n: a cache holds thousands of outputs).
+    for (uint32_t i = 0; i < ne; i++) {
+        mw_ki_entry_t e;
+        if (!mw_ki_cache_get(i, &e)) continue;
+        if (!(e.bal & MW_KI_B_AMOUNT)) continue;              // counted as unknown
+        const bool spent_here = (e.flags & MW_KI_F_SPENT) != 0;
+        const bool spent = spent_here || (e.bal & MW_KI_B_SPENT);
+        if (spent && !spent_here) { else_amt += e.amount; else_n++; }
+        txl_group_t* x = &g[ng++];
+        memset(x, 0, sizeof *x);
+        x->tx = e.tx_pub;
+        x->notx = mw_ct_is_zero(e.tx_pub.b, 32) != 0;
+        x->gidx = e.gidx;
+        x->amount = e.amount;
+        x->outs = 1;
+        x->spent = spent ? 1 : 0;
+        x->change = (e.flags & MW_KI_F_CHANGE) != 0;
+        mw_memzero(&e, sizeof e);
+    }
+    qsort(g, ng, sizeof(txl_group_t), txl_cmp_tx);
+    {
+        uint32_t m = 0;
+        for (uint32_t k = 0; k < ng; k++) {
+            if (m && !g[k].notx && !g[m - 1].notx &&
+                memcmp(g[m - 1].tx.b, g[k].tx.b, 32) == 0) {
+                txl_group_t* y = &g[m - 1];
+                y->amount += g[k].amount;
+                if (y->outs < 0xFFFF) y->outs++;
+                if (g[k].spent && y->spent < 0xFFFF) y->spent++;
+                y->change = y->change || g[k].change;
+                if (g[k].gidx > y->gidx) y->gidx = g[k].gidx;
+            } else {
+                g[m++] = g[k];
+            }
+        }
+        ng = m;
+    }
+    if (!ng && !nt && !unknown) {
+        big_free(g, (size_t)ne * sizeof(txl_group_t));
+        mw_ui_message(TX(XSTR_BAL_TXS), TX(XSTR_BAL_TX_NONE));
+        return;
+    }
+    qsort(g, ng, sizeof(txl_group_t), txl_cmp);
+
+    const size_t cap = (size_t)ng * 72u + (size_t)nt * 96u + 512u;
     char* text = (char*)big_alloc(cap);
-    if (!text) { ui_err(MW_ERR_MEMORY); return; }
+    if (!text) { big_free(g, (size_t)ne * sizeof(txl_group_t)); ui_err(MW_ERR_MEMORY); return; }
     size_t used = 0;
     text[0] = 0;
-    for (uint32_t k = n; k-- > 0 && used + 96u < cap; ) {        // newest first
+#define TXL_ADD(...) do { if (used < cap) { snprintf(text + used, cap - used, __VA_ARGS__); \
+                                            used = strlen(text); } } while (0)
+    char amt[32], fee[32], n[24];
+    TXL_ADD("%s\n\n", TX(XSTR_TXL_LEGEND));
+    if (ng) TXL_ADD("%s\n", TX(XSTR_TXL_RECEIVED));
+    for (uint32_t k = 0; k < ng; k++) {
+        mw_format_amount(g[k].amount, amt, sizeof(amt));
+        snprintf(n, sizeof(n), TX(XSTR_TXL_OUTS), (unsigned)g[k].outs);
+        TXL_ADD("%s+%s\n  %s%s%s%s%s\n", g[k].change ? "*" : g[k].notx ? "?" : " ", amt, n,
+                g[k].spent ? ", " : "", g[k].spent ? TX(XSTR_TXL_SPENT) : "",
+                g[k].change ? ", " : g[k].notx ? ", " : "",
+                g[k].change ? TX(XSTR_TXL_CHANGE) : g[k].notx ? TX(XSTR_TXL_NOTX) : "");
+    }
+    if (nt) TXL_ADD("\n%s\n", TX(XSTR_TXL_SENT));
+    for (uint32_t k = nt; k-- > 0; ) {                                 // newest first
         mw_ki_tx_t t;
         if (!mw_ki_cache_tx_get(k, &t)) continue;
-        char fee[32], amt[32];
         mw_format_amount(t.fee, fee, sizeof(fee));
+        TXL_ADD("*");
         if (t.own_only) {
-            snprintf(text + used, cap - used, TX(XSTR_BAL_TX_OWN), (unsigned)t.seq, fee);
+            TXL_ADD(TX(XSTR_BAL_TX_OWN), (unsigned)t.seq, fee);
         } else {
             mw_format_amount(t.sent, amt, sizeof(amt));
-            snprintf(text + used, cap - used, TX(XSTR_BAL_TX_LINE), (unsigned)t.seq, amt,
-                     t.addr, fee);
+            TXL_ADD(TX(XSTR_BAL_TX_LINE), (unsigned)t.seq, amt, t.addr, fee);
         }
-        used = strlen(text);
-        if (k) { snprintf(text + used, cap - used, "\n\n"); used = strlen(text); }
+        TXL_ADD("\n");
     }
+    if (else_n) {
+        mw_format_amount(else_amt, amt, sizeof(amt));
+        snprintf(n, sizeof(n), TX(XSTR_TXL_OUTS), (unsigned)else_n);
+        TXL_ADD("\n%s\n?-%s\n  %s\n", TX(XSTR_TXL_ELSEWHERE), amt, n);
+    }
+    if (unknown) {
+        TXL_ADD("\n");
+        TXL_ADD(TX(XSTR_TXL_UNKNOWN), (unsigned)unknown);
+        TXL_ADD("\n");
+    }
+#undef TXL_ADD
+    big_free(g, (size_t)ne * sizeof(txl_group_t));
     mw_ui_text_view(TX(XSTR_BAL_TXS), text);
     big_free(text, cap);
 }
@@ -1794,7 +1935,13 @@ static void edit_pp_hint(uint32_t id) {
     mw_memzero(hint, sizeof(hint));
 }
 
-static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
+static bool open_wallet_pp(uint32_t id, mw_account_keys_t* keys);
+
+// The open wallet. Returns true when the user opened its passphrase wallet
+// ("Open passphrase"): `keys` then holds that wallet and the caller opens it
+// as variant 1; false when the wallet was closed.
+static bool wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
+    bool reopen_pp = false;
     const wallet_entry_t* w = mw_wallet_get(id);
     memset(&s_open, 0, sizeof(s_open));
     s_open.open = true;
@@ -1818,12 +1965,11 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
     for (int k = 0; k < MW_FILE_KIND_COUNT; ++k) mw_link_inbox_clear((mw_file_kind_id_t)k);
     (void)mw_link_request_take();
     link_state(MW_LINK_STATE_WALLET);
-    MW_LOGI("wallet", "wallet '%s' open (%s), %u known key images: ready for files",
-            s_open.name, variant ? "with passphrase" : "no passphrase",
-            (unsigned)mw_ki_cache_count());
+    MW_LOGI("wallet", "wallet '%s' open, %u known key images: ready for files",
+            s_open.name, (unsigned)mw_ki_cache_count());
 
-    enum { WA_ADDR = 0, WA_ADDR_QR, WA_BALANCE, WA_VK, WA_VK_QR, WA_SD, WA_SD_VK, WA_RENAME,
-           WA_PP_HINT, WA_NETWORK, WA_CHECK_SEED, WA_DELETE, WA_COUNT };
+    enum { WA_ADDR = 0, WA_ADDR_QR, WA_BALANCE, WA_VK, WA_VK_QR, WA_SD, WA_SD_VK,
+           WA_OPEN_PP, WA_RENAME, WA_PP_HINT, WA_NETWORK, WA_CHECK_SEED, WA_DELETE, WA_COUNT };
     // SD card files only on boards with a card slot.
     const bool with_sd = mw_hal_caps()->has_sd;
     int focus = 0;
@@ -1837,13 +1983,14 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         snprintf(net_item, sizeof(net_item), TX(XSTR_WL_NETWORK), net_label(active_network()));
         const char* all_items[WA_COUNT] = {
             TX(XSTR_WL_ADDR_TEXT), TX(XSTR_WL_ADDR_QR), TX(XSTR_WL_BALANCE), TX(XSTR_WL_VK_TEXT),
-            TX(XSTR_WL_VK_QR), TX(XSTR_WL_SD), TX(XSTR_WL_SD_VK), TX(XSTR_WL_RENAME),
-            TX(XSTR_PP_HINT), net_item, TX(XSTR_CHECK_SEED), T(STR_WALLET_DELETE)
+            TX(XSTR_WL_VK_QR), TX(XSTR_WL_SD), TX(XSTR_WL_SD_VK), TX(XSTR_WL_OPEN_PP),
+            TX(XSTR_WL_RENAME), TX(XSTR_PP_HINT), net_item, TX(XSTR_CHECK_SEED),
+            T(STR_WALLET_DELETE)
         };
         const char* all_icons[WA_COUNT] = {
             LV_SYMBOL_HOME, LV_SYMBOL_IMAGE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_IMAGE,
-            LV_SYMBOL_SD_CARD, LV_SYMBOL_SAVE, LV_SYMBOL_EDIT, LV_SYMBOL_KEYBOARD,
-            LV_SYMBOL_SHUFFLE, LV_SYMBOL_OK, LV_SYMBOL_TRASH
+            LV_SYMBOL_SD_CARD, LV_SYMBOL_SAVE, LV_SYMBOL_KEYBOARD, LV_SYMBOL_EDIT,
+            LV_SYMBOL_KEYBOARD, LV_SYMBOL_SHUFFLE, LV_SYMBOL_OK, LV_SYMBOL_TRASH
         };
         const wallet_entry_t* we = mw_wallet_get(id);
         const bool has_seed = we && (we->wallet_type == MW_SEED_MONERO_LEGACY ||
@@ -1859,8 +2006,10 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
             if ((a == WA_SD || a == WA_SD_VK) && !with_sd) continue;
             // A view-only record without the key has nothing to export.
             if (a == WA_SD_VK && mw_sc_is_zero(&keys->sec.view)) continue;
-            // Only wallets that have a passphrase.
-            if (a == WA_PP_HINT && mw_wallet_pp_state(id) == MW_PP_NONE) continue;
+            // 0.3.5: "Open passphrase" in EVERY wallet (nothing shows whether
+            // one exists), only from the session without a passphrase; the
+            // hint can be set on every wallet too.
+            if (a == WA_OPEN_PP && variant != 0) continue;
             if (a == WA_CHECK_SEED && !has_seed) continue;
             if (a == WA_BALANCE && !balance_on) continue;
             items[shown]  = all_items[a];
@@ -1869,10 +2018,12 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
             action[shown] = a;
             shown++;
         }
+        // The passphrase mark only inside a passphrase session.
         char sub[96];
-        snprintf(sub, sizeof(sub), "%s%s\n%s",
-                 variant ? TX(XSTR_WL_VARIANT_PP) : TX(XSTR_WL_VARIANT_BASE),
-                 keys->view_only ? " / view-only" : "",
+        snprintf(sub, sizeof(sub), "%s%s%s%s",
+                 variant ? TX(XSTR_WL_VARIANT_PP) : "",
+                 keys->view_only ? (variant ? " / view-only" : "view-only") : "",
+                 (variant || keys->view_only) ? "\n" : "",
                  mw_link_is_up() ? TX(XSTR_WL_READY) : TX(XSTR_WL_NO_LINK));
 
         mw_menu_t m;
@@ -1900,6 +2051,16 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         case WA_VK_QR:   show_view_key(keys, true); break;
         case WA_SD:      sd_files_menu(keys); break;
         case WA_SD_VK:   sd_export_view_key(keys); break;
+        case WA_OPEN_PP: {
+            mw_account_keys_t pk;
+            memset(&pk, 0, sizeof(pk));
+            if (open_wallet_pp(id, &pk)) {
+                *keys = pk;
+                reopen_pp = true;
+            }
+            mw_memzero(&pk, sizeof(pk));
+            break;
+        }
         case WA_RENAME:  rename_wallet(id); break;
         case WA_PP_HINT: edit_pp_hint(id); break;
         case WA_BALANCE: wallet_balance(id); break;
@@ -1910,6 +2071,7 @@ static void wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
             break;
         default: break;
         }
+        if (reopen_pp) break;
     }
     if (mw_ki_cache_dirty()) {
         mw_ui_progress(s_open.name, 1000, TX(XSTR_SAVING));
@@ -1921,83 +2083,61 @@ closed:
     memset(&s_open, 0, sizeof(s_open));
     link_state(lock_requested() ? MW_LINK_STATE_LOCKED : MW_LINK_STATE_MENU);
     MW_LOGI("wallet", "wallet closed");
+    return reopen_pp && !lock_requested();
 }
 
-// True for a polyseed stored in the Cake Wallet / Cupcake form (the phrase
-// itself is encrypted with the passphrase, polyseed feature bit 16). Packed
-// context: birthday(2) || features(1) || secret.
-static bool wallet_is_cake(uint32_t id) {
-    const wallet_entry_t* w = mw_wallet_get(id);
-    if (!w || w->wallet_type != MW_SEED_POLYSEED) return false;
-    uint8_t blob[64];
-    size_t  len = 0;
-    bool    cake = false;
-    if (mw_wallet_unseal_seed(id, blob, sizeof(blob), &len) == MW_OK && len >= 3) {
-        mw_polyseed_t ps;
-        if (mw_polyseed_unpack(blob, len, &ps) == MW_OK) cake = mw_polyseed_is_encrypted(&ps) != 0;
-        mw_memzero(&ps, sizeof(ps));
-    }
-    mw_memzero(blob, sizeof(blob));
-    return cake;
-}
-
-// Asks for the passphrase when the wallet has one (task 3 item 5) and opens
-// the base or the passphrase variant.
+// Opens a wallet: always the wallet without a passphrase (0.3.5) - nothing
+// is asked and nothing shows whether the record has a passphrase wallet.
 static bool open_wallet(uint32_t id, mw_account_keys_t* keys, uint8_t* variant) {
+    bool verified = false;
+    const mw_err_t e = mw_wallet_open(id, "", keys, &verified);
+    if (e != MW_OK) {
+        ui_err(e);
+        return false;
+    }
+    *variant = 0;
+    return true;
+}
+
+// "Open passphrase" (0.3.5): the same screen, the same work (~1 s and more,
+// MW_PP_KDF_ROUNDS) and the same "wrong passphrase" for every wallet; only
+// the right passphrase of a wallet that has one opens its passphrase wallet.
+static bool open_wallet_pp(uint32_t id, mw_account_keys_t* keys) {
     const wallet_entry_t* w = mw_wallet_get(id);
     char name[WALLET_NAME_LEN];
     char pass[MW_PASSPHRASE_MAX];
     snprintf(name, sizeof(name), "%s", w ? w->name : "");
     memset(pass, 0, sizeof(pass));
-
-    const uint8_t state = mw_wallet_pp_state(id);
-    const bool    cake  = state != MW_PP_NONE && wallet_is_cake(id);
-    for (;;) {
-        if (state != MW_PP_NONE) {
-            char hint[MW_PP_HINT_LEN];
-            if (mw_wallet_pp_hint(id, hint, sizeof(hint)) != MW_OK) hint[0] = 0;
-            if (hint[0]) {
-                char msg[MW_PP_HINT_LEN + 96];
-                snprintf(msg, sizeof(msg), TX(XSTR_PP_HINT_SHOW), hint);
-                mw_ui_message(name, msg);             // stays until tapped
-                mw_memzero(msg, sizeof(msg));
-            } else if (cake) {
-                mw_ui_message_timeout(name, TX(XSTR_PP_OPEN_CAKE), 2500);
-            } else if (state == MW_PP_SET) {
-                mw_ui_message_timeout(name, TX(XSTR_PP_OPEN_HINT), 2500);
-            }
-            mw_memzero(hint, sizeof(hint));
-            if (mw_screen_passphrase_open_run(name, pass, sizeof(pass)) != MW_OK) {
-                mw_memzero(pass, sizeof(pass));
-                return false;
-            }
-            if (cake && !pass[0]) {
-                mw_ui_message(name, TX(XSTR_PP_REQUIRED));
-                continue;
-            }
+    {
+        char hint[MW_PP_HINT_LEN];
+        if (mw_wallet_pp_hint(id, hint, sizeof(hint)) != MW_OK) hint[0] = 0;
+        if (hint[0]) {
+            char msg[MW_PP_HINT_LEN + 96];
+            snprintf(msg, sizeof(msg), TX(XSTR_PP_HINT_SHOW), hint);
+            mw_ui_message(name, msg);                 // stays until tapped
+            mw_memzero(msg, sizeof(msg));
         }
-        bool verified = false;
-        slow_progress_t sp;
-        slow_progress_begin(&sp, TX(XSTR_WALLET_UNLOCK));
-        const mw_err_t e = mw_wallet_open(id, pass, keys, &verified);
-        slow_progress_end();
-        if (e == MW_ERR_DECRYPT) {
-            MW_LOGE("wallet", "wrong passphrase");
-            mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PP_WRONG));
-            mw_memzero(pass, sizeof(pass));
-            continue;
-        }
-        if (e != MW_OK) {
-            mw_memzero(pass, sizeof(pass));
-            ui_err(e);
-            return false;
-        }
-        if (pass[0] && !verified) mw_ui_message(name, TX(XSTR_PP_UNVERIFIED));
-        *variant = pass[0] ? 1 : 0;
-        mw_memzero(pass, sizeof(pass));
-        mw_session_wipe_input();
-        return true;
+        mw_memzero(hint, sizeof(hint));
     }
+    if (mw_screen_passphrase_open_run(name, pass, sizeof(pass)) != MW_OK) {
+        mw_memzero(pass, sizeof(pass));
+        return false;
+    }
+    slow_progress_t sp;
+    slow_progress_begin_pp(&sp, TX(XSTR_WALLET_UNLOCK));
+    const mw_err_t e = mw_wallet_open_pp(id, pass, keys);
+    slow_progress_end();
+    mw_memzero(pass, sizeof(pass));
+    mw_session_wipe_input();
+    if (e == MW_ERR_DECRYPT) {
+        mw_ui_message(T(STR_ERR_GENERIC), TX(XSTR_PP_WRONG));
+        return false;
+    }
+    if (e != MW_OK) {
+        ui_err(e);
+        return false;
+    }
+    return true;
 }
 
 // ===========================================================================
@@ -2020,8 +2160,7 @@ static void wallets_menu(void) {
             for (uint32_t i = 0; i < store->count && n < MAX_WALLETS; i++) {
                 const wallet_entry_t* w = &store->wallets[i];
                 if (w->is_hidden) continue;
-                snprintf(labels[n], sizeof(labels[n]), "%s%s", w->name,
-                         (mw_wallet_pp_state(w->id) != MW_PP_NONE) ? "  *" : "");
+                snprintf(labels[n], sizeof(labels[n]), "%s", w->name);
                 ids[n] = w->id;
                 items[n] = labels[n];
                 icons[n] = LV_SYMBOL_DIRECTORY;
@@ -2037,7 +2176,6 @@ static void wallets_menu(void) {
         memset(&m, 0, sizeof(m));
         m.title = T(STR_MAIN_WALLETS);
         m.subtitle = n_wallets ? NULL : TX(XSTR_WALLET_EMPTY);
-        m.footnote = n_wallets ? TX(XSTR_WL_PP_MARK) : NULL;
         m.items = items;
         m.icons = icons;
         m.count = n;
@@ -2056,7 +2194,9 @@ static void wallets_menu(void) {
             memset(&keys, 0, sizeof(keys));
             if (open_wallet(ids[r], &keys, &variant)) {
                 mw_wallet_set_active(ids[r]);
-                wallet_home(ids[r], &keys, variant);
+                // "Open passphrase" closes the session and opens the
+                // passphrase wallet of the same record.
+                while (wallet_home(ids[r], &keys, variant)) variant = 1;
                 focus = 0;
             }
             mw_memzero(&keys, sizeof(keys));
@@ -2242,7 +2382,9 @@ extern "C" void mw_shell_run(void) {
     for (;;) {
         link_state(MW_LINK_STATE_LOCKED);
         mw_ui_show(MW_SCREEN_MAIN_MENU);          // neutral background
-        mw_screen_game_run();
+        // Settings -> Minesweeper: the game as a disguise, left only by the
+        // gesture. Off (the default): straight to the password screen.
+        if (mw_ui_settings()->game) mw_screen_game_run();
         if (!efuse_gate()) continue;
         if (!device_auth()) continue;
         ensure_usb_link();

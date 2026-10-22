@@ -11,6 +11,8 @@ extern "C" {
 
 // Passphrase hint: up to 31 bytes and the NUL.
 #define MW_PP_HINT_LEN 32
+// 0.3.5: the passphrase record of every wallet (see mw_wallet_open_pp).
+#define MW_PP_REC_LEN  64
 
 // TZ 7.1 - layout kept byte-compatible with the spec.
 typedef struct {
@@ -26,8 +28,14 @@ typedef struct {
     // task 3 item 5: MW_PP_* - whether a passphrase variant exists. The check
     // value itself lives inside the sealed record, never in the directory.
     uint8_t  pp_state;
-    // Optional hint for the passphrase (v9.2), shown before it is asked.
+    // Optional hint for the passphrase (v9.2), shown when it is asked.
     char     pp_hint[MW_PP_HINT_LEN];
+    // 0.3.5: [0] version (1) [4..15] IV [16..47] AES-256-GCM of the
+    // passphrase wallet's private spend key [48..63] tag, under a key derived
+    // from the passphrase (mw_wallet_open_pp). A wallet without a passphrase
+    // has the version byte and random bytes - the same size, the same look;
+    // all zero = not written yet (a record from before 0.3.5).
+    uint8_t  pp_rec[MW_PP_REC_LEN];
     // v0.3: the wallet's network (MW_WNET_*; MW_WNET_DEFAULT = the device
     // setting, for records written before 0.3) and a balance the user typed
     // in (piconero, valid while MW_BAL_MANUAL is set).
@@ -48,6 +56,10 @@ typedef struct {
 #define MW_PP_UNKNOWN  0   // record from an older firmware: ask, cannot verify
 #define MW_PP_NONE     1   // created without a passphrase: never ask
 #define MW_PP_SET      2   // created with one: ask, verify, empty = base wallet
+// 0.3.5: pp_rec holds the passphrase wallet or random bytes; nothing tells
+// which. Every record ends up in this state (mw_wallet_store_upgrade(), or
+// the first successful mw_wallet_open_pp() of an older MW_PP_SET/UNKNOWN one).
+#define MW_PP_REC      3
 
 // Name of a user (account), kept in its sealed directory.
 #define MW_ACCOUNT_NAME_LEN 16          // bytes with the NUL
@@ -86,17 +98,37 @@ mw_err_t mw_wallet_create(const char* name, mw_seed_type_t type,
                           const uint8_t* seed_material, size_t seed_len,
                           uint32_t restore_height, uint32_t* id_out);
 
-// Same, recording the passphrase variant (task 3 item 5). `pp_keys` are the
-// keys derived WITH the passphrase; NULL means "created without one". Only a
-// 14-byte check of the passphrase wallet's public keys is kept, sealed with
-// the seed - never the passphrase itself.
+// Same, recording the passphrase variant. `pp_keys` are the keys derived WITH
+// `passphrase`; NULL (and "") means "created without one". 0.3.5: the
+// passphrase wallet's spend key goes into pp_rec under a key derived from the
+// passphrase (mw_wallet_open_pp); a wallet without one gets random bytes
+// there. The passphrase itself is never stored.
 mw_err_t mw_wallet_create_pp(const char* name, mw_seed_type_t type,
                              const uint8_t* seed_material, size_t seed_len,
-                             uint32_t restore_height,
+                             uint32_t restore_height, const char* passphrase,
                              const mw_account_keys_t* pp_keys, uint32_t* id_out);
 
 // MW_PP_* of a wallet (MW_PP_NONE for raw-key imports).
 uint8_t  mw_wallet_pp_state(uint32_t id);
+
+// 0.3.5: the passphrase wallet of record `id`, opened from its pp_rec:
+//   PBKDF2-HMAC-SHA256, MW_PP_KDF_ROUNDS rounds in MW_PP_KDF_HW_STEPS chunks
+//   with the eFuse HMAC between them (a guess needs the chip), salted with
+//   the account uid and the wallet id, then AES-256-GCM. The same work and
+//   the same answer for a wallet without a passphrase (its record is random):
+//   MW_ERR_DECRYPT "wrong passphrase". Only a record from before 0.3.5 that
+//   was created with a passphrase is opened the old way once (CryptoNight
+//   seed offset, checked against the sealed check when there is one) and
+//   then gets its record.
+#ifndef MW_PP_KDF_ROUNDS
+#define MW_PP_KDF_ROUNDS   500000u
+#endif
+#define MW_PP_KDF_HW_STEPS 8
+mw_err_t mw_wallet_open_pp(uint32_t id, const char* passphrase,
+                           mw_account_keys_t* keys_out);
+// Progress of mw_wallet_open_pp() (permille), NULL to stop.
+typedef void (*mw_wallet_pp_progress_fn)(int permille, void* ctx);
+void     mw_wallet_pp_set_progress(mw_wallet_pp_progress_fn fn, void* ctx);
 
 // Opens a wallet for use:
 //   passphrase ""        the base wallet (no passphrase)

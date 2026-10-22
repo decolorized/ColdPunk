@@ -238,6 +238,43 @@ on the device to check it against, which is why the double entry of rule 3 is
 not optional, and why the creation flow shows the resulting primary address for
 verification (TZ 4.2).
 
+### 3a. Opening a passphrase wallet (0.3.5)
+
+A wallet always opens **without** its passphrase. Every wallet's menu has
+**Open passphrase**; the passphrase wallet is reached only there. Nothing in
+the UI, the account's directory or the timing tells whether a wallet has a
+passphrase:
+
+* Every wallet entry carries `pp_rec[64]` (`wallet_store.h`): version byte,
+  IV, the passphrase wallet's private spend key under AES-256-GCM, tag. A
+  wallet without a passphrase (raw-key and view-only wallets too) gets the
+  version byte and random bytes. The sealed seed record no longer carries the
+  old 14-byte check mark.
+* Key: PBKDF2-HMAC-SHA256 over the passphrase, `MW_PP_KDF_ROUNDS` = 500 000
+  rounds split into 8 chunks; between the chunks and at the end the state goes
+  through the eFuse HMAC (`mw_secure_hw_hmac`), salted with the account uid
+  and the wallet id. A guess needs this chip, so a flash dump cannot be
+  attacked on a GPU; on the chip it costs about a second or more.
+* Opening runs the full derivation and one GCM decryption for every wallet
+  and every input; only the final tag check differs. The answer is the same
+  "wrong passphrase". There is no attempt counter: the derivation time is
+  the limit.
+* The CryptoNight seed offset (seconds on the chip, needed for Feather/CLI
+  compatibility) runs once, at creation or import. A passphrase cannot be
+  added, changed or removed later - an "add a passphrase" item would itself
+  tell whether one exists.
+* The "with passphrase" mark appears only inside the session opened with it;
+  the wallet list has no mark.
+* A Cake/Cupcake (encrypted polyseed) record opened without its passphrase
+  gives the wallet of the masked phrase - some empty wallet, not an error.
+* Records of firmware before 0.3.5 that were created with a passphrase have
+  no `pp_rec` yet (all zero); the first right "Open passphrase" opens them the
+  old way (CryptoNight + the old check) and writes their record. Until then
+  their entry differs from the others inside the sealed directory. Records
+  of firmware before the check existed (`MW_PP_UNKNOWN`) keep opening the old
+  way: a record bound to an unverifiable passphrase could lock out the right
+  one.
+
 ---
 
 ## 4. eFuse provisioning procedure
@@ -270,10 +307,11 @@ all six blocks (read-only).
 
 ### 4.1 On-device (the normal path)
 
-1. The device does not work without the key: right after the unlock gesture,
+1. The device does not work without the key: at start (after the game
+   gesture when the Minesweeper option is on),
    **before the account password**, a chip without it shows the first-start
-   notice and the provisioning screens (naming the block). Declining returns
-   to the game. When no key block is free, the device says so, lists the
+   notice and the provisioning screens (naming the block). Declining goes
+   back to the start. When no key block is free, the device says so, lists the
    blocks and does not continue.
 2. Confirm screen 1: *"A random 256-bit HMAC key will be burned into eFuse
    BLOCK_KEYn ..."*
@@ -499,7 +537,7 @@ counter) or run firmware without a counter at all (§6.3).
 
 **Not hidden.** That the device supports several users (the Settings items
 are always there; each account has a name, seen only by that account).
-A passphrase wallet is marked `*` in the account's list.
+Since 0.3.5 nothing marks a passphrase wallet (§3a).
 Whether the password just typed belongs to the first user
 or to another one may be told from a few milliseconds of timing (the second
 needs a file read). Settings, the touch calibration and the eFuse key are
@@ -515,8 +553,9 @@ a coercer that no other account was left). The device stays on the password
 screen; nothing opens any more, and the reset phrase is the way out.
 
 **Passphrase hints.** A wallet's optional hint (up to 31 characters) is kept
-in the sealed directory and shown before its passphrase is asked - to
-whoever has opened that account. It must never contain the passphrase.
+in the sealed directory and shown on *Open passphrase* - to whoever has
+opened that account. Any wallet can have one, so a hint does not prove a
+passphrase. It must never contain the passphrase.
 
 **Power loss.** Since 0.3 the `storage` partition is LittleFS, which is
 copy-on-write: a file being written is committed when it is closed, and a
@@ -794,11 +833,13 @@ and are not mitigated here.
   (`ki_cache.c`) is sealed (AES-GCM, device key) on the storage partition and
   erased with its wallet and by the factory reset.
 * **The Minesweeper start screen is a decoy, not a security boundary.** It
-  hides the wallet from a casual look; the account password is what protects
-  the sealed seeds. The USB descriptors still name the device.
+  is optional (Settings → Minesweeper at start, off by default) and hides the
+  wallet from a casual look; the account password is what protects the
+  sealed seeds. The USB descriptors still name the device.
 * **Autolock** closes whatever dialog is open, wipes the keys, drops the
   password-derived user key (`mw_device_auth_forget`) and clears the link's
-  inbox/outbox; unlocking again needs the game gesture and the password.
+  inbox/outbox; unlocking again needs the password (and the game gesture
+  when the game is on).
 * **Log rule.** The PC log carries what the device does and why it refused
   something; debug mode adds indices, subaddresses, counts and amounts. Keys,
   seeds, passphrases and key images are never logged; the review logs the

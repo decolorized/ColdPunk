@@ -507,6 +507,9 @@ typedef struct {
     const char* body;
     const char* ok;
     const char* cancel;
+    const char* check;          // label of an optional check box (NULL: none)
+    bool        checked;
+    lv_obj_t*   cb;
     mw_page_t   page;
     bool        done;
 } confirm_ctx_t;
@@ -516,6 +519,8 @@ static confirm_ctx_t s_confirm;
 static void confirm_finish(confirm_ctx_t* c, int32_t r) {
     if (c->done) return;
     c->done = true;
+    if (c->cb) c->checked = lv_obj_has_state(c->cb, LV_STATE_CHECKED);
+    c->cb = NULL;
     mw_ui_page_destroy(&c->page);
     mw_ui_modal_done(r);
 }
@@ -540,6 +545,20 @@ static void confirm_build(void* arg) {
     lv_obj_t* box = make_scroll_body(c->page.body, c->body);
     add_scroll_hint_into(box, c->body);
 
+    // 0.3.5: an optional check box under the text (touch: tap it; buttons:
+    // it takes the focus like the buttons, SELECT toggles it).
+    c->cb = NULL;
+    if (c->check) {
+        lv_obj_t* cb = lv_checkbox_create(c->page.body);
+        lv_checkbox_set_text(cb, c->check);
+        lv_obj_set_width(cb, lv_pct(100));
+        lv_obj_set_style_text_font(cb, mw_metrics()->font_body, LV_PART_MAIN);
+        lv_obj_set_style_text_color(cb, mw_palette()->text, LV_PART_MAIN);
+        lv_obj_set_style_pad_ver(cb, mw_metrics()->gap, LV_PART_MAIN);
+        if (c->checked) lv_obj_add_state(cb, LV_STATE_CHECKED);
+        c->cb = cb;
+    }
+
     lv_obj_t* f  = mw_ui_page_footer(&c->page);
     if (!f) return;
 
@@ -548,9 +567,10 @@ static void confirm_build(void* arg) {
     lv_obj_set_flex_grow(bc, 1);
     lv_obj_set_flex_grow(bo, 1);
 
-    // Only the buttons take the focus. The scrolling text has no action,
-    // and a focus on it makes the dialog look like it has no controls at
-    // all on a small panel.
+    // Only the buttons (and the check box) take the focus. The scrolling
+    // text has no action, and a focus on it makes the dialog look like it
+    // has no controls at all on a small panel.
+    if (c->cb) mw_ui_focus_add(&c->page, c->cb);
     mw_ui_focus_add(&c->page, bc);
     mw_ui_focus_add(&c->page, bo);
     lv_group_focus_obj(bc);
@@ -570,8 +590,27 @@ bool mw_ui_confirm(const char* title, const char* body,
     s_confirm.body   = body   ? body   : "";
     s_confirm.ok     = ok     ? ok     : T(STR_CONFIRM);
     s_confirm.cancel = cancel ? cancel : T(STR_CANCEL);
+    s_confirm.check  = NULL;
+    s_confirm.checked = false;
+    s_confirm.cb     = NULL;
     s_confirm.done   = false;
     return mw_ui_modal_call(confirm_build, &s_confirm) == 1;
+}
+
+bool mw_ui_confirm_check(const char* title, const char* body, const char* ok,
+                         const char* cancel, const char* check, bool* checked) {
+    s_confirm.title  = title  ? title  : T(STR_CONFIRM);
+    s_confirm.body   = body   ? body   : "";
+    s_confirm.ok     = ok     ? ok     : T(STR_CONFIRM);
+    s_confirm.cancel = cancel ? cancel : T(STR_CANCEL);
+    s_confirm.check  = check;
+    s_confirm.checked = checked ? *checked : false;
+    s_confirm.cb     = NULL;
+    s_confirm.done   = false;
+    const bool yes = mw_ui_modal_call(confirm_build, &s_confirm) == 1;
+    if (checked) *checked = s_confirm.checked;
+    s_confirm.check = NULL;
+    return yes;
 }
 
 // ---------------- message --------------------------------------------------
@@ -923,6 +962,7 @@ typedef struct {
     const char* title;
     const char* text;
     mw_page_t   page;
+    lv_obj_t*   box;
     bool        done;
 } textview_ctx_t;
 
@@ -937,6 +977,27 @@ static void textview_close(void) {
 static void textview_cb(lv_event_t* e)     { MW_UNUSED(e); textview_close(); }
 static void textview_escape(void* user)    { MW_UNUSED(user); textview_close(); }
 static void textview_cancel_now(void)       { textview_close(); }
+
+// 0.3.5: buttons scroll the text (the Close button has the focus): up/down a
+// few lines, left/right a page.
+static void textview_key_cb(lv_event_t* e) {
+    textview_ctx_t* c = (textview_ctx_t*)lv_event_get_user_data(e);
+    if (!c || !c->box) return;
+    const uint32_t k = lv_event_get_key(e);
+    const int32_t line = 3 * lv_font_get_line_height(mw_metrics()->font_mono);
+    const int32_t page = lv_obj_get_content_height(c->box) * 4 / 5;
+    int32_t dy = 0;
+    if (k == LV_KEY_UP || k == LV_KEY_PREV)   dy = line;
+    if (k == LV_KEY_DOWN || k == LV_KEY_NEXT) dy = -line;
+    if (k == LV_KEY_LEFT)  dy = page;
+    if (k == LV_KEY_RIGHT) dy = -page;
+    if (!dy) return;
+    // Not past either end.
+    if (dy > 0 && lv_obj_get_scroll_top(c->box) <= 0) return;
+    if (dy < 0 && lv_obj_get_scroll_bottom(c->box) <= 0) return;
+    lv_obj_scroll_by_bounded(c->box, 0, dy, LV_ANIM_ON);
+    lv_event_stop_processing(e);
+}
 
 static void textview_build(void* arg) {
     textview_ctx_t* c = (textview_ctx_t*)arg;
@@ -953,7 +1014,12 @@ static void textview_build(void* arg) {
     lv_obj_set_style_max_height(box, lv_pct(100), LV_PART_MAIN);
     lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(box, LV_DIR_VER);
-    MW_OBJ_CLEAR_FLAG(box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_scrollbar_mode(box, LV_SCROLLBAR_MODE_AUTO);
+    // 0.3.5: clickable, or a finger on the text found nothing to drag and the
+    // long lists (signed transactions) did not scroll.
+    lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
+    MW_OBJ_CLEAR_FLAG(box, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    c->box = box;
 
     lv_obj_t* l = mw_ui_label(box, c->text, mw_style_mono());
     lv_obj_add_flag(l, LV_OBJ_FLAG_EVENT_BUBBLE);
@@ -962,6 +1028,7 @@ static void textview_build(void* arg) {
     if (!f) return;
     lv_obj_t* b = mw_ui_button(f, TX(XSTR_CLOSE), textview_cb, c);
     lv_obj_set_flex_grow(b, 1);
+    lv_obj_add_event_cb(b, textview_key_cb, LV_EVENT_KEY, c);   // before the page's
     mw_ui_focus_add(&c->page, b);
     lv_group_focus_obj(b);
 }
@@ -969,6 +1036,7 @@ static void textview_build(void* arg) {
 void mw_ui_text_view(const char* title, const char* text) {
     s_textview.title = title ? title : "";
     s_textview.text  = text  ? text  : "";
+    s_textview.box   = NULL;
     s_textview.done  = false;
     (void)mw_ui_modal_call(textview_build, &s_textview);
 }

@@ -81,7 +81,7 @@ enc 0x10000 coldpunk.bin
 
 cp "$ESPTOOL" "$ESPEFUSE"     "$OUT/"
 cp "$ET_DIR/LICENSE"          "$OUT/esptool-LICENSE.txt"
-for f in flash.sh flash.bat secure-first-flash.sh secure-first-flash.bat efuse-state.ps1 README.txt; do
+for f in flash.sh flash.bat secure-first-flash.sh secure-first-flash.bat efuse-state.ps1 devices.ps1 README.txt; do
     cp "tools/flash/secure/$f" "$OUT/"
 done
 chmod +x "$OUT/flash.sh" "$OUT/secure-first-flash.sh" "$OUT/esptool" "$OUT/espefuse"
@@ -92,6 +92,10 @@ chmod +x "$OUT/flash.sh" "$OUT/secure-first-flash.sh" "$OUT/esptool" "$OUT/espef
 od -An -tx1 -v "$W/digest.bin" | tr -d ' \n' > "$OUT/secure_boot_key_digest.txt"
 echo >> "$OUT/secure_boot_key_digest.txt"
 echo "$(sha256 "$FE_KEY")" > "$OUT/flash_encryption_key_sha256.txt"
+# The bootloader in this folder (signed, before encryption) and the version:
+# secure-first-flash records them in keys/devices.txt, flash.sh compares.
+echo "$(sha256 "$OUT/first/bootloader.bin")" > "$OUT/bootloader_sha256.txt"
+echo "$VERSION" > "$OUT/version.txt"
 cp_sums "$OUT" first/bootloader.bin first/partitions.bin first/boot_app0.bin first/coldpunk.bin \
     update/bootloader.bin update/partitions.bin update/boot_app0.bin update/coldpunk.bin
 
@@ -99,4 +103,4 @@ echo
 echo "Done: firmware/$NAME"
 echo "  signed bootloader: $bl_size bytes; key digest $(cat "$OUT/secure_boot_key_digest.txt")"
 echo "First time (irreversible): firmware/$NAME/secure-first-flash.sh [port]"
-echo "Updates of a secured device: firmware/$NAME/flash.sh [port]"
+echo "Updates of a secured device: firmware/$NAME/flash.sh [port]   (firmware only; 'full' also writes the bootloader)"

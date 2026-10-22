@@ -6,9 +6,9 @@ rem
 rem   secure-first-flash.bat [COMx] [baud]
 rem
 rem What it does:
-rem   1. checks the images (SHA256SUMS.txt) and that the flash encryption key
-rem      file is the one this folder was built with
-rem      (..\..\keys\flash_encryption_key.bin, or COLDPUNK_KEYS);
+rem   1. checks the images (SHA256SUMS.txt) and that both keys this folder was
+rem      built with are the ones in the keys folder (..\..\keys, or
+rem      COLDPUNK_KEYS): the signing key digest and the flash encryption key;
 rem   2. reads the chip's eFuses and stops when: secure boot or flash
 rem      encryption is already on (use flash.bat), the wallet's own eFuse key
 rem      (HMAC_UP) is missing (start the normal firmware once and finish the
@@ -21,7 +21,9 @@ rem On that start the bootloader burns the digest of your signing key, revokes
 rem the other two digest slots, encrypts the bootloader, partition table,
 rem otadata and firmware in place and locks the chip down (JTAG off, Secure
 rem Download Mode). This takes up to a minute with a dark screen: do not cut
-rem the power. The wallets (NVS, storage) are kept.
+rem the power. The wallets (NVS, storage) are kept. The device is then
+rem recorded in keys\devices.txt; flash.bat of later build-secure folders
+rem checks it.
 setlocal EnableExtensions
 cd /d "%~dp0"
 
@@ -44,8 +46,18 @@ set "HAVE="
 for /f "skip=1 delims=" %%H in ('certutil -hashfile "%FE_KEY%" SHA256') do if not defined HAVE set "HAVE=%%H"
 set "HAVE=%HAVE: =%"
 set /p WANT=<flash_encryption_key_sha256.txt
+set "WANT=%WANT: =%"
 if /i not "%HAVE%"=="%WANT%" (
     echo %FE_KEY% is not the key this folder was built with.
+    goto :fail
+)
+set /p DIGEST=<secure_boot_key_digest.txt
+set "DIGEST=%DIGEST: =%"
+set "KDIGEST="
+if exist "%KEYS%\secure_boot_key_digest.txt" set /p KDIGEST=<"%KEYS%\secure_boot_key_digest.txt"
+if defined KDIGEST set "KDIGEST=%KDIGEST: =%"
+if /i not "%KDIGEST%"=="%DIGEST%" (
+    echo This folder is signed with a different key than %KEYS%\secure_boot_signing_key.pem.
     goto :fail
 )
 
@@ -119,6 +131,9 @@ if not "%ANSWER%"=="SECURE" (
     echo Cancelled, nothing was changed.
     goto :fail
 )
+set "DEVNAME="
+set /p "DEVNAME=A name for this device in keys\devices.txt (Enter: device): "
+if not defined DEVNAME set "DEVNAME=device"
 
 rem ---- burn the key, write the images ------------------------------------------
 if not defined BURN_BLOCK goto :write
@@ -134,12 +149,18 @@ if errorlevel 1 (
     goto :fail
 )
 
+set /p BLSHA=<bootloader_sha256.txt
+set /p FWVER=<version.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File devices.ps1 add "%KEYS%\devices.txt" "%DEVNAME%" %DIGEST% %BLSHA: =% %FWVER: =%
+
 echo.
 echo Written. The board restarts and the bootloader now turns on secure boot and
 echo flash encryption: the screen stays dark for up to a minute. DO NOT unplug it.
-echo Then the device starts as usual (the game screen).
+echo Then the device starts as usual. Settings -^> About shows "SB key" with the
+echo digest above.
 echo.
-echo From now on update it only with flash.bat from a build-secure folder.
+echo Recorded in %KEYS%\devices.txt. From now on update it only with flash.bat
+echo from a build-secure folder made with the same keys (firmware only by default).
 pause
 exit /b 0
 

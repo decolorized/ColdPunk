@@ -1097,7 +1097,8 @@ MW_TEST(test_settings_persist_and_version)
     CHECK_EQ_INT(s.debug_log, 0);
     CHECK_EQ_INT(s.autolock_min, MW_AUTOLOCK_DEFAULT_MIN);
     CHECK_EQ_INT(s.touch_calibrated, 0);
-    CHECK_EQ_INT(s.version, 2);
+    CHECK_EQ_INT(s.game, 0);                 // v0.3.4: no Minesweeper by default
+    CHECK_EQ_INT(s.version, 3);
 
     s.keyboard         = KEYBOARD_SCROLL;
     s.kb_layout        = KB_LAYOUT_ABC;
@@ -1107,9 +1108,11 @@ MW_TEST(test_settings_persist_and_version)
     s.network          = MW_NET_STAGENET;
     s.touch_calibrated = true;
     for (int i = 0; i < 6; i++) s.touch_calib[i] = -1000 * (i + 1);
+    s.game             = true;
     CHECK_EQ_INT(mw_settings_save(&s), MW_OK);
 
     CHECK_EQ_INT(mw_settings_load(&r), MW_OK);
+    CHECK_EQ_INT(r.game, 1);
     CHECK_EQ_INT(r.keyboard, KEYBOARD_SCROLL);
     CHECK_EQ_INT(r.kb_layout, KB_LAYOUT_ABC);
     CHECK_EQ_INT(r.debug_log, 1);
@@ -1139,7 +1142,7 @@ MW_TEST(test_settings_bad_blob_falls_back_to_defaults)
     mw_settings_test_set_display(0, 128, 64);
     CHECK_EQ_INT(mw_store_blob_write("settings", bogus, sizeof bogus), MW_OK);
     CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
-    CHECK_EQ_INT(s.version, 2);
+    CHECK_EQ_INT(s.version, 3);
 
     // A v1 blob (36 bytes, usb_mode at [6]) from the previous firmware is
     // rejected on length and version alike and falls back to defaults.
@@ -1157,7 +1160,8 @@ MW_TEST(test_settings_bad_blob_falls_back_to_defaults)
 }
 
 // v5: the touch calibration geometry tag lives in the reserved bytes 37..39
-// of the v2 blob - no version or length change.
+// of the v2 blob - no version or length change. v0.3.4 (version 3, 44 bytes)
+// keeps them where they were.
 MW_TEST(test_settings_touch_cal_tag)
 {
     extern mw_err_t mw_store_blob_write(const char* key, const void* data, size_t len);
@@ -1184,8 +1188,8 @@ MW_TEST(test_settings_touch_cal_tag)
     CHECK_EQ_INT(mw_settings_save(&s), MW_OK);
 
     CHECK_EQ_INT(mw_store_blob_read("settings", b, sizeof b, &len), MW_OK);
-    CHECK_EQ_INT((int)len, 40);
-    CHECK_EQ_INT(b[4], 2);                    // still version 2
+    CHECK_EQ_INT((int)len, 44);
+    CHECK_EQ_INT(b[4], 3);                    // version 3: + options byte
     CHECK_EQ_INT(b[37], 0x85);
     CHECK_EQ_INT(b[38], 40);
     CHECK_EQ_INT(b[39], 30);
@@ -1221,6 +1225,7 @@ MW_TEST(test_settings_touch_cal_tag)
     CHECK_EQ_INT(r.touch_cal_tag[0], 0);
     CHECK_EQ_INT(r.touch_cal_tag[1], 0);
     CHECK_EQ_INT(r.touch_cal_tag[2], 0);
+    CHECK_EQ_INT(r.game, 1);                  // older firmware: the game stays
 }
 
 int main(void)

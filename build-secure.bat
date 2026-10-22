@@ -88,7 +88,7 @@ call :enc 0x10000 coldpunk.bin   || goto :fail
 copy /y "%ESPTOOL%"        "%OUT%\esptool.exe"  >nul || goto :fail
 copy /y "%ESPEFUSE%"       "%OUT%\espefuse.exe" >nul || goto :fail
 copy /y "%ET_DIR%\LICENSE" "%OUT%\esptool-LICENSE.txt" >nul
-for %%F in (flash.bat flash.sh secure-first-flash.bat secure-first-flash.sh efuse-state.ps1 README.txt) do (
+for %%F in (flash.bat flash.sh secure-first-flash.bat secure-first-flash.sh efuse-state.ps1 devices.ps1 README.txt) do (
     copy /y "tools\flash\secure\%%F" "%OUT%\" >nul || goto :fail
 )
 rem Which keys this folder belongs to: the digest of the signing key's public
@@ -99,6 +99,11 @@ call "%LIB%" :hex "%W%\digest.bin" || goto :fail
 > "%OUT%\secure_boot_key_digest.txt" echo %HEX%
 call "%LIB%" :sha256 "%FE_KEY%" || goto :fail
 > "%OUT%\flash_encryption_key_sha256.txt" echo %SHA%
+rem The bootloader in this folder (signed, before encryption) and the version:
+rem secure-first-flash records them in keys\devices.txt, flash.bat compares.
+call "%LIB%" :sha256 "%OUT%\first\bootloader.bin" || goto :fail
+> "%OUT%\bootloader_sha256.txt" echo %SHA%
+> "%OUT%\version.txt" echo %VERSION%
 call "%LIB%" :sums "%OUT%" first/bootloader.bin first/partitions.bin first/boot_app0.bin first/coldpunk.bin update/bootloader.bin update/partitions.bin update/boot_app0.bin update/coldpunk.bin || goto :fail
 
 call "%LIB%" :unmap
@@ -106,7 +111,7 @@ echo.
 echo Done: firmware\%NAME%
 echo   signed bootloader: %BL_SIZE% bytes; key digest %HEX%
 echo First time (irreversible): firmware\%NAME%\secure-first-flash.bat [COMx]
-echo Updates of a secured device: firmware\%NAME%\flash.bat [COMx]
+echo Updates of a secured device: firmware\%NAME%\flash.bat [COMx]   (firmware only; "full" also writes the bootloader)
 if defined PAUSE_AT_END pause
 exit /b 0
 

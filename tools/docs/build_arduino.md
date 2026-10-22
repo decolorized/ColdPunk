@@ -115,7 +115,7 @@ https://espressif.github.io/arduino-esp32/package_esp32_index.json
 | Пункт меню Tools | Значение | Почему |
 | :--- | :--- | :--- |
 | Board | ESP32S3 Dev Module | ТЗ 1.4: только S3 |
-| USB CDC On Boot | **Enabled** (рекомендуется; собирается при любом значении) | `Serial` = USB CDC несёт протокол программы на ПК, консоль уходит на UART0. При Disabled протокол идёт по UART0, а консоль UART0 отключается. Таблица режимов — `usb_link_protocol.md` §1 |
+| USB CDC On Boot | **Disabled** (0.3.5, как в профилях; собирается при любом значении) | до пароля на USB ничего нет, после входа устройство появляется как «Monero Cold Wallet» с HID (и своим COM-портом при `MW_USE_SERIAL 1`); консоль на UART0. При Enabled ядро поднимает USB сразу при включении под именем Espressif. Таблица режимов — `usb_link_protocol.md` §1 |
 | CPU Frequency | 240 MHz | Bulletproofs+ упирается в CPU |
 | Core Debug Level | None (для релиза) / Info (при отладке) | лог не должен содержать секретов |
 | USB DFU On Boot | Disabled | конфликтует с MSC |
@@ -347,7 +347,7 @@ NVS. Это осознанный компромисс, а не выполнен�
 
 | Вариант | SERIAL | HID | SD | CDC On Boot |
 | :--- | :---: | :---: | :---: | :--- |
-| Всё (по умолчанию, профиль `coldpunk`) | 1 | 1 | 1 | Enabled |
+| Всё (по умолчанию, профиль `coldpunk`) | 1 | 1 | 1 | Disabled |
 | Только HID, без COM-порта (профиль `coldpunk-hid`) | 0 | 1 | 1 | Disabled |
 | Без USB-обмена, только SD-карта | 0 | 0 | 1 | Disabled |
 | Без SD | 1 | 1 | 0 | Enabled |
@@ -423,15 +423,15 @@ void setup() {
 | `mw_cn_slow_hash_init()` возвращает −1 | нет 2 МиБ непрерывного PSRAM | вызывать до всего остального; проверить `heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)` |
 | Скетч не влезает во флеш | схема разделов по умолчанию | `Huge APP` или своя таблица |
 | Нет HID-устройства, только COM-порт | `USB Mode` = `Hardware CDC and JTAG` — TinyUSB не линкуется | поставить `USB-OTG (TinyUSB)`; протокол по COM-порту работает и так |
-| Нет COM-порта на USB | `USB CDC On Boot` = Disabled — `Serial` ушёл на UART0 | включить, либо подключать программу к UART0 через USB-UART |
+| Нет COM-порта на USB | не введён пароль (0.3.5: USB появляется после входа) или `USB Mode` = Hardware CDC с CDC On Boot = Disabled | войти в аккаунт; `USB Mode` = USB-OTG |
 | COM-порт есть, но устройство не отвечает | собрано с `MW_USE_SERIAL 0` (§2a) | подключаться по HID (`mwlink` без `--serial`) или собрать с `MW_USE_SERIAL 1` |
 | MoneroPunkSigner: «HID device not found» | собрано с `MW_USE_HID 0` или `USB Mode` = Hardware CDC | §2a; `USB Mode` = USB-OTG |
 | Нет пункта «SD card files» | у платы `HAS_SD 0` или собрано с `MW_USE_SD 0` | §2a |
 | Ошибка сборки «No exchange interface» | выключены все интерфейсы | включить хотя бы один (§2a) |
-| Нет консоли на UART0 | `USB CDC On Boot` = Disabled — UART0 занят протоколом | включить CDC On Boot; лог всё равно виден в консоли программы на ПК |
+| Нет консоли на UART0 | `USB Mode` = Hardware CDC и CDC On Boot = Disabled — UART0 занят протоколом | `USB Mode` = USB-OTG; лог всё равно виден в консоли программы на ПК |
 | Windows показывает устройство с ошибкой после смены набора интерфейсов | кэш дескрипторов по VID/PID | удалить устройство в Диспетчере устройств и переподключить |
 | Порт исчезает после прошивки | USB переключился в MSC | перевести в загрузчик: удерживая BOOT, нажать RESET |
-| Нет Serial-вывода | `USB CDC On Boot` = Disabled | включить |
+| Нет Serial-вывода по USB | так задумано (0.3.5): консоль на UART0 | смотреть UART0 через USB-UART или лог в программе на ПК |
 | После перепрошивки пропали кошельки | `Erase All Flash Before Sketch Upload` = Enabled | выключить |
 | Цвета инвертированы / переставлены байты | `LV_COLOR_FORMAT_DEFAULT` | переключить между `LV_COLOR_FORMAT_RGB565` и `LV_COLOR_FORMAT_RGB565_SWAPPED` (не `LV_COLOR_16_SWAP` — он устарел) |
 | Windows не видит новый файл на MSC | кэш SCSI | `mw_usb_media_changed()` — Unit Attention 0x28/0x00 (ТЗ 3.3) |

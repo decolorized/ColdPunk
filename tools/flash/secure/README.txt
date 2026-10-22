@@ -6,6 +6,7 @@ Built by build-secure for the keys in the project's keys/ folder:
                                    the chip holds after the first start)
   flash_encryption_key_sha256.txt  hash of the flash encryption key file
                                    (to recognise the right file)
+  bootloader_sha256.txt, version.txt  recorded in keys/devices.txt
 
 Files
   first/        signed images, NOT encrypted - only for secure-first-flash
@@ -14,6 +15,7 @@ Files
   secure-first-flash.bat/.sh  one time: burns the key, writes first/
   flash.bat/.sh               updates of an already secured device
   SHA256SUMS.txt              checksums of all images (checked by both)
+  efuse-state.ps1, devices.ps1  helpers of the Windows scripts
 
 Before the first time
   * The device must have been started with the NORMAL firmware once and
@@ -32,12 +34,23 @@ First time (IRREVERSIBLE)
   Type SECURE, then BURN when espefuse asks. After writing, the board
   restarts and its bootloader turns on secure boot and flash encryption:
   up to a minute with a dark screen - do NOT unplug it. Then it starts as
-  usual. Wallets and settings are kept.
+  usual. Wallets and settings are kept. The script asks for a name and
+  records the device in keys/devices.txt.
 
 Updates
-  flash.bat COM5   /   ./flash.sh /dev/ttyUSB0
-  Always from a build-secure folder made with the same keys. A normal
-  build (build.bat / build.sh) does not boot on a secured device.
+  flash.bat COM5   /   ./flash.sh /dev/ttyUSB0          the firmware only
+  flash.bat full COM5   /   ./flash.sh full /dev/ttyUSB0   + bootloader,
+                                    partition table and otadata
+  Always from a build-secure folder made with the same keys. Before writing
+  the script checks that this folder's signing key digest and flash
+  encryption key are the ones in keys/, shows the digest and asks you to
+  compare it with Settings -> About -> "SB key" on the device. The
+  bootloader is rewritten only with "full"; the script says when this
+  folder's bootloader differs from the one recorded in keys/devices.txt.
+  The secured chip refuses plain esptool writes ("flash encryption is
+  enabled ... could brick"): the images in update/ are already encrypted,
+  so the script writes them with --force after its own checks.
+  A normal build (build.bat / build.sh) does not boot on a secured device.
 
 What changes on the device
   * Only firmware signed with your key runs; the other two key digest

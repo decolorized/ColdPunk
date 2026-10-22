@@ -4,7 +4,8 @@
 //  The root screen is only a background now: every interactive screen - the
 //  game, the password prompt, the menus - is a page run by the crypto task
 //  (flows.cpp). It shows nothing that names the wallet, because the device
-//  presents itself as a Minesweeper game until it is unlocked.
+//  can present itself as a Minesweeper game until it is unlocked
+//  (Settings -> "Minesweeper at start").
 //
 //  Group lifetime note: the keypad indev ALWAYS points at a live group.
 //  root_group_reset() creates and installs the new group before the old

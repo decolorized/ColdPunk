@@ -28,6 +28,11 @@ typedef struct {
     // Geometry tag of touch_calib (blob bytes 37..39, zero = untagged);
     // written and checked by src/hal/touch_map.h, opaque to storage.
     uint8_t         touch_cal_tag[3];
+    // v0.3.4: start as the Minesweeper game and open the password screen
+    // only after the gesture. Off by default (the password screen comes up
+    // at once); on for a device whose settings were saved by older firmware,
+    // which always started with the game.
+    bool            game;
     uint8_t         version;
 } mw_settings_t;
 
@@ -67,6 +72,11 @@ mw_err_t mw_secure_key_blocks(mw_key_block_info_t out[MW_SECURE_KEY_BLOCKS]);
 mw_err_t mw_secure_lock_flashing(void);
 // Whether all of those eFuses are burned.
 bool     mw_secure_flashing_locked(void);
+
+// Secure boot (build-secure): the digest of the signing key the chip holds,
+// as 64 hex digits (secure_boot_key_digest.txt of a build-secure folder).
+// false when secure boot is off or no digest is burned.
+bool     mw_secure_boot_digest(char hex[65]);
 
 // Raw HMAC of `msg` under the eFuse key (device) / the emulated root key
 // (host), for binding the device-password derivation to the chip

@@ -6,6 +6,7 @@
 //       ../src/monero/*.c ../src/data/*.c test_framework.c -o /tmp/t_sess && /tmp/t_sess
 
 #include "test_framework.h"
+#include <string.h>
 
 #include "crypto/memzero.h"
 #include "crypto/random.h"
@@ -204,6 +205,59 @@ MW_TEST(test_session_network_from_settings)
     CHECK_EQ_INT(mw_wallet_set_network(g_wallet_id, 9), MW_ERR_INVALID_ARG);
 }
 
+mw_err_t mw_store_blob_write(const char* key, const void* data, size_t len);
+mw_err_t mw_store_blob_read(const char* key, void* out, size_t cap, size_t* len_out);
+
+// v0.3.4: Minesweeper at start is off on a new device, kept on for settings
+// saved by older firmware (which always started with the game), and stored.
+MW_TEST(test_settings_game_option)
+{
+    mw_settings_t s;
+    uint8_t b[64];
+    size_t len = 0;
+
+    mw_host_store_set_dir(STORE_DIR);
+    mw_host_store_reset();
+    mw_settings_test_set_display(1, 240, 320);
+
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);           // no blob: defaults
+    CHECK(!s.game);
+
+    s.game = true;
+    s.brightness = 33;
+    CHECK_EQ_INT(mw_settings_save(&s), MW_OK);
+    CHECK_EQ_INT(mw_store_blob_read("settings", b, sizeof b, &len), MW_OK);
+    CHECK_EQ_INT((int)len, 44);
+    CHECK_EQ_INT(b[4], 3);
+    memset(&s, 0, sizeof s);
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
+    CHECK(s.game);
+    CHECK_EQ_INT(s.brightness, 33);
+
+    s.game = false;
+    CHECK_EQ_INT(mw_settings_save(&s), MW_OK);
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
+    CHECK(!s.game);
+
+    // The 40-byte version 2 blob of older firmware: the other settings are
+    // kept and the game stays on.
+    CHECK_EQ_INT(mw_store_blob_read("settings", b, sizeof b, &len), MW_OK);
+    b[4] = 2;
+    CHECK_EQ_INT(mw_store_blob_write("settings", b, 40), MW_OK);
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
+    CHECK(s.game);
+    CHECK_EQ_INT(s.brightness, 33);
+
+    // A version 2 header on a 44-byte blob, or a bad length: defaults.
+    CHECK_EQ_INT(mw_store_blob_write("settings", b, 44), MW_OK);
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
+    CHECK(!s.game);
+    CHECK_EQ_INT(s.brightness, 80);
+    CHECK_EQ_INT(mw_store_blob_write("settings", b, 41), MW_OK);
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
+    CHECK(!s.game);
+}
+
 int main(void)
 {
     mw_random_init();
@@ -216,6 +270,7 @@ int main(void)
     RUN_TEST(test_session_autolock_survives_millis_wraparound);
     RUN_TEST(test_session_input_buffer);
     RUN_TEST(test_session_network_from_settings);
+    RUN_TEST(test_settings_game_option);
 
     mw_session_lock();
     mw_host_store_reset();

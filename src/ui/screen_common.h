@@ -200,6 +200,12 @@ typedef enum {
     XSTR_BAL_ENTER, XSTR_BAL_BAD, XSTR_BAL_CLEAR, XSTR_SET_BALANCE, XSTR_BAL_OFF_Q,
     XSTR_JTAG_LOCK, XSTR_JTAG_W1, XSTR_JTAG_W2, XSTR_JTAG_W3, XSTR_JTAG_DONE,
     XSTR_JTAG_LOCKED, XSTR_JTAG_FAIL,
+    XSTR_SET_GAME, XSTR_GAME_HOWTO, XSTR_GAME_TURN_ON,
+    XSTR_WL_OPEN_PP,
+    XSTR_TXL_RECEIVED, XSTR_TXL_SENT, XSTR_TXL_ELSEWHERE, XSTR_TXL_UNKNOWN,
+    XSTR_TXL_OUTS, XSTR_TXL_SPENT, XSTR_TXL_CHANGE, XSTR_TXL_NOTX, XSTR_TXL_LEGEND,
+    XSTR_TXL_HINT_FULL,
+    XSTR_KI_ALL_SAVED, XSTR_KI_SAVED_FULL, XSTR_KI_SAVED_NONE, XSTR_KI_SAVED_ADDED,
     XSTR_COUNT
 } mw_xstr_id_t;
 
@@ -478,6 +484,10 @@ mw_err_t mw_screen_pin_run(const char* title, const char* hint, char* out,
 // The critical-action gate: shows `body`, then a random 4-digit number the
 // user has to type back on the keypad. true only when the number matched.
 bool     mw_ui_confirm_code(const char* title, const char* body);
+// mw_ui_confirm() with a check box `check` under the text; *checked is its
+// start state and, on return, what the user left it at (whichever button).
+bool     mw_ui_confirm_check(const char* title, const char* body, const char* ok,
+                             const char* cancel, const char* check, bool* checked);
 // "Too many attempts. Wait 1 h 05 min." for a lockout of `ms`.
 void     mw_ui_lockout_text(uint32_t ms, char* out, size_t cap);
 // 0.3.2: the progress page is up; the automatic "Please wait" page (run on

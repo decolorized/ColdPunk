@@ -6,9 +6,9 @@
 #   ./secure-first-flash.sh [port] [baud]
 #
 # What it does:
-#   1. checks the images (SHA256SUMS.txt) and that the flash encryption key
-#      file is the one this folder was built with
-#      (../../keys/flash_encryption_key.bin, or $COLDPUNK_KEYS);
+#   1. checks the images (SHA256SUMS.txt) and that both keys this folder was
+#      built with are the ones in the keys folder (../../keys, or
+#      $COLDPUNK_KEYS): the signing key digest and the flash encryption key;
 #   2. reads the chip's eFuses and stops when: secure boot or flash
 #      encryption is already on (use flash.sh), the wallet's own eFuse key
 #      (HMAC_UP) is missing (start the normal firmware once and finish the
@@ -22,6 +22,8 @@
 # otadata and firmware in place and locks the chip down (JTAG off, Secure
 # Download Mode). This takes up to a minute with a dark screen: do not cut
 # the power. The wallets (NVS, storage) are kept.
+# The device is then recorded in keys/devices.txt (date, name, key digest,
+# bootloader hash, version); flash.sh of later build-secure folders checks it.
 set -eu
 cd "$(dirname "$0")"
 here=$(pwd)
@@ -41,8 +43,12 @@ fi
 KEYS="${COLDPUNK_KEYS:-$here/../../keys}"
 FE_KEY="$KEYS/flash_encryption_key.bin"
 [ -f "$FE_KEY" ] || die "no $FE_KEY (set COLDPUNK_KEYS to the keys folder)"
-[ "$(sha "$FE_KEY")" = "$(cat flash_encryption_key_sha256.txt)" ] ||
+[ "$(sha "$FE_KEY")" = "$(tr -d ' \r\n' < flash_encryption_key_sha256.txt)" ] ||
     die "$FE_KEY is not the key this folder was built with"
+DIGEST=$(tr -d ' \r\n' < secure_boot_key_digest.txt)
+[ -f "$KEYS/secure_boot_key_digest.txt" ] &&
+[ "$(tr -d ' \r\n' < "$KEYS/secure_boot_key_digest.txt")" = "$DIGEST" ] ||
+    die "this folder is signed with a different key than $KEYS/secure_boot_signing_key.pem"
 
 PORT_ARGS=""
 [ -n "${1:-}" ] && PORT_ARGS="--port $1"
@@ -116,6 +122,9 @@ EOF
 printf 'Type SECURE to continue: '
 read -r answer
 [ "$answer" = "SECURE" ] || die "cancelled, nothing was changed"
+printf 'A name for this device in keys/devices.txt (Enter: device): '
+read -r DEVNAME
+DEVNAME=$(printf %s "${DEVNAME:-device}" | tr '\t' ' ')
 
 # ---- burn the key, write the images ------------------------------------------------
 if [ -n "$burn_block" ]; then
@@ -133,11 +142,18 @@ fi
     0x10000 first/coldpunk.bin ||
     die "writing failed. Run this script again (the key is kept), or flash a normal build to undo."
 
+REG="$KEYS/devices.txt"
+[ -f "$REG" ] || printf '# date\tname\tsecure boot key digest\tbootloader sha256\tversion\n' > "$REG"
+printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%Y-%m-%d)" "$DEVNAME" "$DIGEST" \
+    "$(tr -d ' \r\n' < bootloader_sha256.txt)" "$(tr -d ' \r\n' < version.txt)" >> "$REG"
+
 cat <<EOF
 
 Written. The board restarts and the bootloader now turns on secure boot and
 flash encryption: the screen stays dark for up to a minute. DO NOT unplug it.
-Then the device starts as usual (the game screen).
+Then the device starts as usual. Settings -> About shows "SB key" with the
+digest above.
 
-From now on update it only with flash.sh from a build-secure.sh folder.
+Recorded in $REG. From now on update it only with flash.sh from a
+build-secure folder made with the same keys (firmware only by default).
 EOF

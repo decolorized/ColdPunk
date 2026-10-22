@@ -24,8 +24,8 @@
 //     "encrypted" feature flag (bit 16) and its secret is masked with
 //     PBKDF2(passphrase, "POLYSEED mask"). Restore = polyseed_crypt() with the
 //     passphrase (unmask, clears the flag), then polyseed_keygen(), and NO
-//     seed offset. An encrypted phrase cannot be used without its passphrase
-//     (MW_ERR_DECRYPT).
+//     seed offset. Without the passphrase (0.3.5) the masked phrase is keyed
+//     as it is: some empty wallet, not an error.
 //
 // New wallets are always created in the Feather form (plain phrase).
 #include "mnemonic.h"
@@ -97,11 +97,11 @@ mw_err_t mw_seed_to_keys(mw_seed_type_t type, const uint8_t* seed_material,
         }
         if (mw_polyseed_is_encrypted(&seed)) {
             // Cake / Cupcake: the passphrase unlocks the phrase itself.
-            if (!passphrase_used(passphrase)) {
-                mw_memzero(&seed, sizeof(seed));
-                return MW_ERR_DECRYPT;
-            }
-            mw_polyseed_crypt(&seed, passphrase);
+            // 0.3.5: without one the masked secret is used as it is - a
+            // valid, empty wallet like the "no passphrase" wallet of any
+            // other seed, so the device never shows that this record needs
+            // a passphrase (wallet_store.h, mw_wallet_open_pp).
+            if (passphrase_used(passphrase)) mw_polyseed_crypt(&seed, passphrase);
             offset = 0;
         }
         mw_polyseed_keygen(&seed, MW_POLYSEED_COIN_MONERO, key);
