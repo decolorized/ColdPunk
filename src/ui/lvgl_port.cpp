@@ -641,7 +641,8 @@ const mw_settings_t* mw_ui_settings(void) {
         if (mw_settings_load(&s_settings) != MW_OK) {
             memset(&s_settings, 0, sizeof(s_settings));
             s_settings.keyboard     = mw_settings_default_keyboard();
-            s_settings.kb_layout    = KB_LAYOUT_QWERTY;
+            s_settings.kb_layout    = (mw_hal_caps() && !mw_hal_caps()->has_touch)
+                                          ? KB_LAYOUT_ABC : KB_LAYOUT_QWERTY;
             s_settings.brightness   = 80;
             s_settings.autolock_min = MW_AUTOLOCK_DEFAULT_MIN;
             s_settings.network      = MW_DEFAULT_NETWORK;

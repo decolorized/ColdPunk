@@ -1149,9 +1149,16 @@ MW_TEST(test_settings_bad_blob_falls_back_to_defaults)
     bogus[4] = 1;
     CHECK_EQ_INT(mw_store_blob_write("settings", bogus, 36), MW_OK);
     CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
-    CHECK_EQ_INT(s.kb_layout, KB_LAYOUT_QWERTY);
+    // 0.3.6: no touch -> the alphabet by default.
+    CHECK_EQ_INT(s.kb_layout, KB_LAYOUT_ABC);
     CHECK_EQ_INT(s.keyboard, KEYBOARD_SCROLL);
     CHECK_EQ_INT(s.autolock_min, MW_AUTOLOCK_DEFAULT_MIN);
+    // With touch: QWERTY.
+    mw_settings_test_set_display(1, 320, 240);
+    CHECK_EQ_INT(mw_store_blob_write("settings", bogus, 36), MW_OK);
+    CHECK_EQ_INT(mw_settings_load(&s), MW_OK);
+    CHECK_EQ_INT(s.kb_layout, KB_LAYOUT_QWERTY);
+    mw_settings_test_set_display(0, 128, 64);
 
     // Truncated blob -> defaults as well.
     CHECK_EQ_INT(mw_store_blob_write("settings", bogus, 4), MW_OK);

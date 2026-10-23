@@ -148,12 +148,11 @@ static void settings_build(void* arg) {
         (c->s.keyboard == KEYBOARD_SCROLL) ? TX(XSTR_KB_SCROLL) : TX(XSTR_KB_FULL),
         SET_KB);
 
-    // The layout only matters for the touch (full) keyboard.
-    if (mw_hal_caps()->has_touch) {
-        add(LV_SYMBOL_KEYBOARD, TX(XSTR_KB_LAYOUT),
-            (c->s.kb_layout == KB_LAYOUT_ABC) ? TX(XSTR_KB_ABC) : TX(XSTR_KB_QWERTY),
-            SET_LAYOUT);
-    }
+    // 0.3.6: the layout applies to both keyboards (the scroll strip too), so
+    // boards without touch get the choice as well.
+    add(LV_SYMBOL_KEYBOARD, TX(XSTR_KB_LAYOUT),
+        (c->s.kb_layout == KB_LAYOUT_ABC) ? TX(XSTR_KB_ABC) : TX(XSTR_KB_QWERTY),
+        SET_LAYOUT);
 
     snprintf(buf, sizeof(buf), "%d%%", (int)c->s.brightness);
     add(LV_SYMBOL_EYE_OPEN, T(STR_SETTINGS_BRIGHTNESS), buf, SET_BRIGHT);

@@ -664,17 +664,41 @@ extern "C" bool mw_secure_last_unseal_legacy(void)
 // fit its panel (the round 240x240 glass cuts the corner caps off), and the
 // AUTO rule, which only knows the bounding box, cannot see that.
 //
+// 0.3.6: a board header may write either the SEED_INPUT_* numbers of
+// app_config.h or the keyboard_type_t names (KEYBOARD_FULL / KEYBOARD_SCROLL).
+// The two cannot be told apart by the preprocessor - an enum name is 0 there,
+// which silently meant AUTO - so the value is resolved by the compiler: the
+// keyboard_type_t overload takes the enum names, the int one the numbers,
+// and anything else stops the build.
+//
 // AUTO rule, verbatim:
 //   no touch                -> KEYBOARD_SCROLL
 //   touch and >= 240x240    -> KEYBOARD_FULL
 //   touch and <  240x240    -> KEYBOARD_SCROLL
+namespace {
+enum board_kb_t { BOARD_KB_AUTO, BOARD_KB_FULL, BOARD_KB_SCROLL, BOARD_KB_BAD };
+constexpr board_kb_t board_kb(keyboard_type_t k)
+{
+    return k == KEYBOARD_FULL ? BOARD_KB_FULL
+         : k == KEYBOARD_SCROLL ? BOARD_KB_SCROLL : BOARD_KB_BAD;
+}
+constexpr board_kb_t board_kb(int m)
+{
+    return m == SEED_INPUT_AUTO ? BOARD_KB_AUTO
+         : m == SEED_INPUT_FULL_KB ? BOARD_KB_FULL
+         : m == SEED_INPUT_SCROLL_KB ? BOARD_KB_SCROLL : BOARD_KB_BAD;
+}
+constexpr board_kb_t kBoardKb = board_kb(DEFAULT_SEED_INPUT_MODE);
+static_assert(kBoardKb != BOARD_KB_BAD,
+              "DEFAULT_SEED_INPUT_MODE: use SEED_INPUT_AUTO / SEED_INPUT_FULL_KB / "
+              "SEED_INPUT_SCROLL_KB (or KEYBOARD_FULL / KEYBOARD_SCROLL)");
+}  // namespace
+
 extern "C" keyboard_type_t mw_settings_default_keyboard(void)
 {
-#if DEFAULT_SEED_INPUT_MODE == SEED_INPUT_FULL_KB
-    return KEYBOARD_FULL;
-#elif DEFAULT_SEED_INPUT_MODE == SEED_INPUT_SCROLL_KB
-    return KEYBOARD_SCROLL;
-#else
+    if (kBoardKb == BOARD_KB_FULL)   return KEYBOARD_FULL;
+    if (kBoardKb == BOARD_KB_SCROLL) return KEYBOARD_SCROLL;
+
     bool     has_touch = (HAS_TOUCH != 0);
     uint16_t w = (uint16_t)DISPLAY_WIDTH;
     uint16_t h = (uint16_t)DISPLAY_HEIGHT;
@@ -690,14 +714,16 @@ extern "C" keyboard_type_t mw_settings_default_keyboard(void)
     if (!has_touch) return KEYBOARD_SCROLL;
     if (w >= 240 && h >= 240) return KEYBOARD_FULL;
     return KEYBOARD_SCROLL;
-#endif
 }
 
 static void settings_defaults(mw_settings_t* s)
 {
     memset(s, 0, sizeof *s);
     s->keyboard         = mw_settings_default_keyboard();
-    s->kb_layout        = KB_LAYOUT_QWERTY;
+    // 0.3.6: a board without touch starts with the alphabet (the scroll
+    // strip always was ABC); Settings -> Layout switches it.
+    s->kb_layout        = (mw_hal_caps() && !mw_hal_caps()->has_touch) ? KB_LAYOUT_ABC
+                                                                       : KB_LAYOUT_QWERTY;
     s->brightness       = 80;
     s->autolock_min     = MW_AUTOLOCK_DEFAULT_MIN;
     s->touch_calibrated = false;

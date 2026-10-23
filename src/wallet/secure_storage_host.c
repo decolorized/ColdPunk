@@ -477,7 +477,7 @@ static void settings_defaults(mw_settings_t* s)
 {
     memset(s, 0, sizeof *s);
     s->keyboard         = mw_settings_default_keyboard();
-    s->kb_layout        = KB_LAYOUT_QWERTY;
+    s->kb_layout        = g_has_touch ? KB_LAYOUT_QWERTY : KB_LAYOUT_ABC;  // 0.3.6
     s->brightness       = 80;
     s->autolock_min     = MW_AUTOLOCK_DEFAULT_MIN;
     s->touch_calibrated = false;

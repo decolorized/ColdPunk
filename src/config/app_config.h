@@ -110,7 +110,11 @@
 #define MW_DEFAULT_NETWORK MW_NET_MAINNET
 #endif
 
-// Seed input mode selector (referenced by board_config.h).
+// Seed input mode selector (referenced by board_config.h). A board header
+// sets DEFAULT_SEED_INPUT_MODE to one of these (KEYBOARD_FULL /
+// KEYBOARD_SCROLL work too since 0.3.6; any other value stops the build).
+// It is the keyboard of a device with no saved settings yet; Settings ->
+// Keyboard changes it afterwards.
 #define SEED_INPUT_AUTO      0
 #define SEED_INPUT_FULL_KB   1
 #define SEED_INPUT_SCROLL_KB 2

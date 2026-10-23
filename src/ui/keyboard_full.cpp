@@ -43,6 +43,9 @@ const char* mw_kb_layer_chars(mw_kb_layer_t layer) {
 // 0..25 and its special row cells 26..29 (keyboard_scroll.cpp).
 // ---------------------------------------------------------------------------
 static const char KB_TPL_ABC[MW_KB_GRID_CELLS + 1]    = "abcdefghijklmnopqrstuvwxyz1234";
+// 0.3.6: the scroll keyboard's strip in QWERTY order (letters 0..25, then
+// the same four specials as KB_TPL_ABC).
+static const char KB_TPL_STRIP_QWERTY[MW_KB_GRID_CELLS + 1] = "qwertyuiopasdfghjklzxcvbnm1234";
 static const char KB_TPL_QWERTY[MW_KB_GRID_CELLS + 1] = "qwertyuiop"
                                                         "asdfghjkl1"
                                                         "2zxcvbnm34";
@@ -507,11 +510,14 @@ static uint8_t cmd_for_marker(char marker, bool dict) {
 
 void mw_kb_fill_cells(mw_kb_state_t* st) {
     const bool dict = mw_kb_is_dict(st);
-    // task2 item 4: QWERTY on the touch (full) keyboard when the setting says
-    // so; the scroll keyboard keeps the alphabet, its strip is 0..25.
-    st->qwerty = (st->ctx.type != KEYBOARD_SCROLL) &&
-                 (mw_ui_settings()->kb_layout == KB_LAYOUT_QWERTY);
-    const char* tpl = st->qwerty ? KB_TPL_QWERTY : KB_TPL_ABC;
+    // task2 item 4: the Layout setting picks QWERTY or ABC. The full keyboard
+    // (touch or buttons) gets the QWERTY grid; 0.3.6: the scroll keyboard's
+    // strip (cells 0..25) follows it too, in QWERTY order.
+    const bool want_qwerty = (mw_ui_settings()->kb_layout == KB_LAYOUT_QWERTY);
+    st->qwerty = (st->ctx.type != KEYBOARD_SCROLL) && want_qwerty;
+    const char* tpl = st->qwerty ? KB_TPL_QWERTY
+                    : (st->ctx.type == KEYBOARD_SCROLL && want_qwerty) ? KB_TPL_STRIP_QWERTY
+                    : KB_TPL_ABC;
     if (st->qwerty) {
         st->cols = KB_QWERTY_COLS; st->rows = KB_QWERTY_ROWS;
     } else if (st->ctx.type != KEYBOARD_SCROLL && mw_metrics()->landscape) {
