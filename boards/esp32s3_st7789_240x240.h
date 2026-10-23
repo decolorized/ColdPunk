@@ -17,7 +17,7 @@
 #ifndef BOARD_CONFIG_H
 #define BOARD_CONFIG_H
 
-#include "../MoneroColdWallet/src/config/app_config.h"
+#include "src/config/app_config.h"
 
 #define BOARD_NAME "ESP32S3-ST7789-240x240"
 
