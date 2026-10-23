@@ -1,19 +1,19 @@
-// ESP32-S3 + 2.4" ST7789 240x320 + CST816S capacitive touch + microSD.
+// ESP32-S3 + ST7789 240x320 SPI display (2.0" / 2.4" module) + 6 buttons.
 //
-// Modelled on the widely available "ESP32-S3 2.4/2.8 inch SPI TFT with
-// capacitive touch" modules (Waveshare ESP32-S3-Touch-LCD-2.8 and the many
-// clones).  As with boards/es3c28p.h, the pin numbers here are the S3-correct
-// assignment for a self-wired board rather than a transcription of one
-// vendor's schematic - check yours before the first flash.
+// The 240x320 sibling of esp32s3_st7789_240x240.h: the same dev board
+// (YD-ESP32-S3 / ESP32-S3-DevKitC-1 with an N8R8 or N16R8 module), the same
+// display and button pins; only the panel size differs, and these modules
+// have a CS pin (GPIO10). No touch, no SD card, no battery measurement.
+// Wiring: tools/docs/boards/yd-esp32-s3-st7789-240x240.md (+ CS -> GPIO10).
 //
 // Pin policy shared by every board in this directory (see boards/README.md):
 //   never used: 0, 3      strapping (BOOT, JTAG source select)
-//               19, 20    USB OTG D-/D+ - the wallet needs USB MSC/MTP
+//               19, 20    USB OTG D-/D+ - the wallet's link to the PC
 //               26..32    SPI flash
 //               33..37    octal PSRAM on -N8R8/-N16R8 modules
 //               43, 44    UART0 console
 //               45, 46    strapping (VDD_SPI, boot log)
-// That leaves 25 usable GPIOs; this board uses 13 of them.
+// This board uses 13 GPIOs: 4-9, 10-12, 14-16 (13 is the bus MISO, unwired).
 #ifndef BOARD_CONFIG_H
 #define BOARD_CONFIG_H
 
@@ -25,17 +25,16 @@
 #define DISPLAY_DRIVER   DISPLAY_ST7789
 #define DISPLAY_WIDTH    240
 #define DISPLAY_HEIGHT   320
-#define DISPLAY_ROTATION 0
-#define TFT_CS           10
-#define TFT_DC           9
-#define TFT_RST          8
-#define TFT_MOSI         11
-#define TFT_MISO         13
-#define TFT_SCK          12
-#define TFT_BL           14
+#define DISPLAY_ROTATION 0                    // portrait 240x320; 1/3 = landscape 320x240
+#define TFT_CS           10                   // white  (a module without CS: -1)
+#define TFT_DC           9                    // green
+#define TFT_RST          8                    // yellow 1
+#define TFT_MOSI         11                   // brown  (module SDA)
+#define TFT_MISO         13                   // not wired: the module has no SDO
+#define TFT_SCK          12                   // yellow 2 (module SCL)
+#define TFT_BL           14                   // violet (module BLK); black = GND
 #define TFT_BL_ACTIVE_HIGH 1
-// A 240x320 ST7789 is flush with the controller RAM; only the 240x240 panels
-// need an offset (row 80 in some rotations).
+// A 240x320 ST7789 is flush with the controller RAM: no offsets.
 #define ST7789_COL_OFFSET 0
 #define ST7789_ROW_OFFSET 0
 #define DISPLAY_IPS      1
@@ -43,13 +42,13 @@
 
 // ===== Touch =====
 #define HAS_TOUCH        0
-#define TOUCH_DRIVER     TOUCH_CST816S
+#define TOUCH_DRIVER     TOUCH_NONE
 #define TOUCH_SDA        -1
 #define TOUCH_SCL        -1
 #define TOUCH_INT        -1
 #define TOUCH_RST        -1
 
-// ===== SD Card (shares the display SPI bus) =====
+// ===== SD Card =====
 #define HAS_SD           0
 #define SD_CS            -1
 #define SD_MISO          -1
@@ -76,21 +75,19 @@
 #define CAM_PIN_PCLK     -1
 
 // ===== Buttons =====
+// Each button between its GPIO and GND (internal pull-ups, no resistors).
 #define HAS_BUTTONS      1
-#define BUTTON_UP        -1
-#define BUTTON_DOWN      -1
-#define BUTTON_LEFT      -1
-#define BUTTON_RIGHT     -1
-#define BUTTON_SELECT    -1
-#define BUTTON_BACK      -1
-#define BUTTON_ENCODER_A -1
-#define BUTTON_ENCODER_B -1
+#define BUTTON_ACTIVE_LOW 1
+#define BUTTON_UP        5
+#define BUTTON_DOWN      7
+#define BUTTON_LEFT      6
+#define BUTTON_RIGHT     4
+#define BUTTON_SELECT    15
+#define BUTTON_BACK      16
 
 // ===== Power =====
-// Li-ion through a 2:1 divider on an ADC1 channel (GPIO4 = ADC1_CH3).  ADC2
-// is unusable whenever the RF block is clocked, and even on an air-gapped
-// build ADC1 is the safer habit.
-#define BATTERY_ADC_PIN  4
+// No battery measurement (GPIO4 is the Right button).
+#define BATTERY_ADC_PIN  -1
 #define BATTERY_DIV_NUM  2
 #define BATTERY_DIV_DEN  1
 #define BATTERY_MV_EMPTY 3300
@@ -104,7 +101,7 @@
 #define HAS_USB_OTG      1
 
 // ===== Default input mode =====
-// 240x320 with touch -> full keyboard (TZ 5.5 AUTO rule).
-#define DEFAULT_SEED_INPUT_MODE  SEED_INPUT_AUTO
+// Full keyboard, walked with the buttons (as on the 240x240 board).
+#define DEFAULT_SEED_INPUT_MODE  KEYBOARD_FULL
 
 #endif

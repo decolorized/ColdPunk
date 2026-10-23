@@ -250,7 +250,7 @@ The board is chosen at compile time in [`board_config.h`](board_config.h)
 | :--- | :--- | :--- | :--- | :--- |
 | `MW_BOARD_ES3C28P` | `es3c28p.h` | ILI9341 2.8" 240×320, landscape | FT6336G touch | reference board |
 | `MW_BOARD_TOUCH_LCD_2` | `esp32s3_touch_lcd_2_240x320.h` | ST7789T3 2" 240×320, landscape | CST816D touch | Waveshare ESP32-S3-Touch-LCD-2 |
-| `MW_BOARD_ST7789_240x320` | `esp32s3_st7789_240x320.h` | ST7789 240×320 | buttons | common 2.4"/2.8" modules |
+| `MW_BOARD_ST7789_240x320` | `esp32s3_st7789_240x320.h` | ST7789 240×320 | buttons | YD-ESP32-S3 + wired 2.0"/2.4" module, wiring as 240×240 + CS |
 | `MW_BOARD_ST7789_240x240` | `esp32s3_st7789_240x240.h` | ST7789 240×240 | buttons | |
 | `MW_BOARD_ST7735S_128x160` | `esp32s3_st7735s_128x160.h` | ST7735S 128×160 | buttons | |
 | `MW_BOARD_GC9A01_ROUND` | `esp32s3_gc9a01_round.h` | GC9A01 240×240 round | CST816S touch | Waveshare Touch-LCD-1.28 |

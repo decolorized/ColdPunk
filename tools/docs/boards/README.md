@@ -8,6 +8,7 @@ what to wire where, and how to flash it. The pin settings themselves live in
 | --- | --- | --- | --- | --- | --- | --- |
 | [ES3C28P (LCDWiki 2.8")](es3c28p.md) | `boards/es3c28p.h` · `MW_BOARD_ES3C28P` | ILI9341 2.8" 240×320, IPS | FT6336G touch | yes, SDIO | nothing, all on board | tested |
 | [Waveshare ESP32-S3-Touch-LCD-2](waveshare-esp32-s3-touch-lcd-2.md) | `boards/esp32s3_touch_lcd_2_240x320.h` · `MW_BOARD_TOUCH_LCD_2` | ST7789T3 2" 240×320, IPS | CST816D touch | yes, SPI | nothing, all on board | tested |
+| [YD-ESP32-S3 + ST7789 240×320 + buttons](yd-esp32-s3-st7789-240x240.md#240320-variant) | `boards/esp32s3_st7789_240x320.h` · `MW_BOARD_ST7789_240x320` | ST7789 2.0"/2.4" 240×320, module with CS | 6 buttons | no | display and buttons, by wire (as 240×240 + CS) | self-built |
 | [YD-ESP32-S3 + ST7789 240×240 + buttons](yd-esp32-s3-st7789-240x240.md) | `boards/esp32s3_st7789_240x240.h` · `MW_BOARD_ST7789_240x240` | ST7789 1.3"/1.54" 240×240, module without CS | 6 buttons | no | display and buttons, by wire | self-built |
 
 A board is selected with one line in `board_config.h`: uncomment its
