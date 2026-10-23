@@ -814,7 +814,7 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - The typed-text line has its own row and always shows the END of the input ("..." plus the last characters).
 - Done is the check key (seed words: first candidate) or the enter key (free text).
 - Key size is measured from the room left: width = content width / columns, height = room / rows, at most 1.5x the width.
-- Grids: QWERTY 10x3; ABC 6x5 in portrait, 8x4 in landscape. ABC gives the largest keys in both orientations (landscape 39x42, portrait 38x49); portrait QWERTY stays 23x34 (10 columns in 232 px).
+- Grids (0.3.6): QWERTY and ABC both on the same 10x3 lattice — same cap size, same command cells, only the letter order differs (ABC: a–j / k–s ⌫ / ⇧ t–z ␣ ↵). Before 0.3.6 ABC was 6x5 / 8x4 with taller caps.
 - The space key is labelled "|_|".
 - Scroll keyboard: the strip shows 3-5 whole letters snapped left; caps are 1.5x the row height.
 

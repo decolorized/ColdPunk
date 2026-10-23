@@ -49,12 +49,14 @@ static const char KB_TPL_STRIP_QWERTY[MW_KB_GRID_CELLS + 1] = "qwertyuiopasdfghj
 static const char KB_TPL_QWERTY[MW_KB_GRID_CELLS + 1] = "qwertyuiop"
                                                         "asdfghjkl1"
                                                         "2zxcvbnm34";
-#define KB_ABC_COLS    6
+// 0.3.6: the full keyboard in ABC order on the QWERTY lattice - same 10x3
+// grid, same cap sizes, same command cells; only the letter order differs
+// (it used to be a 6x5 / 8x4 grid of taller caps).
+static const char KB_TPL_ABC_GRID[MW_KB_GRID_CELLS + 1] = "abcdefghij"
+                                                          "klmnopqrs1"
+                                                          "2tuvwxyz34";
+#define KB_ABC_COLS    6       // the scroll keyboard's nominal shape
 #define KB_ABC_ROWS    5
-// Landscape full keyboard: the same ABC order on an 8x4 lattice (the last
-// row holds y z and the four command cells), which gives wider caps than 6x5.
-#define KB_ABC_WIDE_COLS 8
-#define KB_ABC_WIDE_ROWS 4
 #define KB_QWERTY_COLS 10
 #define KB_QWERTY_ROWS 3
 
@@ -515,15 +517,13 @@ void mw_kb_fill_cells(mw_kb_state_t* st) {
     // strip (cells 0..25) follows it too, in QWERTY order.
     const bool want_qwerty = (mw_ui_settings()->kb_layout == KB_LAYOUT_QWERTY);
     st->qwerty = (st->ctx.type != KEYBOARD_SCROLL) && want_qwerty;
-    const char* tpl = st->qwerty ? KB_TPL_QWERTY
-                    : (st->ctx.type == KEYBOARD_SCROLL && want_qwerty) ? KB_TPL_STRIP_QWERTY
-                    : KB_TPL_ABC;
-    if (st->qwerty) {
-        st->cols = KB_QWERTY_COLS; st->rows = KB_QWERTY_ROWS;
-    } else if (st->ctx.type != KEYBOARD_SCROLL && mw_metrics()->landscape) {
-        st->cols = KB_ABC_WIDE_COLS; st->rows = KB_ABC_WIDE_ROWS;
-    } else {
+    const bool scroll = (st->ctx.type == KEYBOARD_SCROLL);
+    const char* tpl = scroll ? (want_qwerty ? KB_TPL_STRIP_QWERTY : KB_TPL_ABC)
+                             : (want_qwerty ? KB_TPL_QWERTY : KB_TPL_ABC_GRID);
+    if (scroll) {
         st->cols = KB_ABC_COLS; st->rows = KB_ABC_ROWS;
+    } else {
+        st->cols = KB_QWERTY_COLS; st->rows = KB_QWERTY_ROWS;
     }
 
     const mw_kb_layer_t layer = dict ? MW_KB_LAYER_LOWER : st->layer;
