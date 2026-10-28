@@ -29,6 +29,8 @@
 // ---------------------------------------------------------------------------
 #include "screen_common.h"
 #include "../transfer/ur.h"
+#include "../transfer/qr_encode.h"
+#include "../hal/log.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -39,7 +41,7 @@ extern "C" int mw_qr_decode_frame(const mw_camera_frame_t* frame,
                                   char* out, size_t cap) __attribute__((weak));
 
 #define MW_QR_FRAME_MS   80          // TZ 3.7: 12.5 FPS
-#define MW_UR_STR_MAX    512
+#define MW_UR_STR_MAX    1024        // 0.3.6: up to a version-20 symbol of text
 
 // ===========================================================================
 //  Animated QR display
@@ -47,6 +49,9 @@ extern "C" int mw_qr_decode_frame(const mw_camera_frame_t* frame,
 typedef struct {
     mw_page_t      page;
     mw_ur_encoder* enc;
+    const char*    ur_type;      // 0.3.6: the encoder is made in the build,
+    const uint8_t* data;         // once the code's side on screen is known
+    size_t         len;
     lv_obj_t*      qr;
     lv_obj_t*      lbl;
     lv_timer_t*    timer;
@@ -164,6 +169,24 @@ static lv_obj_t* qr_slot_fix(lv_obj_t* slot, lv_coord_t side) {
 #endif
 
 
+// 0.3.6: the largest UR fragment whose frame still gets >= 3 screen pixels
+// per module on a code `side` px wide (LVGL renders byte mode, ECC M, whole
+// pixels per module). A UR frame is "ur:<type>/<n>-<m>/" plus bytewords
+// (2 letters a byte) of a ~24-byte CBOR part header, the fragment and the
+// CRC. Kept between 30 and 200 bytes.
+static size_t qr_fragment_for(lv_coord_t side, const char* type) {
+    const int modules = side / 3;
+    int version = (modules - 17) / 4;
+    if (version > MW_QR_MAX_VERSION) version = MW_QR_MAX_VERSION;
+    if (version < 3) version = 3;
+    const size_t cap = mw_qr_byte_capacity((uint8_t)version, MW_QR_ECC_M);
+    const size_t fixed = 3 + strlen(type ? type : MW_UR_TYPE_BYTES) + 1 + 12;
+    size_t frag = cap > fixed + 2 * 28 ? (cap - fixed) / 2 - 28 : 30;
+    if (frag < 30)  frag = 30;
+    if (frag > 200) frag = 200;
+    return frag;
+}
+
 static void qrshow_finish(int32_t r) {
     if (s_show.timer) { MW_TIMER_DEL(s_show.timer); s_show.timer = NULL; }
     mw_ui_page_destroy(&s_show.page);
@@ -248,14 +271,25 @@ bool mw_screen_qr_show_run(const char* title, const char* ur_type,
     if (!data || len == 0) return false;
 
     memset(&s_show, 0, sizeof(s_show));
-    s_show.title = title ? title : TX(XSTR_SHOW_QR);
-    s_show.enc   = mw_ur_encoder_new(ur_type ? ur_type : MW_UR_TYPE_BYTES,
-                                     data, len, MW_UR_DEFAULT_FRAGMENT);
+    s_show.title   = title ? title : TX(XSTR_SHOW_QR);
+    s_show.ur_type = ur_type ? ur_type : MW_UR_TYPE_BYTES;
+    s_show.data    = data;
+    s_show.len     = len;
+    // The code's side: about the panel's short edge less the title, status
+    // and button rows (portrait) or the button column (landscape).
+    const mw_metrics_t* m = mw_metrics();
+    const lv_coord_t short_edge = m->w < m->h ? m->w : m->h;
+    const lv_coord_t side = m->landscape ? (lv_coord_t)(short_edge - 2 * m->row_h)
+                                         : (lv_coord_t)(short_edge - 2 * m->pad);
+    const size_t frag = qr_fragment_for(side, s_show.ur_type);
+    s_show.enc = mw_ur_encoder_new(s_show.ur_type, data, len, frag);
     if (!s_show.enc) {
         mw_ui_message(T(STR_ERR_GENERIC), T(STR_ERR_GENERIC));
         return false;
     }
     s_show.seq_len = mw_ur_encoder_seq_len(s_show.enc);
+    MW_LOGI("qr", "showing %s: %u bytes, %u parts of %u bytes", s_show.ur_type,
+            (unsigned)len, (unsigned)s_show.seq_len, (unsigned)frag);
 
     const int32_t r = mw_ui_modal_call(qrshow_build, &s_show);
 
@@ -363,9 +397,11 @@ bool mw_screen_qr_static_run(const char* title, const char* text) {
 
 typedef struct {
     mw_page_t page;
+    const char* title;
     lv_obj_t* canvas;
     lv_obj_t* bar;
     lv_obj_t* lbl;
+    char      status[64];
     uint16_t* frame_buf;
     uint16_t  vw, vh;
     volatile bool cancelled;
@@ -387,7 +423,7 @@ static void qrscan_open_job(void* arg) {
     qrscan_ctx_t* c = (qrscan_ctx_t*)arg;
     const mw_metrics_t* m = mw_metrics();
 
-    mw_ui_page_create(&c->page, TX(XSTR_SCAN_TITLE), true);
+    mw_ui_page_create(&c->page, c->title, true);
     mw_ui_page_set_escape(&c->page, qrscan_escape, c);
 
     if (c->frame_buf) {
@@ -427,6 +463,7 @@ static void qrscan_paint_job(void* arg) {
     qrscan_ctx_t* c = (qrscan_ctx_t*)arg;
     if (c->canvas) lv_obj_invalidate(c->canvas);
     if (c->bar)    lv_bar_set_value(c->bar, c->permille, LV_ANIM_OFF);
+    if (c->lbl && c->status[0]) lv_label_set_text(c->lbl, c->status);
 }
 
 static void qrscan_close_job(void* arg) {
@@ -436,10 +473,10 @@ static void qrscan_close_job(void* arg) {
 }
 
 bool mw_screen_qr_scan_run(const char* title, uint8_t* buf, size_t cap,
-                           size_t* len_out) {
-    MW_UNUSED(title);
+                           size_t* len_out, char* type_out, size_t type_cap) {
     if (!buf || cap == 0) return false;
     if (len_out) *len_out = 0;
+    if (type_out && type_cap) type_out[0] = '\0';
 
     const mw_hal_caps_t* caps = mw_hal_caps();
     if (!caps->has_camera) {
@@ -458,6 +495,7 @@ bool mw_screen_qr_scan_run(const char* title, uint8_t* buf, size_t cap,
     }
 
     memset(&s_scan, 0, sizeof(s_scan));
+    s_scan.title = title ? title : TX(XSTR_SCAN_TITLE);
     s_scan.vw = MW_VIEWFINDER_W;
     s_scan.vh = MW_VIEWFINDER_H;
     if (s_scan.vw > caps->width)  s_scan.vw = caps->width;
@@ -469,37 +507,56 @@ bool mw_screen_qr_scan_run(const char* title, uint8_t* buf, size_t cap,
 
     mw_ur_decoder* dec = mw_ur_decoder_new(buf, cap);
     bool ok = false;
+    static char part[MW_UR_STR_MAX];         // off the caller's stack
+    uint32_t frames = 0, read = 0;
 
-    while (!s_scan.cancelled) {
+    while (!s_scan.cancelled && dec) {
         mw_camera_frame_t frame;
         if (mw_camera_capture(&frame) == MW_OK) {
-            char part[MW_UR_STR_MAX];
+            frames++;
             if (decode(&frame, part, sizeof(part)) == 1) {
-                if (dec) mw_ur_decoder_receive(dec, part);
+                read++;
+                if (mw_ur_decoder_receive(dec, part) != MW_OK && read == 1)
+                    MW_LOGD("qr", "first code read is not a UR part");
             }
         }
         if (s_scan.frame_buf) {
             mw_camera_preview(s_scan.frame_buf, s_scan.vw, s_scan.vh);
         }
-        s_scan.permille = dec ? mw_ur_decoder_progress_permille(dec) : 0;
+        s_scan.permille = mw_ur_decoder_progress_permille(dec);
+        if (read) {
+            snprintf(s_scan.status, sizeof(s_scan.status), TX(XSTR_SCAN_PROGRESS),
+                     s_scan.permille / 10);
+        }
         mw_ui_async_call(qrscan_paint_job, &s_scan);
 
-        if (dec && mw_ur_decoder_complete(dec)) {
+        if (mw_ur_decoder_complete(dec)) {
             const uint8_t* data = NULL;
             size_t         len  = 0;
-            char           type[32];
-            if (mw_ur_decoder_result(dec, &data, &len, type, sizeof(type)) == MW_OK) {
+            char           type[33];
+            const mw_err_t re = mw_ur_decoder_result(dec, &data, &len, type, sizeof(type));
+            if (re == MW_OK && data && len <= cap) {
+                // The result sits inside `buf` behind the CBOR byte-string
+                // head: move it to the start, where the caller expects it.
+                if (data != buf) memmove(buf, data, len);
                 if (len_out) *len_out = len;
+                if (type_out && type_cap) snprintf(type_out, type_cap, "%s", type);
                 ok = true;
+            } else {
+                MW_LOGE("qr", "animated QR assembled but its checksum is wrong (%s)",
+                        mw_err_str(re));
             }
             break;
         }
-        mw_delay_ms(30);
+        mw_delay_ms(10);
     }
+    MW_LOGI("qr", "scan %s: %u frames, %u codes read", ok ? "complete" : "stopped",
+            (unsigned)frames, (unsigned)read);
 
     mw_ui_sync_call(qrscan_close_job, &s_scan);
 
     if (dec) mw_ur_decoder_free(dec);
+    mw_qr_scan_release();                     // the decoder's 67 KB working set
     mw_camera_deinit();
     if (s_scan.frame_buf) { free(s_scan.frame_buf); s_scan.frame_buf = NULL; }
     return ok;

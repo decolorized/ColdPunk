@@ -1,4 +1,5 @@
-// OV2640 camera for QR / UR scanning (TZ 3.7).
+// OV2640 / OV3660 / OV5640 camera for QR / UR scanning (TZ 3.7; 0.3.6: any
+// sensor esp32-camera detects - the pins are the same 8-bit DVP interface).
 //
 // Backend: esp32-camera (bundled with the ESP32 Arduino core as esp_camera.h).
 //
@@ -29,6 +30,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include "display_drivers.h"
+#include "log.h"
 
 // ===========================================================================
 // No camera fitted: every entry point fails cleanly
@@ -160,7 +162,14 @@ mw_err_t mw_camera_init(void)
 
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
-        if (s->set_vflip)    s->set_vflip(s, CAM_VFLIP);
+        // OV3660 and OV5640 modules deliver the picture upside down
+        // (esp32-camera's own examples flip them). The QR decoder copes with
+        // a mirrored picture too, but the viewfinder should look right.
+        int vflip = CAM_VFLIP;
+        if (s->id.PID == OV3660_PID || s->id.PID == OV5640_PID) vflip = !vflip;
+        MW_LOGI("camera", "sensor PID 0x%04x, %s", (unsigned)s->id.PID,
+                CAMERA_FRAME_SIZE == FRAMESIZE_VGA ? "VGA" : "QVGA/other");
+        if (s->set_vflip)    s->set_vflip(s, vflip);
         if (s->set_hmirror)  s->set_hmirror(s, CAM_HMIRROR);
         // A QR symbol is pure black-and-white, so push contrast up one notch
         // and leave brightness alone; over-brightening washes out the quiet

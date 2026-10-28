@@ -207,6 +207,8 @@ typedef enum {
     XSTR_TXL_HINT_FULL,
     XSTR_KI_ALL_SAVED, XSTR_KI_SAVED_FULL, XSTR_KI_SAVED_NONE, XSTR_KI_SAVED_ADDED,
     XSTR_PP_REVIEW, XSTR_PP_REVIEW_EMPTY, XSTR_PP_OPEN,
+    XSTR_WL_QR, XSTR_QR_SCAN_TITLE, XSTR_SCAN_PROGRESS, XSTR_QR_KI_TITLE,
+    XSTR_QR_SIGNED_TITLE, XSTR_QR_KI_DONE, XSTR_QR_TX_DONE, XSTR_QR_NOT_INPUT,
     XSTR_BOOTONLY, XSTR_BOOTONLY_W1, XSTR_BOOTONLY_W2, XSTR_BOOTONLY_DONE, XSTR_BOOTONLY_ALREADY,
     XSTR_COUNT
 } mw_xstr_id_t;
@@ -504,9 +506,11 @@ void     mw_ui_busy_hide_job(void);
 // record with its counter last, so a cut in between wipes again at the next
 // start). Restarts; never returns.
 void     mw_shell_wipe_device(void);
-// Viewfinder + UR assembly progress. Returns true when the sequence completed.
+// Viewfinder + UR assembly progress. Returns true when the sequence completed:
+// the payload (the CBOR byte string unwrapped) at buf[0..*len_out), the UR
+// type in `type_out` (may be NULL).
 bool mw_screen_qr_scan_run(const char* title, uint8_t* buf, size_t cap,
-                           size_t* len_out);
+                           size_t* len_out, char* type_out, size_t type_cap);
 
 // --- screen_settings.cpp ---
 void mw_screen_settings_run(void);

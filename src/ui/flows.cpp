@@ -55,6 +55,7 @@
 #include "../monero/tx.h"
 #include "../transfer/transfer.h"
 #include "../transfer/link.h"
+#include "../transfer/ur.h"
 #include "../transfer/sd_files.h"
 #include "../hal/display_drivers.h"
 #include "../wallet/device_auth.h"
@@ -1029,13 +1030,14 @@ typedef struct result_sink {
     mw_err_t (*put)(struct result_sink* s, int kind, const uint8_t* data, size_t len);
     void*       ctx;
     const char* saved_as;     // set by the SD sink after a successful write
+    bool        qr;           // 0.3.6: the result was shown as an animated QR
 } result_sink_t;
 
 static mw_err_t link_sink_put(result_sink_t* s, int kind, const uint8_t* data, size_t len) {
     MW_UNUSED(s);
     return mw_link_outbox_put((mw_file_kind_id_t)kind, data, len);
 }
-static result_sink_t s_link_sink = { link_sink_put, NULL, NULL };
+static result_sink_t s_link_sink = { link_sink_put, NULL, NULL, false };
 
 // The key image cache is full: the result is valid, but the device can no
 // longer track some outputs (a later transaction spending them is refused).
@@ -1068,6 +1070,8 @@ static void cache_full_warning(void) {
              (unsigned)lost);
     mw_ui_message(T(STR_ERR_GENERIC), msg);
 }
+
+static int classify_file(const uint8_t* data, size_t len, char* why, size_t cap);
 
 static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t len,
                            uint8_t* out, result_sink_t* sink) {
@@ -1124,7 +1128,8 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
     static char msg[640];
     size_t ml = 0;
     if (sink->saved_as) ml = (size_t)snprintf(msg, sizeof(msg), TX(XSTR_SD_SAVED), sink->saved_as);
-    else                ml = (size_t)snprintf(msg, sizeof(msg), TX(XSTR_KI_DONE),
+    else                ml = (size_t)snprintf(msg, sizeof(msg),
+                                              TX(sink->qr ? XSTR_QR_KI_DONE : XSTR_KI_DONE),
                                               (unsigned)(info.count + saved.saved));
     bool notes = false;
     auto add_note = [&](const char* fmt, ...) {
@@ -1272,7 +1277,8 @@ static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t
             snprintf(body, sizeof(body), TX(XSTR_SD_SAVED), sink->saved_as);
             mw_ui_message_timeout(T(STR_SUCCESS), body, MW_SUCCESS_MS);
         } else {
-            mw_ui_message_timeout(T(STR_SUCCESS), TX(XSTR_TX_DONE), MW_SUCCESS_MS);
+            mw_ui_message_timeout(T(STR_SUCCESS), TX(sink->qr ? XSTR_QR_TX_DONE : XSTR_TX_DONE),
+                                  MW_SUCCESS_MS);
         }
         cache_full_warning();
     }
@@ -1359,6 +1365,67 @@ static void handle_request(const mw_account_keys_t* keys, uint8_t req) {
 }
 
 // ===========================================================================
+//  Animated QR (0.3.6): Feather's offline signing without a cable
+// ===========================================================================
+// Feather (Tools -> Offline transaction signing, method "Animated QR codes")
+// shows its outputs export as `xmr-output` and an unsigned transaction as
+// `xmr-txunsigned`; the device answers with `xmr-keyimage` / `xmr-txsigned`.
+// The payloads are the same wallet2 files as over USB and on the SD card
+// (wrapped in a CBOR byte string by the UR layer), so after the scan the
+// usual handlers run: the outputs confirmation, the transaction review.
+static mw_err_t qr_sink_put(result_sink_t* s, int kind, const uint8_t* data, size_t len) {
+    MW_UNUSED(s);
+    const bool ki = (kind == MW_FILE_KIND_KEYIMAGES);
+    MW_LOGI("qr", "showing the %s (%u bytes)", ki ? "key images" : "signed transaction",
+            (unsigned)len);
+    // Cancel = the PC did not take it: no "done" message, and a signed
+    // transaction is not recorded as sent (handle_unsigned stops on an error).
+    return mw_screen_qr_show_run(TX(ki ? XSTR_QR_KI_TITLE : XSTR_QR_SIGNED_TITLE),
+                                 ki ? MW_UR_TYPE_XMR_KEYIMAGE : MW_UR_TYPE_XMR_TXSIGNED,
+                                 data, len)
+               ? MW_OK : MW_ERR_ABORTED;
+}
+
+static void qr_exchange(const mw_account_keys_t* keys) {
+    uint8_t* file = (uint8_t*)big_alloc(MW_FLOW_FILE_CAP);
+    uint8_t* out  = (uint8_t*)big_alloc(MW_FLOW_FILE_CAP);
+    if (!file || !out) {
+        big_free(file, MW_FLOW_FILE_CAP);
+        big_free(out, MW_FLOW_FILE_CAP);
+        ui_err(MW_ERR_MEMORY);
+        return;
+    }
+    link_state(MW_LINK_STATE_BUSY);        // the PC must not push files meanwhile
+    size_t len = 0;
+    char type[33];
+    if (mw_screen_qr_scan_run(TX(XSTR_QR_SCAN_TITLE), file, MW_FLOW_FILE_CAP, &len,
+                              type, sizeof(type))) {
+        MW_LOGI("qr", "ur:%s received (%u bytes)", type, (unsigned)len);
+        // By content, like the USB link: the UR type is only a label.
+        const int kind = classify_file(file, len, NULL, 0);
+        result_sink_t sink = { qr_sink_put, NULL, NULL, true };
+        if (kind == MW_FILE_KIND_OUTPUTS) {
+            mw_hal_crumb_set(MW_CRUMB_OP_KEYIMAGES, MW_CRUMB_STAGE_LOAD);
+            handle_outputs(keys, file, len, out, &sink);
+            mw_hal_crumb_clear();
+        } else if (kind == MW_FILE_KIND_UNSIGNED_TX) {
+            mw_hal_crumb_set(MW_CRUMB_OP_SIGN, MW_CRUMB_STAGE_LOAD);
+            handle_unsigned(keys, file, len, out, &sink);
+            mw_hal_crumb_clear();
+        } else {
+            char msg[160];
+            snprintf(msg, sizeof(msg), TX(XSTR_QR_NOT_INPUT), type);
+            mw_ui_message(TX(XSTR_FILE_ERROR), msg);
+        }
+    }
+    mw_memzero(file, MW_FLOW_FILE_CAP);
+    big_free(file, MW_FLOW_FILE_CAP);
+    big_free(out, MW_FLOW_FILE_CAP);
+    mw_link_bump_seq();
+    link_state(MW_LINK_STATE_WALLET);
+}
+
+// ===========================================================================
 //  SD card files (wallet menu)
 // ===========================================================================
 // The card root is scanned for the Feather files the device can process
@@ -1425,7 +1492,7 @@ static void sd_process(const mw_account_keys_t* keys, const mw_sd_entry_t* in,
     if (e != MW_OK) {
         ui_err(e);
     } else {
-        result_sink_t sink = { sd_sink_put, &job, NULL };
+        result_sink_t sink = { sd_sink_put, &job, NULL, false };
         MW_LOGI("sd", "%s from the card (%u bytes)",
                 kind == MW_SDF_OUTPUTS ? "outputs export" : "unsigned transaction",
                 (unsigned)len);
@@ -1989,7 +2056,7 @@ static bool wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
     MW_LOGI("wallet", "wallet '%s' open, %u known key images: ready for files",
             s_open.name, (unsigned)mw_ki_cache_count());
 
-    enum { WA_ADDR = 0, WA_ADDR_QR, WA_BALANCE, WA_VK, WA_VK_QR, WA_SD, WA_SD_VK,
+    enum { WA_ADDR = 0, WA_ADDR_QR, WA_BALANCE, WA_VK, WA_VK_QR, WA_QR, WA_SD, WA_SD_VK,
            WA_OPEN_PP, WA_RENAME, WA_PP_HINT, WA_NETWORK, WA_CHECK_SEED, WA_DELETE, WA_COUNT };
     // SD card files only on boards with a card slot.
     const bool with_sd = mw_hal_caps()->has_sd;
@@ -2004,13 +2071,13 @@ static bool wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         snprintf(net_item, sizeof(net_item), TX(XSTR_WL_NETWORK), net_label(active_network()));
         const char* all_items[WA_COUNT] = {
             TX(XSTR_WL_ADDR_TEXT), TX(XSTR_WL_ADDR_QR), TX(XSTR_WL_BALANCE), TX(XSTR_WL_VK_TEXT),
-            TX(XSTR_WL_VK_QR), TX(XSTR_WL_SD), TX(XSTR_WL_SD_VK), TX(XSTR_WL_OPEN_PP),
+            TX(XSTR_WL_VK_QR), TX(XSTR_WL_QR), TX(XSTR_WL_SD), TX(XSTR_WL_SD_VK), TX(XSTR_WL_OPEN_PP),
             TX(XSTR_WL_RENAME), TX(XSTR_PP_HINT), net_item, TX(XSTR_CHECK_SEED),
             T(STR_WALLET_DELETE)
         };
         const char* all_icons[WA_COUNT] = {
             LV_SYMBOL_HOME, LV_SYMBOL_IMAGE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_IMAGE,
-            LV_SYMBOL_SD_CARD, LV_SYMBOL_SAVE, LV_SYMBOL_KEYBOARD, LV_SYMBOL_EDIT,
+            LV_SYMBOL_IMAGE, LV_SYMBOL_SD_CARD, LV_SYMBOL_SAVE, LV_SYMBOL_KEYBOARD, LV_SYMBOL_EDIT,
             LV_SYMBOL_KEYBOARD, LV_SYMBOL_SHUFFLE, LV_SYMBOL_OK, LV_SYMBOL_TRASH
         };
         const wallet_entry_t* we = mw_wallet_get(id);
@@ -2025,6 +2092,9 @@ static bool wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         int         shown = 0;
         for (int a = 0; a < WA_COUNT; a++) {
             if ((a == WA_SD || a == WA_SD_VK) && !with_sd) continue;
+            // 0.3.6: animated QR both ways needs a camera (and a view key:
+            // a view-only record has nothing to sign or derive key images for).
+            if (a == WA_QR && (!mw_hal_caps()->has_camera || keys->view_only)) continue;
             // A view-only record without the key has nothing to export.
             if (a == WA_SD_VK && mw_sc_is_zero(&keys->sec.view)) continue;
             // 0.3.5: "Open passphrase" in EVERY wallet (nothing shows whether
@@ -2071,6 +2141,7 @@ static bool wallet_home(uint32_t id, mw_account_keys_t* keys, uint8_t variant) {
         case WA_VK:      show_view_key(keys, false); break;
         case WA_VK_QR:   show_view_key(keys, true); break;
         case WA_SD:      sd_files_menu(keys); break;
+        case WA_QR:      qr_exchange(keys); break;
         case WA_SD_VK:   sd_export_view_key(keys); break;
         case WA_OPEN_PP: {
             mw_account_keys_t pk;
@@ -2270,6 +2341,8 @@ static void main_menu(void) {
 // ===========================================================================
 // PUT auto: files are recognised by their content (task 3 item 6).
 static int classify_file(const uint8_t* data, size_t len, char* why, size_t cap) {
+    static char dummy[8];
+    if (!why || cap == 0) { why = dummy; cap = sizeof(dummy); }
     const mw_file_format_t f = mw_file_detect(data, len);
     switch (f) {
     case MW_FMT_OUTPUTS:     return MW_FILE_KIND_OUTPUTS;

@@ -51,8 +51,28 @@
 #define SD_DETECT        -1                   // Датчика наличия карты нет
 
 // ===== Камера =====
-// На плате есть 24-pin разъём для OV2640 / OV5640.
-#define HAS_CAMERA       0                    // Требуется уточнение распиновки по схеме
+// 0.3.6: 24-pin разъём платы (OV2640 / OV3660 / OV5640), пины из примера
+// Waveshare 10_camera_web (Y2..Y9 = D0..D7). Нужна для QR-обмена с Feather
+// (меню кошелька -> "QR: синхронизация / подпись"). Без камеры в разъёме
+// пункт меню просто сообщит, что камера не найдена.
+#define HAS_CAMERA       1
+#define CAMERA_FRAME_SIZE FRAMESIZE_VGA       // 640x480: плотные QR с монитора
+#define CAM_PIN_PWDN     17
+#define CAM_PIN_RESET    -1                   // программный сброс
+#define CAM_PIN_XCLK     8
+#define CAM_PIN_SIOD     21
+#define CAM_PIN_SIOC     16
+#define CAM_PIN_D7       2                    // Y9
+#define CAM_PIN_D6       7                    // Y8
+#define CAM_PIN_D5       10                   // Y7
+#define CAM_PIN_D4       14                   // Y6
+#define CAM_PIN_D3       11                   // Y5
+#define CAM_PIN_D2       15                   // Y4
+#define CAM_PIN_D1       13                   // Y3
+#define CAM_PIN_D0       12                   // Y2
+#define CAM_PIN_VSYNC    6
+#define CAM_PIN_HREF     4
+#define CAM_PIN_PCLK     9
 
 // ===== Кнопки =====
 #define HAS_BUTTONS      0

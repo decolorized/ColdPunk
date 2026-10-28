@@ -232,8 +232,12 @@ bool ratio_ok(const int run[5]) {
         && abs(module_x2 - run[4] * 2) < tol;
 }
 
+// `end` is one past the last pixel of the run; pixel i covers [i-0.5, i+0.5)
+// (sample_module rounds), so the middle of the centre run is half a pixel
+// left of end - r4 - r3 - r2/2. (0.3.6: without the half pixel the grid was
+// biased one way, which a mirrored picture of a large symbol did not survive.)
 float run_centre(int end, const int run[5]) {
-    return (float)end - (float)run[4] - (float)run[3] - (float)run[2] / 2.0f;
+    return (float)end - (float)run[4] - (float)run[3] - (float)run[2] / 2.0f - 0.5f;
 }
 
 // Walks a column through (x, y) and returns the vertical centre of the finder
@@ -685,7 +689,9 @@ bool rs_correct(uint8_t* data, int len, int ecc_len) {
             xp = gmul(xp, gmul(xinv, xinv));
         }
         if (den == 0) return false;
-        data[p] ^= gmul(num, ginv(den));
+        // First consecutive root is alpha^0, so Forney carries an extra X_k:
+        // e_k = X_k * Omega(X_k^-1) / Lambda'(X_k^-1).
+        data[p] ^= gmul(gf_exp[xi], gmul(num, ginv(den)));
     }
 
     // Re-check: a false root set can produce a block that still fails.
@@ -717,7 +723,8 @@ bool decode_format(uint32_t bits, uint8_t* ecc_out, uint8_t* mask_out) {
     switch ((best >> 3) & 3) {
         case 1: *ecc_out = MW_QR_ECC_L; break;
         case 0: *ecc_out = MW_QR_ECC_M; break;
-        default: return false;                        // Q and H unsupported
+        case 3: *ecc_out = MW_QR_ECC_Q; break;        // 0.3.6: other wallets' codes
+        default: *ecc_out = MW_QR_ECC_H; break;
     }
     *mask_out = (uint8_t)(best & 7);
     return true;
@@ -812,9 +819,13 @@ int deinterleave_and_correct(const uint8_t* cw, int total_cw, int data_cw,
     return n;
 }
 
-// Byte-mode segment parser. Other modes are refused rather than mis-decoded.
+// Segment parser: byte, alphanumeric and numeric modes (0.3.6: other wallets
+// render UR strings in upper case, which encoders put in alphanumeric mode),
+// ECI headers skipped. Kanji / structured append are refused rather than
+// mis-decoded.
 int parse_segments(const uint8_t* data, int data_len, int version,
                    char* out, size_t out_cap) {
+    static const char ALNUM[46] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
     int bitpos = 0;
     const int total_bits = data_len * 8;
     size_t o = 0;
@@ -829,21 +840,66 @@ int parse_segments(const uint8_t* data, int data_len, int version,
         bitpos += n;
         return v;
     };
+    auto put = [&](char c) -> bool {
+        if (o + 1 >= out_cap) return false;
+        out[o++] = c;
+        return true;
+    };
+    const int vclass = (version <= 9) ? 0 : (version <= 26) ? 1 : 2;
 
     for (;;) {
         if (bitpos + 4 > total_bits) break;
         int mode = take(4);
         if (mode <= 0) break;                       // 0000 = terminator
-        if (mode != 4) return -1;                   // byte mode only
-        int count_bits = (version <= 9) ? 8 : 16;
-        int count = take(count_bits);
-        if (count < 0) return -1;
-        if (bitpos + count * 8 > total_bits) return -1;
-        for (int i = 0; i < count; i++) {
-            int c = take(8);
-            if (c < 0) return -1;
-            if (o + 1 >= out_cap) return -1;
-            out[o++] = (char)c;
+        if (mode == 7) {                            // ECI: 1, 2 or 3 bytes
+            int b0 = take(8);
+            if (b0 < 0) return -1;
+            if ((b0 & 0x80) == 0) continue;
+            if ((b0 & 0xC0) == 0x80) { if (take(8) < 0) return -1; continue; }
+            if ((b0 & 0xE0) == 0xC0) { if (take(16) < 0) return -1; continue; }
+            return -1;
+        }
+        if (mode == 4) {                            // byte
+            int count = take(vclass == 0 ? 8 : 16);
+            if (count < 0) return -1;
+            if (bitpos + count * 8 > total_bits) return -1;
+            for (int i = 0; i < count; i++) {
+                int c = take(8);
+                if (c < 0 || !put((char)c)) return -1;
+            }
+        } else if (mode == 2) {                     // alphanumeric
+            static const int CB[3] = { 9, 11, 13 };
+            int count = take(CB[vclass]);
+            if (count < 0) return -1;
+            for (; count >= 2; count -= 2) {
+                int v = take(11);
+                if (v < 0 || v >= 45 * 45) return -1;
+                if (!put(ALNUM[v / 45]) || !put(ALNUM[v % 45])) return -1;
+            }
+            if (count == 1) {
+                int v = take(6);
+                if (v < 0 || v >= 45 || !put(ALNUM[v])) return -1;
+            }
+        } else if (mode == 1) {                     // numeric
+            static const int CB[3] = { 10, 12, 14 };
+            int count = take(CB[vclass]);
+            if (count < 0) return -1;
+            for (; count >= 3; count -= 3) {
+                int v = take(10);
+                if (v < 0 || v > 999) return -1;
+                if (!put((char)('0' + v / 100)) || !put((char)('0' + v / 10 % 10)) ||
+                    !put((char)('0' + v % 10))) return -1;
+            }
+            if (count == 2) {
+                int v = take(7);
+                if (v < 0 || v > 99 || !put((char)('0' + v / 10)) || !put((char)('0' + v % 10)))
+                    return -1;
+            } else if (count == 1) {
+                int v = take(4);
+                if (v < 0 || v > 9 || !put((char)('0' + v))) return -1;
+            }
+        } else {
+            return -1;                              // kanji, structured append, FNC1
         }
     }
     if (o == 0) return -1;
@@ -856,24 +912,10 @@ uint8_t g_fn[MW_QR_MAX_SIZE * MW_QR_STRIDE];
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Public entry points
-// ---------------------------------------------------------------------------
-
-extern "C" mw_err_t mw_qr_scan_frame(const uint8_t* gray, uint16_t width,
-                                     uint16_t height, char* out, size_t out_cap) {
-    if (!gray || !out || out_cap < 2) return MW_ERR_INVALID_ARG;
-    if (width < 32 || height < 32 || width > MAX_W || height > MAX_H)
-        return MW_ERR_RANGE;
-    // First frame of a scan session: take the working set from PSRAM.
-    if (!scan_arena_alloc()) return MW_ERR_MEMORY;
-
-    binarise(gray, width, height);
-    find_finders();
-
-    Finder tl, tr, bl;
-    if (!order_finders(g_finders, g_finder_count, &tl, &tr, &bl))
-        return MW_ERR_FORMAT;
+// One symbol from three ordered finder centres: grid, format, codewords,
+// error correction, segments.
+static mw_err_t decode_symbol(const Finder& tl, const Finder& tr, const Finder& bl,
+                              char* out, size_t out_cap) {
     if (!build_grid(tl, tr, bl, &g_grid)) return MW_ERR_FORMAT;
     if (g_grid.version < MW_QR_MIN_VERSION || g_grid.version > MW_QR_MAX_VERSION)
         return MW_ERR_NOT_SUPPORTED;
@@ -906,6 +948,36 @@ extern "C" mw_err_t mw_qr_scan_frame(const uint8_t* gray, uint16_t width,
     return MW_OK;
 }
 
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
+extern "C" mw_err_t mw_qr_scan_frame(const uint8_t* gray, uint16_t width,
+                                     uint16_t height, char* out, size_t out_cap) {
+    if (!gray || !out || out_cap < 2) return MW_ERR_INVALID_ARG;
+    if (width < 32 || height < 32 || width > MAX_W || height > MAX_H)
+        return MW_ERR_RANGE;
+    // First frame of a scan session: take the working set from PSRAM.
+    if (!scan_arena_alloc()) return MW_ERR_MEMORY;
+
+    binarise(gray, width, height);
+    find_finders();
+
+    Finder tl, tr, bl;
+    if (!order_finders(g_finders, g_finder_count, &tl, &tr, &bl))
+        return MW_ERR_FORMAT;
+    // 0.3.6: a mirrored picture (some sensors, e.g. OV3660, deliver one; a
+    // selfie-style screen preview too) swaps the handedness: the second try
+    // reads the symbol with the top-right and bottom-left corners exchanged.
+    mw_err_t err = MW_ERR_FORMAT;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        err = attempt == 0 ? decode_symbol(tl, tr, bl, out, out_cap)
+                           : decode_symbol(tl, bl, tr, out, out_cap);
+        if (err == MW_OK) return MW_OK;
+    }
+    return err;
+}
+
 extern "C" mw_err_t mw_qr_scan_once(char* out, size_t out_cap) {
     if (!out || out_cap < 2) return MW_ERR_INVALID_ARG;
     mw_camera_frame_t frame;
@@ -920,6 +992,13 @@ extern "C" mw_err_t mw_qr_scan_once(char* out, size_t out_cap) {
 // closes; calling it between frames would only make the next frame re-allocate.
 extern "C" void mw_qr_scan_release(void) {
     scan_arena_free();
+}
+
+// The decoding backend screen_qr.cpp looks for (a weak symbol there): 1 when
+// the frame held a readable symbol, its text in `out`.
+extern "C" int mw_qr_decode_frame(const mw_camera_frame_t* frame, char* out, size_t cap) {
+    if (!frame || !frame->data) return 0;
+    return mw_qr_scan_frame(frame->data, frame->width, frame->height, out, cap) == MW_OK ? 1 : 0;
 }
 
 #endif /* !MW_HOST_BUILD || MW_QR_SCAN_ON_HOST */

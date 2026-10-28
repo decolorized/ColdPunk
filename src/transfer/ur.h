@@ -10,11 +10,19 @@
 extern "C" {
 #endif
 
-#define MW_UR_MAX_FRAGMENT     200     // bytes per fragment before bytewords
+#define MW_UR_MAX_FRAGMENT     400     // bytes per fragment before bytewords
 #define MW_UR_DEFAULT_FRAGMENT 50      // TZ 3.7
-#define MW_UR_MAX_PARTS        512
+// 0.3.6: an outputs export of a few hundred outputs is 50+ KB; at ~100 bytes a
+// fragment that is 500+ parts, so the cap is well above it.
+#define MW_UR_MAX_PARTS        2048
 #define MW_UR_TYPE_BYTES       "bytes"
 #define MW_UR_TYPE_KEYIMAGE    "crypto-keyimage"
+// 0.3.6: Feather's offline signing over animated QR (the Keystone `xmr-*`
+// types; the payload is the wallet2 file itself, as a CBOR byte string).
+#define MW_UR_TYPE_XMR_OUTPUT      "xmr-output"
+#define MW_UR_TYPE_XMR_KEYIMAGE    "xmr-keyimage"
+#define MW_UR_TYPE_XMR_TXUNSIGNED  "xmr-txunsigned"
+#define MW_UR_TYPE_XMR_TXSIGNED    "xmr-txsigned"
 
 // ---------------- encoder --------------------------------------------------
 typedef struct mw_ur_encoder mw_ur_encoder;

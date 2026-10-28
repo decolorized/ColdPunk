@@ -792,11 +792,11 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
    lock, the modal frame stack) is reasoned about but never exercised under
    concurrency.
 7. Cyrillic rendering depends on a font that does not exist in the repository.
-8. `mw_qr_decode_frame()` has no implementation anywhere in the project, so
-   QR scanning cannot work until a decoder backend is linked.
-9. `mw_transfer_receive(MW_CHANNEL_QR, ...)` is expected to call
-   `mw_screen_qr_scan_run()`; that wiring lives in the transfer module and is
-   not part of this layer.
+8. (0.3.6) `mw_qr_decode_frame()` is implemented in
+   `transfer/camera_scan.cpp`; the scanner is checked on the host with
+   generated frames (`tools/qrscan/run.sh`), not yet with a live camera.
+9. (0.3.6) The wallet menu's *QR: sync / sign* drives
+   `mw_screen_qr_scan_run()` directly (`qr_exchange` in `flows.cpp`).
 
 ---
 
@@ -949,3 +949,9 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - Login: after the password check a stage **Opening the account** (format check, decoys, counter), moving with the decoys written; first setup: the same stage while the 23 decoys are written.
 - Opening a wallet: **Loading the key image cache** right after the passphrase; closing it: **Saving** when the cache changed.
 - Key image export and signing: a **saving the key image cache** stage at the end; the list of signed transactions is saved under a "Saving" page.
+
+### 14.6 v0.3.6: animated QR with Feather
+- Wallet menu: **QR: sync / sign** (`WA_QR`, image icon), only on boards with `HAS_CAMERA` and not for view-only wallets.
+- Scan screen: title "QR from Feather", camera preview, status "Received: N%" (distinct fountain fragments), Cancel. The result is classified by content: outputs → the usual key image confirmation; unsigned transaction → the usual review and signing; anything else → "Not an outputs export or an unsigned transaction (QR: <type>)".
+- Result screens: animated QR "Key images -> Feather" (`ur:xmr-keyimage`) or "Signed -> Feather" (`ur:xmr-txsigned`), ECC M, the fragment sized so a module is at least 3 px. Done → "N key images shown as QR." / the signed-transaction message; Cancel on the signed QR aborts, so the transaction is not recorded as sent.
+- `mw_screen_qr_scan_run(title, buf, cap, &len, type, type_cap)` returns the UR type as well.

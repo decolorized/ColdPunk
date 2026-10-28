@@ -26,7 +26,11 @@ extern "C" {
 
 typedef enum {
     MW_QR_ECC_L = 0,     // ~7 % recovery  - denser, used for animated UR frames
-    MW_QR_ECC_M = 1      // ~15 % recovery - used for static payloads
+    MW_QR_ECC_M = 1,     // ~15 % recovery - used for static payloads
+    // 0.3.6: decoding only (codes made by other wallets); the encoder and
+    // mw_qr_byte_capacity() stay L / M.
+    MW_QR_ECC_Q = 2,     // ~25 %
+    MW_QR_ECC_H = 3      // ~30 %
 } mw_qr_ecc_t;
 
 typedef struct {

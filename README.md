@@ -181,6 +181,12 @@ explicit confirmation on the device screen. The PC program is only a courier.
   first). Pick one to sign it or to make key images; the
   result is written next to it with the same date. The list follows the card:
   it empties when the card is pulled out and fills again when one is put in.
+- **Animated QR with Feather** (boards with a camera: Touch-LCD-2 with a
+  camera in its connector, ESP32-S3 CAM): wallet menu → *QR: sync / sign*.
+  The device reads Feather's animated QR (`xmr-output`, `xmr-txunsigned`)
+  with an OV3660 / OV2640 / OV5640 camera and shows the key images or the
+  signed transaction back as an animated QR (`xmr-keyimage`,
+  `xmr-txsigned`) - Feather's *Offline transaction signing → Animated QR*.
 - **View key to SD card** (ES3C28P, Touch-LCD-2): `<wallet>_viewonly.txt` with the primary
   address, private view key and restore height, after a warning on the device.
 
@@ -258,7 +264,7 @@ The board is chosen at compile time in [`board_config.h`](board_config.h)
 | `MW_BOARD_ST7701S_480x480` | `esp32s3_st7701s_480x480.h` | ST7701S 480×480 RGB | GT911 touch | Guition 4848S040 class |
 | `MW_BOARD_SSD1306_BUTTONS` | `esp32s3_ssd1306_buttons.h` | SSD1306 128×64 mono | 6 buttons + encoder | minimum viable wallet |
 | `MW_BOARD_SSD1306_NO_SD` | `esp32s3_ssd1306_no_sd.h` | SSD1306 128×64 mono | buttons | |
-| `MW_BOARD_CAM_QR` | `esp32s3_cam_qr.h` | ST7789 240×320 | CST816S touch | board with an OV2640 camera (camera not used) |
+| `MW_BOARD_CAM_QR` | `esp32s3_cam_qr.h` | ST7789 240×320 | CST816S touch | ESP32-S3 CAM board: OV3660 / OV2640 / OV5640, animated-QR exchange with Feather |
 
 **SD card:** supported on ES3C28P (SDIO, 4-bit with 1-bit fallback) and on the
 Waveshare ESP32-S3-Touch-LCD-2 (SPI, sharing the display bus: CS IO41, MOSI

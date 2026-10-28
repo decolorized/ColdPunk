@@ -27,8 +27,20 @@ ur:bytes/2-9/lpaoascfadaxcywenbpljkhdcagwdpfnsboxgwlbaawzuefywkdplrsrjynbvyg...
 ...
 ```
 
-The type is `bytes` for the four exchange files of TZ 9 and `crypto-keyimage`
-where a counterpart asks for it. Everything after the last `/` is
+The type names the Monero cold-signing file inside (0.3.6, as in Feather's
+*Offline transaction signing → Animated QR*):
+
+| UR type | Direction | Payload |
+| --- | --- | --- |
+| `xmr-output` | PC → device | outputs export (`export_outputs` file) |
+| `xmr-keyimage` | device → PC | signed key images (`export_key_images` file) |
+| `xmr-txunsigned` | PC → device | unsigned transaction set |
+| `xmr-txsigned` | device → PC | signed transaction set |
+
+The payload is the wallet2 file exactly as it would be saved to disk,
+wrapped in one CBOR byte string. On input the device classifies the file by
+its content, not by the UR type, so `ur:bytes` carrying the same file works
+too. Everything after the last `/` is
 **bytewords, minimal style**: each byte becomes the first and last letter of its
 word in the 256-word Blockchain Commons table, and a 4-byte big-endian CRC-32 of
 the payload is appended before encoding. So a *n*-byte payload becomes
@@ -89,14 +101,15 @@ reference suite publishes.
 
 | Parameter | Value | Why |
 | --- | --- | --- |
-| Fragment size | 50 bytes | TZ 3.7; ~110 characters per frame, QR version 5-7 |
+| Fragment size (shown by the device) | chosen per screen, 30-200 bytes | the largest symbol that still gets ≥ 3 screen pixels per module (`qr_fragment_for` in `screen_qr.cpp`) |
 | Frame rate | 12.5 fps (`MW_QR_FRAME_MS` = 80 ms) | TZ 3.7 |
-| Error correction | level L | maximum density; the fountain code already gives redundancy |
-| Max parts | 512 (`MW_UR_MAX_PARTS`) | bounds every decoder allocation |
-| Max fragment | 200 bytes (`MW_UR_MAX_FRAGMENT`) | |
-| Max file | 64 KB | TZ 3.2 |
+| Error correction (shown) | level M | a phone camera reading a small LCD loses modules to glare and moiré |
+| Max parts | 2048 (`MW_UR_MAX_PARTS`) | bounds every decoder allocation |
+| Max fragment (received) | 400 bytes (`MW_UR_MAX_FRAGMENT`) | Feather's own frames |
+| Max file | `MW_TRANSFER_MAX_FILE` | same limit as USB and SD |
 
-A 2 KB file becomes 42 fragments, about 3.4 seconds per pass.
+On a 240×320 screen the device shows about 100-byte fragments: a 2 KB key
+image file is ~21 frames, under two seconds per pass.
 
 ---
 
@@ -211,10 +224,13 @@ fails with `MW_ERR_ABORTED`.
 
 ### Limits, stated plainly
 
-* Versions 1-20. Animated UR frames are version 5-10; larger symbols are refused
+* Versions 1-20. Animated UR frames are version 5-15; larger symbols are refused
   with `MW_ERR_NOT_SUPPORTED`.
-* Error-correction levels L and M. Q and H are refused.
-* Byte mode only.
+* All error-correction levels (L, M, Q, H).
+* Byte, alphanumeric (upper-case UR) and numeric segments; ECI headers are
+  skipped. Kanji is refused.
+* A mirrored picture (some sensors, a selfie-style preview) is decoded on the
+  second try with the corners exchanged; any rotation works.
 * The grid is sampled with an **affine** transform. That is exact for a
   fronto-parallel view — the wallet pointed at a phone or a monitor — and
   degrades under strong perspective. Alignment-pattern-based perspective
@@ -250,7 +266,7 @@ extension, deletion, 3 KB bodies) and a random-string fuzzer, both run under
 | Counterpart | Direction | Status |
 | --- | --- | --- |
 | Blockchain Commons `bc-ur` reference | both | byte-identical frames verified for single-part and 300-frame multi-part sequences |
-| Feather ≥ 2.6.0 | both | same encoding; not yet tested against a live build |
+| Feather ≥ 2.6.0 | both | same encoding and `xmr-*` types; not yet tested against a live build |
 | ANON / NERO | both | same encoding; not yet tested against a live build |
 | Monero GUI | — | no UR support; use SD or USB |
 
@@ -267,3 +283,4 @@ extension, deletion, 3 KB bodies) and a random-string fuzzer, both run under
 | `src/transfer/transfer.c` | channel dispatch and the QR session state |
 | `test/test_ur.c` | BCR-2020-005 / BCR-2020-012 vectors, round trips, fuzzing |
 | `test/test_qr.c` | golden matrices from the ISO/IEC 18004 reference implementation |
+| `tools/qrscan/run.sh` | scanner check: 230 generated camera-like frames (versions 2-19, L/M/Q/H, byte and alphanumeric, rotated, mirrored, blotted) decoded on the host |

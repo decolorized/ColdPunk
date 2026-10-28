@@ -1,4 +1,4 @@
-// ESP32-S3 + OV2640 camera + 2.4" ST7789 240x320 + CST816S touch + microSD.
+// ESP32-S3 + OV2640 / OV3660 camera + 2.4" ST7789 240x320 + CST816S touch + microSD.
 // The QR board: it can both scan and display animated UR codes (TZ 3.7), so
 // it talks to Feather, ANON/NERO and Cake Wallet with no cable at all.
 //
@@ -61,8 +61,10 @@
 #define SD_MOSI          40
 #define SD_SCK           39
 
-// ===== Camera (OV2640, Freenove ESP32-S3-WROVER pinout) =====
+// ===== Camera (OV2640 / OV3660 / OV5640, Freenove ESP32-S3 CAM pinout) =====
+// The sensor is detected at start; OV3660 / OV5640 are flipped upright.
 #define HAS_CAMERA       1
+#define CAMERA_FRAME_SIZE FRAMESIZE_VGA       // 640x480: denser codes off a monitor
 #define CAM_PIN_PWDN     -1
 #define CAM_PIN_RESET    -1
 #define CAM_PIN_XCLK     15

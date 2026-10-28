@@ -567,6 +567,14 @@ static const char* const X_RU[XSTR_COUNT] = {
     [XSTR_KI_SAVED_ADDED] = "Добавлено %u сохранённых\n"
                             "key images (выходы #%u-#%u).\n"
                             "Выходы до #%u в файл не вошли.",
+    [XSTR_WL_QR]            = "QR: синхронизация / подпись",
+    [XSTR_QR_SCAN_TITLE]    = "QR из Feather",
+    [XSTR_SCAN_PROGRESS]    = "Принято: %d%%",
+    [XSTR_QR_KI_TITLE]      = "Key images -> Feather",
+    [XSTR_QR_SIGNED_TITLE]  = "Подписано -> Feather",
+    [XSTR_QR_KI_DONE]       = "Key images (%u) показаны\nкак QR.",
+    [XSTR_QR_TX_DONE]       = "Подписанная транзакция\nпоказана как QR.",
+    [XSTR_QR_NOT_INPUT]     = "Это не экспорт outputs и не\nнеподписанная транзакция\n(QR: %s).",
     [XSTR_PP_REVIEW]        = "Passphrase (%u симв.):\n\"%s\"",
     [XSTR_PP_REVIEW_EMPTY]  = "Passphrase пустая.",
     [XSTR_PP_OPEN]          = "Войти",
@@ -976,6 +984,14 @@ static const char* const X_EN[XSTR_COUNT] = {
                             "(outputs #%u-#%u).\n"
                             "Outputs before #%u are not\n"
                             "in the file.",
+    [XSTR_WL_QR]            = "QR: sync / sign",
+    [XSTR_QR_SCAN_TITLE]    = "QR from Feather",
+    [XSTR_SCAN_PROGRESS]    = "Received: %d%%",
+    [XSTR_QR_KI_TITLE]      = "Key images -> Feather",
+    [XSTR_QR_SIGNED_TITLE]  = "Signed -> Feather",
+    [XSTR_QR_KI_DONE]       = "%u key images shown\nas QR.",
+    [XSTR_QR_TX_DONE]       = "Signed transaction\nshown as QR.",
+    [XSTR_QR_NOT_INPUT]     = "Not an outputs export or an\nunsigned transaction\n(QR: %s).",
     [XSTR_PP_REVIEW]        = "Passphrase (%u chars):\n\"%s\"",
     [XSTR_PP_REVIEW_EMPTY]  = "The passphrase is empty.",
     [XSTR_PP_OPEN]          = "Open",

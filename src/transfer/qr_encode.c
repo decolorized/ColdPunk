@@ -21,20 +21,26 @@
 // ---------------------------------------------------------------------------
 
 // Error-correction codewords per block.
-static const uint8_t QR_ECC_PER_BLOCK[2][MW_QR_MAX_VERSION + 1] = {
+static const uint8_t QR_ECC_PER_BLOCK[4][MW_QR_MAX_VERSION + 1] = {
     /* L */ { 0,  7, 10, 15, 20, 26, 18, 20, 24, 30, 18,
                  20, 24, 26, 30, 22, 24, 28, 30, 28, 28 },
     /* M */ { 0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26,
                  30, 22, 22, 24, 24, 28, 28, 26, 26, 26 },
+    /* Q */ { 0, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24,
+                 28, 26, 24, 20, 30, 24, 28, 28, 26, 30 },
+    /* H */ { 0, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28,
+                 24, 28, 22, 24, 24, 30, 28, 28, 26, 28 },
 };
 
 // Number of error-correction blocks.
-static const uint8_t QR_NUM_BLOCKS[2][MW_QR_MAX_VERSION + 1] = {
+static const uint8_t QR_NUM_BLOCKS[4][MW_QR_MAX_VERSION + 1] = {
     /* L */ { 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8 },
     /* M */ { 0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16 },
+    /* Q */ { 0, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20 },
+    /* H */ { 0, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25 },
 };
 
-#define QR_MAX_BLOCKS      16
+#define QR_MAX_BLOCKS      16     // what the encoder (L / M) ever needs
 #define QR_MAX_ECC_LEN     30
 #define QR_MAX_CODEWORDS   1085          // version 20, all levels
 
@@ -569,7 +575,7 @@ mw_err_t mw_qr_block_layout(uint8_t version, mw_qr_ecc_t ecc,
                             uint8_t* num_blocks, uint8_t* ecc_len) {
     if (version < MW_QR_MIN_VERSION || version > MW_QR_MAX_VERSION)
         return MW_ERR_INVALID_ARG;
-    if (ecc != MW_QR_ECC_L && ecc != MW_QR_ECC_M) return MW_ERR_INVALID_ARG;
+    if ((unsigned)ecc > (unsigned)MW_QR_ECC_H) return MW_ERR_INVALID_ARG;   // decoder: all four
     int total = qr_raw_data_modules(version) / 8;
     if (total_cw)   *total_cw = (uint16_t)total;
     if (data_cw)    *data_cw = (uint16_t)qr_data_codewords(version, ecc);
