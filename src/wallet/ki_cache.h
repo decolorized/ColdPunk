@@ -49,6 +49,30 @@ extern "C" {
                                  // outputs export - not the online wallet's;
                                  // left out of the balance (cleared by any
                                  // later record with an amount)
+// 0.3.6, several PCs (watch-only wallets of one address): an output stays
+// spent once anyone has seen it spent - an outputs export saying "not spent"
+// no longer clears MW_KI_B_SPENT (a PC that lags behind says so too). What
+// this device signs is PENDING until an outputs export settles it:
+//   * confirmed (-> MW_KI_B_SPENT): the export lists an output of that
+//     transaction (its key R: the change, a payment to self) or says the
+//     input is spent;
+//   * not sent (-> MW_KI_B_UNSENT, back in the balance): the export knows
+//     the input's key image, says it is not spent, AND lists an output at
+//     least MW_KI_FRESH_OUTPUTS global indices newer than the newest ring
+//     member of the transaction - proof that this PC has scanned the chain
+//     past the signing. Otherwise it stays pending (or the user cancels it).
+// A later confirmation still wins over "not sent".
+#define MW_KI_B_PENDING   0x08   // input of a transaction signed here, not settled
+#define MW_KI_B_UNSENT    0x10   // that transaction was found not sent (or cancelled)
+// Input only, to mw_ki_cache_put() during a sync: the online wallet knows
+// this output's key image (m_key_image_known), so its "not spent" counts.
+#define MW_KI_B_IN_KNOWN  0x40
+// Bits mw_ki_cache_put() keeps / the container stores.
+#define MW_KI_B_STORED    0x1F
+
+// Outputs between the newest ring member of a signed transaction and an
+// output that proves the PC has scanned past it: ~1-2 hours of blocks.
+#define MW_KI_FRESH_OUTPUTS 5000u
 
 typedef struct {
     mw_pubkey_t   out_pub;       // the output's one-time public key
@@ -72,6 +96,12 @@ typedef struct {
     // outputs export; a later output at the same index takes it over.
     uint32_t      tidx1;
     uint8_t       sig[64];
+    // 0.3.6, an input of a transaction signed here: that transaction's key
+    // R, the global index of the newest member of its rings, and its number
+    // in the list of signed transactions (0 = not known).
+    mw_pubkey_t   spend_tx;
+    uint64_t      spend_gidx;
+    uint32_t      spend_seq;
 } mw_ki_entry_t;
 
 // A transaction this device signed (v0.3), for the list next to the balance.
@@ -156,6 +186,39 @@ uint32_t mw_ki_cache_tx_count(void);
 bool     mw_ki_cache_tx_get(uint32_t i, mw_ki_tx_t* out);
 // Records one (no-op with the estimate off or the cache closed).
 mw_err_t mw_ki_cache_tx_add(const mw_ki_tx_t* t);
+// The number the next mw_ki_cache_tx_add() will give (1 when closed).
+uint32_t mw_ki_cache_tx_next_seq(void);
+
+// 0.3.6: the state of signed transaction `seq`, from its inputs.
+typedef enum {
+    MW_KI_TXS_UNKNOWN = 0,       // no input carries its number (older firmware)
+    MW_KI_TXS_PENDING,           // signed, not settled by an outputs export yet
+    MW_KI_TXS_CONFIRMED,         // the PC has seen it in the chain
+    MW_KI_TXS_UNSENT             // not sent (export) or cancelled by the user
+} mw_ki_txs_t;
+mw_ki_txs_t mw_ki_cache_tx_state(uint32_t seq);
+// Sum and count of the pending outputs (inputs of unsettled transactions).
+void     mw_ki_cache_pending(uint64_t* amount, uint32_t* outputs);
+// The user says transaction `seq` was not sent (seq 0: the pending inputs
+// without a number - signed by older firmware): its pending inputs go back
+// into the balance. Returns how many.
+uint32_t mw_ki_cache_pending_cancel(uint32_t seq);
+// The signed result of transaction `seq` never left the device (sending it
+// failed or was cancelled): like a cancel, and the number is forgotten
+// because the next signed transaction gets it.
+uint32_t mw_ki_cache_sign_undo(uint32_t seq);
+
+// 0.3.6: an outputs export is being put. begin() before its records, end()
+// after: settles the pending transactions (see MW_KI_B_PENDING).
+typedef struct {
+    uint32_t confirmed;          // pending inputs now confirmed spent
+    uint32_t unsent;             // pending inputs back in the balance
+    uint32_t pending;            // still pending
+} mw_ki_sync_t;
+void     mw_ki_cache_sync_begin(void);
+void     mw_ki_cache_sync_end(mw_ki_sync_t* out);
+// The export turned out bad: nothing is settled.
+void     mw_ki_cache_sync_abort(void);
 // The estimate switched off: every amount and every transaction list of the
 // account is dropped from the container (and from the open cache).
 mw_err_t mw_ki_cache_balance_forget_all(void);

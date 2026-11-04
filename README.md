@@ -215,7 +215,12 @@ explicit confirmation on the device screen. The PC program is only a courier.
   with a **transaction list** (per account, can be switched off): everything
   received, grouped by transaction, newest first; the transactions signed on
   this device marked `*`; what was spent elsewhere and outputs of unknown
-  amount marked `?`.
+  amount marked `?`. Works with several PCs (watch-only wallets of one
+  address, 0.3.6): "spent" is sticky, and a transaction signed here stays
+  *awaiting confirmation* until an outputs export shows it in the chain
+  (its change, or an input spent) or proves it was not sent (the PC knows
+  the key image and has scanned past it); unconfirmed ones can be marked
+  *not sent* by hand.
 - **Flash only with BOOT** (0.3.6): the firmware never sends the chip into
   the download mode itself (no "reset to bootloader" over USB, the
   USB-JTAG/serial unit is released at start); the Settings item burns the

@@ -236,6 +236,7 @@ mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
     // 0.3.5: an export from the first transfer is the whole wallet.
     const bool snapshot = it.offset == 0;
     if (snapshot) mw_ki_cache_snapshot_begin();
+    mw_ki_cache_sync_begin();             // 0.3.6: settles what was signed here
     for (uint32_t i = 0; ; ++i) {
         mw_exported_output_t o;
         mw_exported_key_image_t ki;
@@ -243,6 +244,7 @@ mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
         e = mw_outputs_next(&it, &o, &done, &d);
         if (e != MW_OK) {
             if (snapshot) (void)mw_ki_cache_snapshot_end();
+            mw_ki_cache_sync_abort();
             return diag_fail(er, e, &d, "outputs: bad record");
         }
         if (done) break;
@@ -250,6 +252,7 @@ mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
         e = mw_key_image_from_output(keys, &o, &ki);
         if (e != MW_OK) {
             if (snapshot) (void)mw_ki_cache_snapshot_end();
+            mw_ki_cache_sync_abort();
             mw_memzero(out, off + pt_len);
             return fail(er, e == MW_ERR_KEY_MISMATCH ? MW_ERR_KEY_MISMATCH : e,
                         "output #%u (global index %llu, subaddress %u/%u) does not "
@@ -274,6 +277,9 @@ mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
         // has seen it spent (m_flags bit 0).
         ce.amount = o.amount;
         ce.bal = (uint8_t)(MW_KI_B_AMOUNT | ((o.flags & 0x01u) ? MW_KI_B_SPENT : 0));
+        // 0.3.6: m_key_image_known (bit 3): only then does "not spent" say
+        // anything about a transaction signed here.
+        if (o.flags & 0x08u) ce.bal |= MW_KI_B_IN_KNOWN;
         ce.tx_pub = o.tx_pub_key;             // 0.3.5: the transaction list
         ce.gidx = o.global_output_index;
         // 0.3.5: its index in the online wallet and the signature, for a
@@ -286,6 +292,15 @@ mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
         cache_put(&ce);                       // no-op when the cache is closed
 
         if ((i & 7u) == 0 || i + 1 == total) progress(cb, "key images", i + 1, total);
+    }
+    {
+        mw_ki_sync_t st;
+        mw_ki_cache_sync_end(&st);
+        if (saved) {
+            saved->confirmed = st.confirmed;
+            saved->unsent = st.unsent;
+            saved->pending = st.pending;
+        }
     }
     if (snapshot) {
         const uint32_t stale = mw_ki_cache_snapshot_end();
@@ -654,6 +669,16 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
         MW_LOGD("ops", "tx %u signed: %u bytes", (unsigned)(i + 1), (unsigned)sc.blob_len[i]);
         sc.fee[i] = tx->fee;
         sc.n_vin[i] = tx->n_inputs;
+        // 0.3.6: the newest ring member (key offsets are relative): an
+        // outputs export with an output well past it comes from a PC that
+        // has scanned beyond the moment this transaction was made.
+        uint64_t ring_top = 0;
+        for (uint8_t j = 0; j < tx->n_inputs; ++j) {
+            uint64_t a = 0;
+            for (uint8_t r = 0; r < tx->sources[j].ring_size; ++r)
+                a += tx->sources[j].key_offsets[r];
+            if (a > ring_top) ring_top = a;
+        }
         for (uint8_t j = 0; j < tx->n_inputs; ++j) {
             const mw_tx_source_t* src = &tx->sources[j];
             sc.vin[i][j] = src->key_image;
@@ -665,7 +690,11 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             ce.major = src->subaddr_major;
             ce.minor = src->subaddr_minor;
             ce.flags = MW_KI_F_SPENT;
-            ce.bal = MW_KI_B_SPENT;
+            // 0.3.6: pending until an outputs export shows it went out.
+            ce.bal = MW_KI_B_PENDING;
+            ce.spend_tx = tx->tx_public_key;
+            ce.spend_gidx = ring_top;
+            ce.spend_seq = s->first_seq ? s->first_seq + i : 0u;
             cache_put(&ce);
         }
         for (uint8_t k = 0; k < tx->n_outputs; ++k) {
@@ -680,6 +709,7 @@ mw_err_t mw_ops_unsigned_sign(const mw_account_keys_t* keys, mw_sign_session_t* 
             ce.major = tx->change_major;
             ce.minor = tx->change_minor;
             ce.flags = MW_KI_F_CHANGE;
+            ce.tx_pub = tx->tx_public_key;   // 0.3.6: listed under its transaction
             ce.amount = tx->destinations[tx->out_dest[k]].amount;   // cleartext
             ce.bal = MW_KI_B_AMOUNT;
             cache_put(&ce);

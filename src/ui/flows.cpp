@@ -1154,6 +1154,11 @@ static void handle_outputs(const mw_account_keys_t* keys, uint8_t* file, size_t 
             add_note(TX(XSTR_KI_SAVED_ADDED), (unsigned)saved.saved, (unsigned)saved.start,
                      (unsigned)(info.offset - 1), (unsigned)saved.start);
     }
+    // 0.3.6: transactions signed here that this export settled / left open.
+    if (saved.confirmed || saved.unsent)
+        add_note(TX(XSTR_SYNC_SETTLED), (unsigned)saved.confirmed, (unsigned)saved.unsent);
+    if (saved.pending)
+        add_note(TX(XSTR_SYNC_PENDING), (unsigned)saved.pending);
     // 0.3.5: an incremental export (not from the first transfer) cannot tell
     // the amounts the device is still missing; a full one can.
     if (info.offset != 0 && !(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE)) {
@@ -1187,6 +1192,17 @@ static void record_signed(const mw_tx_review_t* rv) {
         (void)mw_ki_cache_tx_add(&t);
     }
     (void)mw_ki_cache_save();
+}
+
+// The signed set never left the device: its inputs are not pending.
+static void undo_signed(uint32_t first_seq, uint32_t n) {
+    if (!first_seq) return;
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; ++i) k += mw_ki_cache_sign_undo(first_seq + i);
+    if (k) {
+        MW_LOGI("file", "signed set not delivered: %u input(s) back in the balance", (unsigned)k);
+        (void)mw_ki_cache_save();
+    }
 }
 
 static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t len,
@@ -1259,12 +1275,27 @@ static void handle_unsigned(const mw_account_keys_t* keys, uint8_t* file, size_t
         size_t out_len = 0;
         mw_ui_progress(T(STR_SIGNING), 0, NULL);
         MW_LOGI("file", "signing");
+        // 0.3.6: the inputs stay pending under the numbers the transactions
+        // get in the list (record_signed below).
+        const bool track = !(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE);
+        s->first_seq = track ? mw_ki_cache_tx_next_seq() : 0u;
+        const uint32_t first_seq = s->first_seq, n_txes = rv->n_txes;
         e = mw_ops_unsigned_sign(keys, s, out, MW_FLOW_FILE_CAP, &out_len, &cb, &er);
         mw_ui_progress_close();
-        if (e != MW_OK) { show_refusal(TX(XSTR_TX_REFUSED), &er); goto done; }
+        if (e != MW_OK) {
+            undo_signed(first_seq, n_txes);
+            show_refusal(TX(XSTR_TX_REFUSED), &er);
+            goto done;
+        }
         e = sink->put(sink, MW_FILE_KIND_SIGNED_TX, out, out_len);
         mw_memzero(out, out_len);
-        if (e != MW_OK) { ui_err(e); goto done; }
+        if (e != MW_OK) {
+            // Not sent anywhere (cancelled QR, unplugged cable, full card):
+            // its inputs are not spent.
+            undo_signed(first_seq, n_txes);
+            ui_err(e);
+            goto done;
+        }
         MW_LOGI("file", "signed transaction set ready (%u bytes)", (unsigned)out_len);
         if (!(mw_wallet_store_opts() & MW_ACC_OPT_NO_BALANCE)) {
             mw_ui_progress(T(STR_SIGNING), 1000, TX(XSTR_SAVING));
@@ -1898,7 +1929,7 @@ static void show_signed_txs(void) {
     }
     qsort(g, ng, sizeof(txl_group_t), txl_cmp);
 
-    const size_t cap = (size_t)ng * 72u + (size_t)nt * 96u + 512u;
+    const size_t cap = (size_t)ng * 72u + (size_t)nt * 128u + 512u;
     char* text = (char*)big_alloc(cap);
     if (!text) { big_free(g, (size_t)ne * sizeof(txl_group_t)); ui_err(MW_ERR_MEMORY); return; }
     size_t used = 0;
@@ -1928,6 +1959,12 @@ static void show_signed_txs(void) {
             mw_format_amount(t.sent, amt, sizeof(amt));
             TXL_ADD(TX(XSTR_BAL_TX_LINE), (unsigned)t.seq, amt, t.addr, fee);
         }
+        switch (mw_ki_cache_tx_state(t.seq)) {             // 0.3.6
+        case MW_KI_TXS_PENDING:   TXL_ADD("%s", TX(XSTR_TXS_PENDING)); break;
+        case MW_KI_TXS_CONFIRMED: TXL_ADD("%s", TX(XSTR_TXS_CONFIRMED)); break;
+        case MW_KI_TXS_UNSENT:    TXL_ADD("%s", TX(XSTR_TXS_UNSENT)); break;
+        default: break;
+        }
         TXL_ADD("\n");
     }
     if (else_n) {
@@ -1946,6 +1983,92 @@ static void show_signed_txs(void) {
     big_free(text, cap);
 }
 
+// 0.3.6: the transactions signed here that no outputs export has settled
+// yet. One that was not sent can be taken back by hand (its inputs return
+// to the balance); a later export that shows it in the chain still wins.
+static void pending_txs(void) {
+    int focus = 0;
+    for (;;) {
+        if (lock_requested()) return;
+        enum { PEND_MAX = 24 };
+        static char labels[PEND_MAX + 1][64];
+        const char* items[PEND_MAX + 1];
+        const char* icons[PEND_MAX + 1];
+        uint32_t seqs[PEND_MAX + 1];
+        int n = 0;
+        const uint32_t nt = mw_ki_cache_tx_count();
+        for (uint32_t k = nt; k-- > 0 && n < PEND_MAX; ) {          // newest first
+            mw_ki_tx_t t;
+            if (!mw_ki_cache_tx_get(k, &t)) continue;
+            if (mw_ki_cache_tx_state(t.seq) != MW_KI_TXS_PENDING) continue;
+            char amt[32];
+            if (t.own_only) {
+                snprintf(labels[n], sizeof(labels[n]), TX(XSTR_PEND_ITEM_OWN), (unsigned)t.seq);
+            } else {
+                mw_format_amount(t.sent, amt, sizeof(amt));
+                snprintf(labels[n], sizeof(labels[n]), TX(XSTR_PEND_ITEM), (unsigned)t.seq, amt,
+                         t.addr);
+            }
+            seqs[n] = t.seq;
+            items[n] = labels[n];
+            icons[n] = LV_SYMBOL_UPLOAD;
+            n++;
+        }
+        // Inputs pending without a number (signed by older firmware).
+        uint32_t old_n = 0;
+        uint64_t old_amt = 0;
+        for (uint32_t i = 0, ne = mw_ki_cache_count(); i < ne; i++) {
+            mw_ki_entry_t e;
+            if (!mw_ki_cache_get(i, &e)) continue;
+            if ((e.bal & MW_KI_B_PENDING) && e.spend_seq == 0) {
+                old_n++;
+                if (e.bal & MW_KI_B_AMOUNT) old_amt += e.amount;
+            }
+            mw_memzero(&e, sizeof e);
+        }
+        if (old_n) {
+            snprintf(labels[n], sizeof(labels[n]), TX(XSTR_PEND_OLD), (unsigned)old_n);
+            seqs[n] = 0;
+            items[n] = labels[n];
+            icons[n] = LV_SYMBOL_UPLOAD;
+            n++;
+        }
+        if (!n) { mw_ui_message_timeout(TX(XSTR_BAL_PEND_MENU), TX(XSTR_PEND_NONE), MW_SUCCESS_MS); return; }
+        mw_menu_t m;
+        memset(&m, 0, sizeof(m));
+        m.title = TX(XSTR_BAL_PEND_MENU);
+        m.items = items;
+        m.icons = icons;
+        m.count = n;
+        m.initial = focus < n ? focus : n - 1;
+        m.back = true;
+        m.with_status = true;
+        const int r = mw_ui_menu_run(&m);
+        if (r < 0) return;
+        focus = r;
+        const uint32_t seq = seqs[r];
+        // What goes back: the pending inputs of this transaction.
+        uint64_t back = 0;
+        for (uint32_t i = 0, ne = mw_ki_cache_count(); i < ne; i++) {
+            mw_ki_entry_t e;
+            if (!mw_ki_cache_get(i, &e)) continue;
+            if ((e.bal & MW_KI_B_PENDING) && (e.bal & MW_KI_B_AMOUNT) && e.spend_seq == seq)
+                back += e.amount;
+            mw_memzero(&e, sizeof e);
+        }
+        char amt[32], ask[320];
+        mw_format_amount(seq ? back : old_amt, amt, sizeof(amt));
+        if (seq) snprintf(ask, sizeof(ask), TX(XSTR_PEND_ASK), (unsigned)seq, amt);
+        else     snprintf(ask, sizeof(ask), TX(XSTR_PEND_ASK_OLD), amt);
+        if (!mw_ui_confirm(TX(XSTR_BAL_PEND_MENU), ask, TX(XSTR_PEND_YES), T(STR_CANCEL))) continue;
+        const uint32_t k = mw_ki_cache_pending_cancel(seq);
+        MW_LOGI("bal", "transaction #%u marked not sent by the user: %u input(s) back",
+                (unsigned)seq, (unsigned)k);
+        const mw_err_t e = mw_ki_cache_save();
+        if (e != MW_OK) ui_err(e);
+    }
+}
+
 // The balance of the open wallet: the estimate from the key image cache, or
 // what the user typed in; the list of signed transactions.
 static void wallet_balance(uint32_t id) {
@@ -1954,14 +2077,15 @@ static void wallet_balance(uint32_t id) {
         if (lock_requested()) return;
         const wallet_entry_t* w = mw_wallet_get(id);
         const bool manual = w && (w->bal_flags & MW_BAL_MANUAL);
-        char amt[32], sub[256];
-        uint64_t total = 0;
-        uint32_t outs = 0, unknown = 0;
+        char amt[32], sub[320];
+        uint64_t total = 0, pend = 0;
+        uint32_t outs = 0, unknown = 0, pend_n = 0;
         (void)mw_ki_cache_balance(&total, &outs, &unknown);
+        mw_ki_cache_pending(&pend, &pend_n);
         if (manual) {
             mw_format_amount(w->bal_manual, amt, sizeof(amt));
             snprintf(sub, sizeof(sub), TX(XSTR_BAL_MANUAL), amt);
-        } else if (!outs && !unknown) {
+        } else if (!outs && !unknown && !pend_n) {
             snprintf(sub, sizeof(sub), "%s", TX(XSTR_BAL_NONE));
         } else {
             mw_format_amount(total, amt, sizeof(amt));
@@ -1971,25 +2095,50 @@ static void wallet_balance(uint32_t id) {
                 snprintf(sub + u, sizeof(sub) - u, "\n");
                 snprintf(sub + u + 1, sizeof(sub) - u - 1, TX(XSTR_BAL_UNKNOWN), (unsigned)unknown);
             }
+            if (pend_n) {                                      // 0.3.6
+                const size_t u = strlen(sub);
+                mw_format_amount(pend, amt, sizeof(amt));
+                snprintf(sub + u, sizeof(sub) - u, "\n");
+                snprintf(sub + u + 1, sizeof(sub) - u - 1, TX(XSTR_BAL_PENDING), amt,
+                         (unsigned)pend_n);
+            }
         }
-        const char* items[3] = { TX(XSTR_BAL_TXS), TX(XSTR_BAL_SET), TX(XSTR_BAL_CLEAR) };
-        const char* icons[3] = { LV_SYMBOL_LIST, LV_SYMBOL_EDIT, LV_SYMBOL_REFRESH };
+        enum { BA_TXS, BA_PEND, BA_SET, BA_CLEAR, BA_N };
+        const char* all_items[BA_N] = { TX(XSTR_BAL_TXS), TX(XSTR_BAL_PEND_MENU),
+                                        TX(XSTR_BAL_SET), TX(XSTR_BAL_CLEAR) };
+        const char* all_icons[BA_N] = { LV_SYMBOL_LIST, LV_SYMBOL_UPLOAD, LV_SYMBOL_EDIT,
+                                        LV_SYMBOL_REFRESH };
+        const char* items[BA_N];
+        const char* icons[BA_N];
+        int acts[BA_N];
+        int cnt = 0;
+        for (int a = 0; a < BA_N; a++) {
+            if (a == BA_PEND && !pend_n) continue;
+            if (a == BA_CLEAR && !manual) continue;
+            items[cnt] = all_items[a];
+            icons[cnt] = all_icons[a];
+            acts[cnt] = a;
+            cnt++;
+        }
         mw_menu_t m;
         memset(&m, 0, sizeof(m));
         m.title = TX(XSTR_WL_BALANCE);
         m.subtitle = sub;
         m.items = items;
         m.icons = icons;
-        m.count = manual ? 3 : 2;
-        m.initial = focus;
+        m.count = cnt;
+        m.initial = focus < cnt ? focus : cnt - 1;
         m.back = true;
         m.with_status = true;
         const int r = mw_ui_menu_run(&m);
         if (r < 0) return;
         focus = r;
-        if (r == 0) {
+        const int act = acts[r];
+        if (act == BA_TXS) {
             show_signed_txs();
-        } else if (r == 1) {
+        } else if (act == BA_PEND) {
+            pending_txs();
+        } else if (act == BA_SET) {
             char in[32];
             memset(in, 0, sizeof(in));
             if (ask_text(TX(XSTR_BAL_ENTER), in, sizeof(in)) != MW_OK || !in[0]) continue;

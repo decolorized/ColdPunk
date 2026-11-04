@@ -452,7 +452,10 @@ MW_TEST(test_unsigned_to_signed)
     for (uint32_t i = 0; i < 2; ++i) {
         const mw_ki_entry_t* e = mw_ki_cache_find_image(&tx.ki[i]);
         CHECK(e != NULL && (e->flags & MW_KI_F_SPENT));
-        CHECK(e != NULL && (e->bal & MW_KI_B_SPENT));
+        // 0.3.6: pending until an outputs export settles it, with the
+        // transaction's key and the newest ring member.
+        CHECK(e != NULL && (e->bal & MW_KI_B_PENDING) && !(e->bal & MW_KI_B_SPENT));
+        CHECK(e != NULL && !mw_ct_is_zero(e->spend_tx.b, 32) && e->spend_gidx > 0);
     }
     // v0.3: the estimate drops the inputs and adds the change.
     {
@@ -1116,15 +1119,16 @@ MW_TEST(test_balance_and_tx_list)
     e.amount = 1234;
     e.bal = MW_KI_B_AMOUNT;
     CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
-    // An input of a signed transaction: only the spent mark is added.
+    // An input of a signed transaction: only the pending mark is added.
     e.amount = 0;
-    e.bal = MW_KI_B_SPENT;
+    e.bal = MW_KI_B_PENDING;
     CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
     CHECK_EQ_INT(mw_ki_cache_find_pub(&e.out_pub)->amount, 1234);
-    // The next export says it is not spent (the transaction never went out).
+    // 0.3.6: an export outside a sync that says "not spent" settles nothing.
     e.amount = 1234;
     e.bal = MW_KI_B_AMOUNT;
     CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK(mw_ki_cache_find_pub(&e.out_pub)->bal & MW_KI_B_PENDING);
     CHECK_EQ_INT(mw_ki_cache_balance(&total, &outs, &unknown), MW_OK);
     const uint64_t with = total;
     for (int i = 0; i < MW_KI_TX_MAX + 3; ++i) {
@@ -1172,6 +1176,181 @@ MW_TEST(test_balance_and_tx_list)
     CHECK_EQ_INT(mw_ki_cache_find_pub(&e.out_pub)->amount, 0);
     CHECK_EQ_INT(mw_wallet_store_set_opts(0), MW_OK);
     CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+}
+
+// 0.3.6: one address, two PCs. A PC that has not seen a transaction signed
+// here must not put its inputs back into the balance; one that has scanned
+// past it settles it either way, and the chain always wins.
+static mw_ki_entry_t pc_out(uint8_t tag, uint64_t amount, uint64_t gidx, uint8_t txtag,
+                            uint8_t bal)
+{
+    mw_ki_entry_t e;
+    memset(&e, 0, sizeof e);
+    e.out_pub.b[0] = tag; e.out_pub.b[1] = 0x5C;
+    e.image.b[0] = tag;   e.image.b[1] = 0x5D;
+    e.flags = MW_KI_F_EXPORTED;
+    e.amount = amount;
+    e.gidx = gidx;
+    e.tx_pub.b[0] = txtag; e.tx_pub.b[1] = 0x5E;
+    e.bal = bal;
+    return e;
+}
+
+static mw_ki_entry_t spend_of(uint8_t tag, uint8_t rtag, uint64_t ring_top, uint32_t seq)
+{
+    mw_ki_entry_t e;
+    memset(&e, 0, sizeof e);
+    e.out_pub.b[0] = tag; e.out_pub.b[1] = 0x5C;
+    e.image.b[0] = tag;   e.image.b[1] = 0x5D;
+    e.flags = MW_KI_F_SPENT;
+    e.bal = MW_KI_B_PENDING;
+    e.spend_tx.b[0] = rtag; e.spend_tx.b[1] = 0x5E;
+    e.spend_gidx = ring_top;
+    e.spend_seq = seq;
+    return e;
+}
+
+static uint64_t bal_now(void)
+{
+    uint64_t t = 0;
+    uint32_t o = 0, u = 0;
+    CHECK_EQ_INT(mw_ki_cache_balance(&t, &o, &u), MW_OK);
+    return t;
+}
+
+MW_TEST(test_two_pcs_pending)
+{
+    const uint8_t K = MW_KI_B_AMOUNT | MW_KI_B_IN_KNOWN;
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_erase_wallet(g_id), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_next_seq(), 1);
+    mw_ki_entry_t e;
+    mw_ki_sync_t st;
+
+    // Both PCs know three outputs.
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xA1, 5000, 1000, 0x01, K); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA2, 700, 1100, 0x02, K);  CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA3, 300, 1200, 0x03, K);  CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT(st.pending, 0);
+    CHECK_EQ_INT((long long)bal_now(), 6000);
+
+    // Transaction #1 (from PC A): spends A1, ring top 2000, change 1000.
+    e = spend_of(0xA1, 0xF1, 2000, 1); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xC1, 1000, 0, 0xF1, MW_KI_B_AMOUNT);
+    e.flags = MW_KI_F_CHANGE;
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_tx_t t;
+    memset(&t, 0, sizeof t);
+    t.sent = 3900; t.fee = 100; t.n_recipients = 1;
+    CHECK_EQ_INT(mw_ki_cache_tx_add(&t), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_next_seq(), 2);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_PENDING);
+    uint64_t pend = 0;
+    uint32_t pend_n = 0;
+    mw_ki_cache_pending(&pend, &pend_n);
+    CHECK_EQ_INT((long long)pend, 5000);
+    CHECK_EQ_INT(pend_n, 1);
+    CHECK_EQ_INT((long long)bal_now(), 700 + 300 + 1000);
+
+    // PC B lags behind: knows the key image, says "not spent", has nothing
+    // newer than the transaction. The inputs stay out of the balance (the
+    // bug: they came back).
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xA1, 5000, 1000, 0x01, K); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA2, 700, 1100, 0x02, K);  CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA4, 50, 2500, 0x04, MW_KI_B_AMOUNT); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT(st.confirmed, 0);
+    CHECK_EQ_INT(st.unsent, 0);
+    CHECK_EQ_INT(st.pending, 1);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_PENDING);
+    CHECK_EQ_INT((long long)bal_now(), 700 + 300 + 1000 + 50);
+
+    // A fresh PC that does NOT know the key image: still nothing settled.
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xA1, 5000, 1000, 0x01, MW_KI_B_AMOUNT); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA5, 10, 9000, 0x05, MW_KI_B_AMOUNT);   CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT(st.pending, 1);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_PENDING);
+
+    // A fresh PC that knows it and has not seen it spent: not sent.
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xA1, 5000, 1000, 0x01, K); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA6, 20, 2000 + MW_KI_FRESH_OUTPUTS, 0x06, K);
+    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT(st.unsent, 1);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_UNSENT);
+    CHECK(!(mw_ki_cache_find_pub(&e.out_pub) == NULL));
+    e = pc_out(0xA1, 0, 0, 0, 0);
+    CHECK(!(mw_ki_cache_find_pub(&e.out_pub)->flags & MW_KI_F_SPENT));
+    const uint64_t b_unsent = bal_now();
+    CHECK_EQ_INT((long long)b_unsent, 5000 + 700 + 300 + 1000 + 50 + 10 + 20);
+
+    // ... but it went out later after all: PC A lists the change (key R).
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xC1, 1000, 9500, 0xF1, MW_KI_B_AMOUNT); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT(st.confirmed, 1);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_CONFIRMED);
+    CHECK_EQ_INT((long long)bal_now(), (long long)(b_unsent - 5000));
+    e = pc_out(0xA1, 0, 0, 0, 0);
+    CHECK(mw_ki_cache_find_pub(&e.out_pub)->flags & MW_KI_F_SPENT);
+
+    // Spent is sticky: a lagging fresh-looking PC cannot take it back.
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xA1, 5000, 1000, 0x01, K); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xA7, 1, 99999, 0x07, K);    CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_CONFIRMED);
+    CHECK_EQ_INT((long long)bal_now(), (long long)(b_unsent - 5000 + 1));
+
+    // Transaction #2 spends A2 and A3 with no change (a sweep). An export
+    // that says A2 is spent confirms A3 too.
+    e = spend_of(0xA2, 0xF2, 100000, 2); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = spend_of(0xA3, 0xF2, 100000, 2); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_add(&t), MW_OK);
+    mw_ki_cache_sync_begin();
+    e = pc_out(0xA2, 700, 1100, 0x02, K | MW_KI_B_SPENT); CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    mw_ki_cache_sync_end(&st);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(2), MW_KI_TXS_CONFIRMED);
+    e = pc_out(0xA3, 0, 0, 0, 0);
+    CHECK(mw_ki_cache_find_pub(&e.out_pub)->bal & MW_KI_B_SPENT);
+    mw_ki_cache_pending(&pend, &pend_n);
+    CHECK_EQ_INT(pend_n, 0);
+
+    // #3: cancelled by hand; #4: never delivered (the number is forgotten).
+    e = pc_out(0xB1, 400, 3000, 0x11, K);  CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = pc_out(0xB2, 600, 3100, 0x12, K);  CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    e = spend_of(0xB1, 0xF3, 100000, 3);   CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_add(&t), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_tx_next_seq(), 4);
+    e = spend_of(0xB2, 0xF4, 100000, 4);   CHECK_EQ_INT(mw_ki_cache_put(&e), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_sign_undo(4), 1);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(4), MW_KI_TXS_UNKNOWN);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(3), MW_KI_TXS_PENDING);
+
+    // Kept across a save.
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(1), MW_KI_TXS_CONFIRMED);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(3), MW_KI_TXS_PENDING);
+    e = pc_out(0xB1, 0, 0, 0, 0);
+    CHECK_EQ_INT(mw_ki_cache_find_pub(&e.out_pub)->spend_seq, 3);
+    CHECK_EQ_INT(mw_ki_cache_find_pub(&e.out_pub)->spend_gidx, 100000);
+    const uint64_t before = bal_now();
+    CHECK_EQ_INT(mw_ki_cache_pending_cancel(3), 1);
+    CHECK_EQ_INT((int)mw_ki_cache_tx_state(3), MW_KI_TXS_UNSENT);
+    CHECK_EQ_INT((long long)bal_now(), (long long)(before + 400));
+    CHECK_EQ_INT(mw_ki_cache_save(), MW_OK);
+    mw_ki_cache_close();
+    CHECK_EQ_INT(mw_ki_cache_erase_wallet(g_id), MW_OK);
+    CHECK_EQ_INT(mw_ki_cache_open(g_id, 0, &g_base), MW_OK);
 }
 
 mw_err_t mw_host_ki_write_v1_container(uint32_t id, uint8_t variant,
@@ -1504,6 +1683,7 @@ int main(void)
     RUN_TEST(test_balance_and_tx_list);
     RUN_TEST(test_tx_keys_and_snapshot);
     RUN_TEST(test_ki_all_saved);
+    RUN_TEST(test_two_pcs_pending);
     RUN_TEST(test_ki_container_v1_read);
     RUN_TEST(test_delete_wipes_cache);
     RUN_TEST(test_pp_record_migration);

@@ -955,3 +955,10 @@ Written and reviewed, **never compiled against the real LVGL and never run**:
 - Scan screen: title "QR from Feather", camera preview, status "Received: N%" (distinct fountain fragments), Cancel. The result is classified by content: outputs → the usual key image confirmation; unsigned transaction → the usual review and signing; anything else → "Not an outputs export or an unsigned transaction (QR: <type>)".
 - Result screens: animated QR "Key images -> Feather" (`ur:xmr-keyimage`) or "Signed -> Feather" (`ur:xmr-txsigned`), ECC M, the fragment sized so a module is at least 3 px. Done → "N key images shown as QR." / the signed-transaction message; Cancel on the signed QR aborts, so the transaction is not recorded as sent.
 - `mw_screen_qr_scan_run(title, buf, cap, &len, type, type_cap)` returns the UR type as well.
+
+### 14.7 v0.3.6: pending transactions (several PCs)
+- Balance subtitle: an extra line "Awaiting confirmation: X XMR (N outputs)" when inputs of transactions signed here are not settled; they are not in the estimate above it.
+- Balance menu: **Unconfirmed** (only when there are pending ones): one item per pending transaction "#seq  amount -> addr..." (or "to this wallet"), plus "Signed earlier (N outputs)" for inputs taken back by an export before 0.3.6; choosing one asks "Transaction #N was not sent? Its inputs (X XMR) go back into the balance…" with **Not sent** / Cancel.
+- Transactions list: each signed transaction ends with "[awaiting confirmation]", "[in the chain]" or "[not sent]" (nothing for those signed before 0.3.6).
+- Key image export success: notes "Signed here: N inputs in the chain, M not sent (back in the balance)" and "N inputs still await confirmation…".
+- A signed set that could not be delivered (sink error, cancelled QR) puts its inputs straight back.

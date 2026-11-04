@@ -12,8 +12,11 @@
 //     kind 0    key images; entry := out_pub(32) || image(32) || major(u32) ||
 //               minor(u32) || flags(1) || amount(u64) || bal(1) ||
 //               tx_pub(32) || global index(u64) || transfer index + 1(u32) ||
-//               key image signature(64)
-//               (version 3, 0.3.5 before "all saved key images": without
+//               key image signature(64) || spending tx R(32) ||
+//               newest ring member's global index(u64) || tx number(u32)
+//               (version 4, 0.3.5..0.3.6 before the pending state: without
+//               the last three;
+//               version 3, 0.3.5 before "all saved key images": without
 //               the transfer index and the signature;
 //               version 2, 0.3..0.3.4: without tx_pub and the index;
 //               version 1, before 0.3: without amount and bal either)
@@ -61,7 +64,7 @@
 #endif
 
 #define KS_MAGIC      "MWKS"
-#define KS_VERSION    4
+#define KS_VERSION    5
 #define KS_LABEL      "mw.kic.v1"
 #define KS_HDR        32
 #define KS_SEC_HDR    (4 + 1 + 3 + 32 + 4)
@@ -69,6 +72,7 @@
 #define KI_ENTRY2     (KI_ENTRY + 8 + 1)
 #define KI_ENTRY3     (KI_ENTRY2 + 32 + 8)
 #define KI_ENTRY4     (KI_ENTRY3 + 4 + 64)
+#define KI_ENTRY5     (KI_ENTRY4 + 32 + 8 + 4)
 #define TX_ENTRY      48
 #define SEC_KI        0
 #define SEC_TX        1
@@ -95,6 +99,16 @@ static struct {
     mw_ki_entry_t* e;
     mw_ki_tx_t*    tx;           // MW_KI_TX_MAX when allocated
     uint32_t       ntx;
+    uint8_t        loaded_version; // container version the entries came from
+    // 0.3.6, between sync_begin() and sync_end(): the transaction keys of
+    // the pending (or "not sent") inputs and whether the export confirmed
+    // them, and the newest global index the export listed.
+    bool           sync;
+    mw_pubkey_t*   sync_tx;
+    uint8_t*       sync_ok;
+    uint32_t       sync_ntx;
+    uint32_t       sync_cap;
+    uint64_t       sync_gidx;
 } g;
 
 static bool balance_on(void)
@@ -174,13 +188,13 @@ static void put_entry2(uint8_t* p, const mw_ki_entry_t* e)
 {
     put_entry(p, e);
     put_u64(p + 73, e->amount);
-    p[81] = e->bal;
+    p[81] = (uint8_t)(e->bal & MW_KI_B_STORED);   // never the RAM-only bits
 }
 static void get_entry2(const uint8_t* p, mw_ki_entry_t* e)
 {
     get_entry(p, e);
     e->amount = get_u64(p + 73);
-    e->bal = p[81];
+    e->bal = (uint8_t)(p[81] & MW_KI_B_STORED);
 }
 
 // Version 3 entries (0.3.5).
@@ -208,12 +222,28 @@ static void get_entry4(const uint8_t* p, mw_ki_entry_t* e)
     e->tidx1 = get_u32(p + 122);
     memcpy(e->sig, p + 126, 64);
 }
+// Version 5 entries (0.3.6, the pending state).
+static void put_entry5(uint8_t* p, const mw_ki_entry_t* e)
+{
+    put_entry4(p, e);
+    memcpy(p + 190, e->spend_tx.b, 32);
+    put_u64(p + 222, e->spend_gidx);
+    put_u32(p + 230, e->spend_seq);
+}
+static void get_entry5(const uint8_t* p, mw_ki_entry_t* e)
+{
+    get_entry4(p, e);
+    memcpy(e->spend_tx.b, p + 190, 32);
+    e->spend_gidx = get_u64(p + 222);
+    e->spend_seq = get_u32(p + 230);
+}
 static void get_entry_v(uint8_t version, const uint8_t* p, mw_ki_entry_t* e)
 {
     if (version == 1)      get_entry(p, e);
     else if (version == 2) get_entry2(p, e);
     else if (version == 3) get_entry3(p, e);
-    else                   get_entry4(p, e);
+    else if (version == 4) get_entry4(p, e);
+    else                   get_entry5(p, e);
 }
 
 static void put_tx(uint8_t* p, const mw_ki_tx_t* t)
@@ -344,7 +374,8 @@ static mw_err_t store_read(const char* name, store_t* s)
 static size_t entry_len(uint8_t version, uint8_t kind)
 {
     if (kind == SEC_KI) return version == 1 ? KI_ENTRY : version == 2 ? KI_ENTRY2 :
-                                version == 3 ? KI_ENTRY3 : KI_ENTRY4;
+                                version == 3 ? KI_ENTRY3 : version == 4 ? KI_ENTRY4 :
+                                KI_ENTRY5;
     if (kind == SEC_TX && version >= 2) return TX_ENTRY;
     return 0;
 }
@@ -388,7 +419,7 @@ typedef struct {
     bool     strip;          // drop amounts and transaction lists (estimate off)
 } copy_ctx_t;
 
-// Copies a section into a version-3 container (older ones are widened; with
+// Copies a section into a current-version container (older ones are widened; with
 // `strip` the amounts go and transaction lists are left out).
 static bool copy_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t kind,
                      uint32_t count, size_t len, uint8_t version, void* ctx)
@@ -399,7 +430,7 @@ static bool copy_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t k
     if (kind == SEC_TX && c->strip) return true;
     if (kind == SEC_KI && (version != KS_VERSION || c->strip)) {
         const size_t el = entry_len(version, SEC_KI);
-        const size_t out_len = KS_SEC_HDR + (size_t)count * KI_ENTRY4;
+        const size_t out_len = KS_SEC_HDR + (size_t)count * KI_ENTRY5;
         if (!c->measure) {
             uint8_t* o = c->out + c->off;
             memcpy(o, sec, KS_SEC_HDR);
@@ -408,8 +439,11 @@ static bool copy_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t k
             for (uint32_t i = 0; i < count; i++) {
                 mw_ki_entry_t e;
                 get_entry_v(version, sec + KS_SEC_HDR + i * el, &e);
-                if (c->strip) { e.amount = 0; e.bal = 0; }
-                put_entry4(o + KS_SEC_HDR + i * KI_ENTRY4, &e);
+                if (c->strip) {
+                    e.amount = 0; e.bal = 0;
+                    memset(e.spend_tx.b, 0, 32); e.spend_gidx = 0; e.spend_seq = 0;
+                }
+                put_entry5(o + KS_SEC_HDR + i * KI_ENTRY5, &e);
                 mw_memzero(&e, sizeof e);
             }
         }
@@ -435,7 +469,7 @@ static mw_err_t store_write_x(const char* name, const store_t* old, skip_t skip,
         MW_LOGE("kicache", "key image cache container damaged: partly dropped");
     }
     size_t payload = m.off - KS_HDR;
-    if (add && g.count) payload += KS_SEC_HDR + (size_t)g.count * KI_ENTRY4;
+    if (add && g.count) payload += KS_SEC_HDR + (size_t)g.count * KI_ENTRY5;
     if (add && g.ntx) payload += KS_SEC_HDR + (size_t)g.ntx * TX_ENTRY;
     const size_t size = file_size_for(payload);
     const size_t pl = size - KS_SEAL_HDR;
@@ -469,8 +503,8 @@ static mw_err_t store_write_x(const char* name, const store_t* old, skip_t skip,
         memcpy(p + 8, g.account, 32);
         put_u32(p + 40, g.count);
         p += KS_SEC_HDR;
-        for (uint32_t i = 0; i < g.count; i++, p += KI_ENTRY4) put_entry4(p, &g.e[i]);
-        c.off += KS_SEC_HDR + (size_t)g.count * KI_ENTRY4;
+        for (uint32_t i = 0; i < g.count; i++, p += KI_ENTRY5) put_entry5(p, &g.e[i]);
+        c.off += KS_SEC_HDR + (size_t)g.count * KI_ENTRY5;
         c.sections++;
     }
     if (add && g.ntx) {
@@ -634,7 +668,35 @@ static bool load_sec(const uint8_t* sec, uint32_t id, uint8_t variant, uint8_t k
     const size_t el = entry_len(version, SEC_KI);
     for (uint32_t i = 0; i < count; i++, p += el) get_entry_v(version, p, &g.e[i]);
     g.count = count;
+    g.loaded_version = version;
     return true;
+}
+
+// 0.3.6: before the pending state an outputs export that called an input of
+// a transaction signed here "not spent" took the spent mark away (a PC that
+// had not seen the transaction yet put spent money back into the balance).
+// Such inputs become pending; with no ring data their proof of a fresh PC
+// is an output newer than every output this cache knows.
+static void migrate_pending(void)
+{
+    uint64_t top = 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g.count; i++)
+        if (g.e[i].gidx > top) top = g.e[i].gidx;
+    for (uint32_t i = 0; i < g.count; i++) {
+        mw_ki_entry_t* x = &g.e[i];
+        if ((x->flags & MW_KI_F_SPENT) && (x->bal & MW_KI_B_AMOUNT) &&
+            !(x->bal & (MW_KI_B_SPENT | MW_KI_B_PENDING))) {
+            x->bal |= MW_KI_B_PENDING;
+            x->spend_gidx = top;
+            n++;
+        }
+    }
+    if (n) {
+        g.dirty = true;
+        MW_LOGI("kicache", "%u input(s) of transactions signed here were taken back by an "
+                           "outputs export: pending again", (unsigned)n);
+    }
 }
 
 mw_err_t mw_ki_cache_open(uint32_t wallet_id, uint8_t variant,
@@ -667,11 +729,23 @@ mw_err_t mw_ki_cache_open(uint32_t wallet_id, uint8_t variant,
         }
     }
     store_free(&s);
+    if (g.count && g.loaded_version && g.loaded_version < 5) migrate_pending();
     return MW_OK;
+}
+
+static void sync_free(void)
+{
+    if (g.sync_tx) ki_free(g.sync_tx, (size_t)g.sync_cap * sizeof(mw_pubkey_t));
+    if (g.sync_ok) ki_free(g.sync_ok, g.sync_cap);
+    g.sync_tx = NULL;
+    g.sync_ok = NULL;
+    g.sync_ntx = g.sync_cap = 0;
+    g.sync = false;
 }
 
 void mw_ki_cache_close(void)
 {
+    sync_free();
     if (g.e) ki_free(g.e, (size_t)g.cap * sizeof(mw_ki_entry_t));
     if (g.tx) ki_free(g.tx, sizeof(mw_ki_tx_t) * MW_KI_TX_MAX);
     mw_memzero(&g, sizeof(g));
@@ -772,12 +846,42 @@ static void tidx_release(uint32_t tidx1, uint32_t keep)
     }
 }
 
+// RAM only, during a sync: an export that knows the key image of this
+// pending input says it is not spent.
+#define KI_B_SAID_UNSPENT 0x20
+
+static void sync_confirm_tx(const mw_pubkey_t* r)
+{
+    if (!g.sync || mw_ct_is_zero(r->b, 32)) return;
+    for (uint32_t k = 0; k < g.sync_ntx; k++)
+        if (memcmp(g.sync_tx[k].b, r->b, 32) == 0) { g.sync_ok[k] = 1; return; }
+}
+
+static bool sync_tx_confirmed(const mw_pubkey_t* r)
+{
+    if (!g.sync || mw_ct_is_zero(r->b, 32)) return false;
+    for (uint32_t k = 0; k < g.sync_ntx; k++)
+        if (memcmp(g.sync_tx[k].b, r->b, 32) == 0) return g.sync_ok[k] != 0;
+    return false;
+}
+
 mw_err_t mw_ki_cache_put(const mw_ki_entry_t* in)
 {
     if (!g.open) return MW_ERR_NOT_SUPPORTED;
     if (!in) return MW_ERR_INVALID_ARG;
     mw_ki_entry_t e = *in;
-    if (!balance_on()) { e.amount = 0; e.bal = 0; }
+    const bool in_known = (e.bal & MW_KI_B_IN_KNOWN) != 0;
+    e.bal &= MW_KI_B_STORED;
+    if (!balance_on()) {
+        e.amount = 0; e.bal = 0;
+        memset(e.spend_tx.b, 0, 32); e.spend_gidx = 0; e.spend_seq = 0;
+    }
+    if (g.sync) {
+        // What an outputs export shows: how far its PC has scanned, and
+        // the outputs of transactions signed here (their key R).
+        if (e.gidx > g.sync_gidx) g.sync_gidx = e.gidx;
+        sync_confirm_tx(&e.tx_pub);
+    }
     for (uint32_t i = 0; i < g.count; i++) {
         mw_ki_entry_t* x = &g.e[i];
         if (memcmp(x->out_pub.b, e.out_pub.b, 32) == 0) {
@@ -805,24 +909,182 @@ mw_err_t mw_ki_cache_put(const mw_ki_entry_t* in)
                 x->flags |= e.flags;
                 g.dirty = true;
             }
+            // 0.3.6: "spent" is sticky - whoever saw the output spent was
+            // right; "not spent" only means that PC has not seen it yet.
+            uint8_t nb = x->bal;
             if (e.bal & MW_KI_B_AMOUNT) {
-                if (x->amount != e.amount || x->bal != e.bal) {
-                    x->amount = e.amount;
-                    x->bal = e.bal;
+                if (x->amount != e.amount) { x->amount = e.amount; g.dirty = true; }
+                nb = (uint8_t)((nb & ~MW_KI_B_STALE) | MW_KI_B_AMOUNT);
+            }
+            if (e.bal & MW_KI_B_SPENT) {
+                if ((nb & (MW_KI_B_PENDING | MW_KI_B_UNSENT)) &&
+                    !mw_ct_is_zero(x->spend_tx.b, 32)) {
+                    // Spent in the chain: the transaction signed here went
+                    // out, so all of its inputs are spent.
+                    sync_confirm_tx(&x->spend_tx);
+                    x->flags |= MW_KI_F_SPENT;
+                }
+                nb = (uint8_t)((nb | MW_KI_B_SPENT) & ~(MW_KI_B_PENDING | MW_KI_B_UNSENT));
+            } else if ((e.bal & MW_KI_B_PENDING) && !(nb & MW_KI_B_SPENT)) {
+                // An input of a transaction signed here.
+                nb = (uint8_t)((nb | MW_KI_B_PENDING) & ~MW_KI_B_UNSENT);
+                if (memcmp(x->spend_tx.b, e.spend_tx.b, 32) != 0 ||
+                    x->spend_gidx != e.spend_gidx || x->spend_seq != e.spend_seq) {
+                    x->spend_tx = e.spend_tx;
+                    x->spend_gidx = e.spend_gidx;
+                    x->spend_seq = e.spend_seq;
                     g.dirty = true;
                 }
-            } else if ((x->bal | (e.bal & MW_KI_B_SPENT)) != x->bal) {
-                x->bal |= (uint8_t)(e.bal & MW_KI_B_SPENT);
-                g.dirty = true;
+            } else if (g.sync && in_known && (e.bal & MW_KI_B_AMOUNT) &&
+                       (nb & MW_KI_B_PENDING)) {
+                nb |= KI_B_SAID_UNSPENT;                 // RAM only, read by sync_end()
             }
+            if ((nb & MW_KI_B_STORED) != (x->bal & MW_KI_B_STORED)) g.dirty = true;
+            x->bal = nb;
             return MW_OK;
         }
     }
     if (g.count == 0xFFFFFFFFu || !grow(g.count + 1)) return MW_ERR_MEMORY;
     if (e.tidx1) tidx_release(e.tidx1, g.count);
+    if (e.bal & MW_KI_B_SPENT) e.bal &= (uint8_t)~(MW_KI_B_PENDING | MW_KI_B_UNSENT);
     g.e[g.count++] = e;
     g.dirty = true;
     return MW_OK;
+}
+
+void mw_ki_cache_sync_begin(void)
+{
+    sync_free();
+    if (!g.open) return;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < g.count; i++)
+        if ((g.e[i].bal & (MW_KI_B_PENDING | MW_KI_B_UNSENT)) &&
+            !mw_ct_is_zero(g.e[i].spend_tx.b, 32)) n++;
+    if (n > 512) n = 512;                // more distinct ones: no match by R for the rest
+    if (n) {
+        g.sync_tx = (mw_pubkey_t*)ki_alloc((size_t)n * sizeof(mw_pubkey_t));
+        g.sync_ok = (uint8_t*)ki_alloc(n);
+        if (!g.sync_tx || !g.sync_ok) {
+            sync_free();
+            n = 0;
+        } else {
+            g.sync_cap = n;
+            memset(g.sync_ok, 0, n);
+            for (uint32_t i = 0; i < g.count && g.sync_ntx < n; i++) {
+                const mw_ki_entry_t* x = &g.e[i];
+                if (!(x->bal & (MW_KI_B_PENDING | MW_KI_B_UNSENT)) ||
+                    mw_ct_is_zero(x->spend_tx.b, 32)) continue;
+                bool dup = false;
+                for (uint32_t k = 0; k < g.sync_ntx && !dup; k++)
+                    dup = memcmp(g.sync_tx[k].b, x->spend_tx.b, 32) == 0;
+                if (!dup) g.sync_tx[g.sync_ntx++] = x->spend_tx;
+            }
+        }
+    }
+    g.sync = true;
+    g.sync_gidx = 0;
+}
+
+void mw_ki_cache_sync_end(mw_ki_sync_t* out)
+{
+    mw_ki_sync_t r = { 0, 0, 0 };
+    if (g.open && g.sync) {
+        for (uint32_t i = 0; i < g.count; i++) {
+            mw_ki_entry_t* x = &g.e[i];
+            const uint8_t was = x->bal;
+            if (was & (MW_KI_B_PENDING | MW_KI_B_UNSENT)) {
+                if (sync_tx_confirmed(&x->spend_tx)) {
+                    x->bal = (uint8_t)((was | MW_KI_B_SPENT) &
+                                       ~(MW_KI_B_PENDING | MW_KI_B_UNSENT));
+                    x->flags |= MW_KI_F_SPENT;
+                    r.confirmed++;
+                } else if ((was & MW_KI_B_PENDING) && (was & KI_B_SAID_UNSPENT) &&
+                           g.sync_gidx > x->spend_gidx &&
+                           g.sync_gidx - x->spend_gidx >= MW_KI_FRESH_OUTPUTS) {
+                    // A PC that knows the key image and has scanned past the
+                    // signing has not seen it spent: it was not sent.
+                    x->bal = (uint8_t)((was & ~MW_KI_B_PENDING) | MW_KI_B_UNSENT);
+                    x->flags &= (uint8_t)~MW_KI_F_SPENT;
+                    r.unsent++;
+                } else if (was & MW_KI_B_PENDING) {
+                    r.pending++;
+                }
+            }
+            x->bal &= (uint8_t)~KI_B_SAID_UNSPENT;
+            if ((x->bal & MW_KI_B_STORED) != (was & MW_KI_B_STORED)) g.dirty = true;
+        }
+        if (r.confirmed || r.unsent)
+            MW_LOGI("kicache", "pending inputs: %u confirmed spent, %u not sent, %u still "
+                               "pending (newest output in the export: %llu)",
+                    (unsigned)r.confirmed, (unsigned)r.unsent, (unsigned)r.pending,
+                    (unsigned long long)g.sync_gidx);
+    }
+    sync_free();
+    if (out) *out = r;
+}
+
+void mw_ki_cache_sync_abort(void)
+{
+    if (g.open)
+        for (uint32_t i = 0; i < g.count; i++) g.e[i].bal &= (uint8_t)~KI_B_SAID_UNSPENT;
+    sync_free();
+}
+
+mw_ki_txs_t mw_ki_cache_tx_state(uint32_t seq)
+{
+    bool spent = false, unsent = false;
+    if (!g.open || seq == 0) return MW_KI_TXS_UNKNOWN;
+    for (uint32_t i = 0; i < g.count; i++) {
+        const mw_ki_entry_t* x = &g.e[i];
+        if (x->spend_seq != seq) continue;
+        if (x->bal & MW_KI_B_PENDING) return MW_KI_TXS_PENDING;
+        if (x->bal & MW_KI_B_UNSENT) unsent = true;
+        else if (x->bal & MW_KI_B_SPENT) spent = true;
+    }
+    return spent ? MW_KI_TXS_CONFIRMED : unsent ? MW_KI_TXS_UNSENT : MW_KI_TXS_UNKNOWN;
+}
+
+void mw_ki_cache_pending(uint64_t* amount, uint32_t* outputs)
+{
+    uint64_t a = 0;
+    uint32_t n = 0;
+    if (g.open) {
+        for (uint32_t i = 0; i < g.count; i++) {
+            const mw_ki_entry_t* x = &g.e[i];
+            if (!(x->bal & MW_KI_B_PENDING)) continue;
+            if (x->bal & MW_KI_B_AMOUNT) a += x->amount;
+            n++;
+        }
+    }
+    if (amount) *amount = a;
+    if (outputs) *outputs = n;
+}
+
+static uint32_t pending_cancel(uint32_t seq, bool forget_seq)
+{
+    uint32_t n = 0;
+    if (!g.open) return 0;
+    for (uint32_t i = 0; i < g.count; i++) {
+        mw_ki_entry_t* x = &g.e[i];
+        if (!(x->bal & MW_KI_B_PENDING) || x->spend_seq != seq) continue;
+        x->bal = (uint8_t)((x->bal & ~MW_KI_B_PENDING) | MW_KI_B_UNSENT);
+        x->flags &= (uint8_t)~MW_KI_F_SPENT;
+        if (forget_seq) x->spend_seq = 0;
+        n++;
+    }
+    if (n) g.dirty = true;
+    return n;
+}
+
+uint32_t mw_ki_cache_pending_cancel(uint32_t seq) { return pending_cancel(seq, false); }
+
+// The signed result never left the device (the sink failed or was
+// cancelled): its number goes to the next transaction, so it is dropped too.
+uint32_t mw_ki_cache_sign_undo(uint32_t seq) { return seq ? pending_cancel(seq, true) : 0; }
+
+uint32_t mw_ki_cache_tx_next_seq(void)
+{
+    return (g.open && g.tx && g.ntx) ? g.tx[g.ntx - 1].seq + 1u : 1u;
 }
 
 uint32_t mw_ki_cache_run_before(uint32_t offset, uint32_t max, uint8_t* out,
@@ -867,10 +1129,11 @@ mw_err_t mw_ki_cache_balance(uint64_t* total, uint32_t* outputs, uint32_t* unkno
     for (uint32_t i = 0; i < g.count; i++) {
         const mw_ki_entry_t* x = &g.e[i];
         if (!(x->bal & MW_KI_B_AMOUNT)) {
-            if (!(x->flags & MW_KI_F_SPENT) && !(x->bal & (MW_KI_B_SPENT | MW_KI_B_STALE))) u++;
+            if (!(x->flags & MW_KI_F_SPENT) &&
+                !(x->bal & (MW_KI_B_SPENT | MW_KI_B_STALE | MW_KI_B_PENDING))) u++;
             continue;
         }
-        if (x->bal & MW_KI_B_SPENT) continue;
+        if (x->bal & (MW_KI_B_SPENT | MW_KI_B_PENDING)) continue;   // pending: shown apart
         t += x->amount;
         n++;
     }
@@ -886,7 +1149,7 @@ bool mw_ki_cache_get(uint32_t i, mw_ki_entry_t* out)
 {
     if (!g.open || !out || i >= g.count) return false;
     *out = g.e[i];
-    out->bal &= (uint8_t)~KI_B_UNSEEN;
+    out->bal &= MW_KI_B_STORED;
     return true;
 }
 
@@ -922,7 +1185,10 @@ mw_err_t mw_ki_cache_balance_forget_all(void)
     size_t len = 0;
     skip_t none = { 0, 0, false };
     if (g.open) {
-        for (uint32_t i = 0; i < g.count; i++) { g.e[i].amount = 0; g.e[i].bal = 0; }
+        for (uint32_t i = 0; i < g.count; i++) {
+            g.e[i].amount = 0; g.e[i].bal = 0;
+            memset(g.e[i].spend_tx.b, 0, 32); g.e[i].spend_gidx = 0; g.e[i].spend_seq = 0;
+        }
         if (g.tx) mw_memzero(g.tx, sizeof(mw_ki_tx_t) * MW_KI_TX_MAX);
         g.ntx = 0;
     }

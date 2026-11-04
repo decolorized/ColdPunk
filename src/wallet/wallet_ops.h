@@ -88,6 +88,10 @@ typedef struct {
     uint64_t offset;      // the outputs file's first transfer
     uint32_t start;       // the key image file's first transfer
     uint32_t saved;       // records taken from the cache (offset - start)
+    // 0.3.6: transactions signed here, settled by this export (inputs).
+    uint32_t confirmed;   // seen in the chain: spent for good
+    uint32_t unsent;      // not sent: back in the balance
+    uint32_t pending;     // not settled yet
 } mw_ki_saved_info_t;
 mw_err_t mw_ops_outputs_to_keyimages_x(const mw_account_keys_t* keys,
                                        const uint8_t* plain, size_t plain_len,
@@ -117,6 +121,10 @@ typedef struct {
     mw_signed_data_t  sd;
     mw_chacha_key     file_key;
     bool              has_file_key;
+    // 0.3.6: the number the first transaction of the set gets in the list of
+    // signed transactions (mw_ki_cache_tx_next_seq() before signing; 0 = not
+    // recorded). Its inputs carry it while they are pending.
+    uint32_t          first_seq;
 } mw_sign_session_t;
 
 // Decrypts in place, parses the set and checks every transaction against
